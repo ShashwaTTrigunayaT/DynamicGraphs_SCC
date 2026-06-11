@@ -7,7 +7,7 @@ GM_LIB = $(GM_DIR)/lib
 
 NVCCFLAGS = -O3 -I. -I$(GM_INC) -std=c++11 -arch=sm_70
 CXXFLAGS  = -O3 -I. -I$(GM_INC) -I$(CUDA_HOME)/include -std=c++11
-LFLAGS    = -L$(CUDA_HOME)/lib64 -lcudart -L$(GM_LIB) -lgmgraph
+LFLAGS    = -L$(CUDA_HOME)/lib64 -lcudart -L$(GM_LIB) -lgmgraph -lgomp
 
 TARGET = scc_cuda
 OBJS = scc_cuda_main.o scc_cuda_graph.o scc_cuda_trim1.o scc_cuda_trim2.o scc_cuda_trim2_new.o
