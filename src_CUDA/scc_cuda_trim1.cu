@@ -220,23 +220,24 @@ __global__ void trim_once_node_local_set_kernel(
 }
 
 // ======================================================================
+// Compact build helpers (forward-declared here, defined below
+// ======================================================================
+
+// Build compact set of nodes matching a specific color
+__global__ void build_compact_by_color_kernel(
+    const int* d_Color, int* d_targets, int* d_count,
+    int num_nodes, int target_color);
+
+__global__ void build_compact_from_all_kernel(
+    const int* d_Color, int* d_targets, int* d_count, int num_nodes);
+
+__global__ void build_compact_from_existing_kernel(
+    const int* d_Color,
+    const int* d_src_targets, int num_src,
+    int* d_dst_targets, int* d_count);
+
+// ======================================================================
 // do_global_trim1()
-//
-// OpenMP:
-//   int do_global_trim1(gm_graph& G) {
-//     int count = 0;
-//     #pragma omp parallel {
-//       int count_prv = 0;
-//       #pragma omp for nowait schedule(dynamic,512)
-//       for (node_t n = 0; n < G.num_nodes(); n++) {
-//         if (G_Color[n] == -2) continue;
-//         int curr_color = G_Color[n];
-//         trim_once_node(G, curr_color, count_prv, n);
-//       }
-//       __sync_fetch_and_add(&count, count_prv);
-//     }
-//     return count;
-//   }
 // ======================================================================
 int do_global_trim1(GPUState& st, const GPUGraph& g,
     int* d_count, int met_algo, int flag11,
@@ -266,8 +267,6 @@ int do_global_trim1(GPUState& st, const GPUGraph& g,
 
 // ======================================================================
 // do_global_trim1_compact()
-//
-// OpenMP: like do_global_trim1 but iterates over trim_targets[].
 // ======================================================================
 int do_global_trim1_compact(GPUState& st, const GPUGraph& g,
     int* d_count, int met_algo, int flag11,
