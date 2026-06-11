@@ -24,7 +24,7 @@ __device__ bool check_out_degree_is_one_device(
     const edge_t* d_begin, const node_t* d_node_idx,
     int* d_Color, node_t n, int curr_color, node_t* the_nbr)
 {
-    *the_nbr = NIL_NODE;
+    *the_nbr = CUDA_NIL_NODE;
     int cnt = 0;
 
     for (edge_t k_idx = d_begin[n]; k_idx < d_begin[n + 1]; k_idx++) {
@@ -63,7 +63,7 @@ __device__ bool check_in_degree_is_one_device(
     const edge_t* d_r_begin, const node_t* d_r_node_idx,
     int* d_Color, node_t n, int curr_color, node_t* the_nbr)
 {
-    *the_nbr = NIL_NODE;
+    *the_nbr = CUDA_NIL_NODE;
     int cnt = 0;
 
     for (edge_t k_idx = d_r_begin[n]; k_idx < d_r_begin[n + 1]; k_idx++) {

@@ -11,7 +11,7 @@
 
 typedef int32_t node_t;
 typedef int32_t edge_t;
-#define NIL_NODE ((node_t)-1)
+#define CUDA_NIL_NODE ((node_t)-1)
 
 #define SCC_FOUND        (-2)
 #define COLOR_UNASSIGNED (-1)

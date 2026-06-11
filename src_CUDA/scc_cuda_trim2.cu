@@ -8,7 +8,7 @@ int*  d_G_maybe_2nd = NULL;  // [N] — 0/1 flag: has exactly 1 in OR 1 out
 
 // ======================================================================
 // initialize_trim2()
-// OpenMP: allocates G_nbr and G_maybe_2nd, initializes to NIL_NODE/false
+// OpenMP: allocates G_nbr and G_maybe_2nd, initializes to CUDA_NIL_NODE/false
 // ======================================================================
 void initialize_trim2(int num_nodes)
 {
@@ -18,8 +18,8 @@ void initialize_trim2(int num_nodes)
     CUDA_CHECK(cudaMalloc(&d_G_nbr,        num_nodes * sizeof(int)));
     CUDA_CHECK(cudaMalloc(&d_G_maybe_2nd,  num_nodes * sizeof(int)));
 
-    // Init: G_nbr[i] = NIL_NODE, G_maybe_2nd[i] = 0 (false)
-    CUDA_CHECK(cudaMemset(d_G_nbr,        0xFF, num_nodes * sizeof(int)));  // -1 = NIL_NODE
+    // Init: G_nbr[i] = CUDA_NIL_NODE, G_maybe_2nd[i] = 0 (false)
+    CUDA_CHECK(cudaMemset(d_G_nbr,        0xFF, num_nodes * sizeof(int)));  // -1 = CUDA_NIL_NODE
     CUDA_CHECK(cudaMemset(d_G_maybe_2nd,  0x00, num_nodes * sizeof(int)));  // false
 }
 
@@ -46,11 +46,11 @@ __device__ void trim_2nd_main1_device(
 
     // Reset state for this node
     d_G_maybe_2nd[n] = 0;  // false
-    d_G_nbr[n] = NIL_NODE;
+    d_G_nbr[n] = CUDA_NIL_NODE;
 
     // ---- Check out-degree ----
     int out_degree = 0;
-    node_t last_seen2 = NIL_NODE;
+    node_t last_seen2 = CUDA_NIL_NODE;
 
     for (edge_t k_idx = d_begin[n]; k_idx < d_begin[n + 1]; k_idx++) {
         node_t k = d_node_idx[k_idx];
@@ -62,14 +62,14 @@ __device__ void trim_2nd_main1_device(
             out_degree = 1;
         } else if (out_degree == 1) {
             out_degree = 2;
-            last_seen2 = NIL_NODE;
+            last_seen2 = CUDA_NIL_NODE;
             break;
         }
     }
 
     // ---- Check in-degree ----
     int in_degree = 0;
-    node_t last_seen = NIL_NODE;
+    node_t last_seen = CUDA_NIL_NODE;
 
     for (edge_t k_idx = d_r_begin[n]; k_idx < d_r_begin[n + 1]; k_idx++) {
         node_t k = d_r_node_idx[k_idx];
@@ -81,7 +81,7 @@ __device__ void trim_2nd_main1_device(
             last_seen = k;
         } else if (in_degree == 1) {
             in_degree = 2;
-            last_seen = NIL_NODE;
+            last_seen = CUDA_NIL_NODE;
             break;
         }
     }
@@ -110,11 +110,11 @@ __device__ void trim_2nd_main2_device(
 {
     int curr_color = d_Color[n];
     if (curr_color == SCC_FOUND) return;
-    if (d_G_nbr[n] == NIL_NODE) return;
+    if (d_G_nbr[n] == CUDA_NIL_NODE) return;
 
     node_t k = d_G_nbr[n];
 
-    if (d_G_nbr[k] != NIL_NODE) {
+    if (d_G_nbr[k] != CUDA_NIL_NODE) {
         // Mutual n->k and k->n confirmed via Phase 1
         d_SCC[n] = (n < k) ? n : k;
         d_Color[n] = SCC_FOUND;

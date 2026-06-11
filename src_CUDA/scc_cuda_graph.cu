@@ -36,7 +36,7 @@ void state_allocate(GPUState& st, int N) {
     CUDA_CHECK(cudaMalloc(&st.d_SCC,   N * sizeof(int)));
 }
 
-// Initialize: G_Color = -1, G_SCC = -1 (NIL_NODE)
+// Initialize: G_Color = -1, G_SCC = -1 (CUDA_NIL_NODE)
 void state_init(GPUState& st) {
     int N = st.num_nodes;
     CUDA_CHECK(cudaMemset(st.d_Color, 0xFF, N * sizeof(int)));  // -1
