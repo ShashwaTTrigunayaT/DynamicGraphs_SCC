@@ -521,7 +521,7 @@ static void create_trim1_compact_3()
     // No-op: kernel writes directly to final positions via atomicAdd
 }
 
-static void create_trim1_compact(GPUState& st, const GPUGraph& g)
+void create_trim1_compact(GPUState& st, const GPUGraph& g)
 {
     if (d_trim_targets_count == 0)
         create_trim1_compact_1(st, g);
