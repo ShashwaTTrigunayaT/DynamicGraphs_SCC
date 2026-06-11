@@ -1,2 +1,0 @@
-# DynamicGraphs_SCC
-
