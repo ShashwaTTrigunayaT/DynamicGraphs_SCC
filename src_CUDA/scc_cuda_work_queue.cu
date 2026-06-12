@@ -357,20 +357,22 @@ __global__ void scatter_by_color_kernel(
     int* base_out, int* base_pos)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= num_targets) return;
+    int stride = gridDim.x * blockDim.x;
 
-    node_t t = d_targets[tid];
-    int c = d_Color[t];
+    for (int i = tid; i < num_targets; i += stride) {
+        node_t t = d_targets[i];
+        int c = d_Color[t];
 
-    if (c == fw_color) {
-        int pos = atomicAdd(fw_pos, 1);
-        fw_out[pos] = t;
-    } else if (c == bw_color) {
-        int pos = atomicAdd(bw_pos, 1);
-        bw_out[pos] = t;
-    } else if (c == base_color) {
-        int pos = atomicAdd(base_pos, 1);
-        base_out[pos] = t;
+        if (c == fw_color) {
+            int pos = atomicAdd(fw_pos, 1);
+            fw_out[pos] = t;
+        } else if (c == bw_color) {
+            int pos = atomicAdd(bw_pos, 1);
+            bw_out[pos] = t;
+        } else if (c == base_color) {
+            int pos = atomicAdd(base_pos, 1);
+            base_out[pos] = t;
+        }
     }
 }
 
@@ -385,14 +387,16 @@ __global__ void scatter_by_root_kernel(
     int* d_root_buf)            // flat buffer for all root sets
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= num_targets) return;
+    int stride = gridDim.x * blockDim.x;
 
-    node_t t = d_targets[tid];
-    if (d_Color[t] == SCC_FOUND) return;
+    for (int i = tid; i < num_targets; i += stride) {
+        node_t t = d_targets[i];
+        if (d_Color[t] == SCC_FOUND) continue;
 
-    int root = d_WCC[t] & 0x1FFFFFFF;  // GET_WCC_ROOT_MASKED
-    int pos = atomicAdd(&d_root_offsets[root], 1);  // use offset storage as position counter
-    d_root_buf[pos] = t;
+        int root = d_WCC[t] & 0x1FFFFFFF;  // GET_WCC_ROOT_MASKED
+        int pos = atomicAdd(&d_root_offsets[root], 1);  // use offset storage as position counter
+        d_root_buf[pos] = t;
+    }
 }
 
 // ======================================================================
@@ -405,12 +409,14 @@ __global__ void scatter_single_color_kernel(
     int* d_out, int* d_pos)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= num_targets) return;
+    int stride = gridDim.x * blockDim.x;
 
-    node_t t = d_targets[tid];
-    if (d_Color[t] == target_color) {
-        int pos = atomicAdd(d_pos, 1);
-        d_out[pos] = t;
+    for (int i = tid; i < num_targets; i += stride) {
+        node_t t = d_targets[i];
+        if (d_Color[t] == target_color) {
+            int pos = atomicAdd(d_pos, 1);
+            d_out[pos] = t;
+        }
     }
 }
 
@@ -464,11 +470,13 @@ __global__ void count_by_wcc_root_kernel(
     int* d_root_counts)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= num_targets) return;
+    int stride = gridDim.x * blockDim.x;
 
-    node_t t = d_targets[tid];
-    if (d_Color[t] == SCC_FOUND) return;
+    for (int i = tid; i < num_targets; i += stride) {
+        node_t t = d_targets[i];
+        if (d_Color[t] == SCC_FOUND) continue;
 
-    int root = d_WCC[t] & 0x1FFFFFFF;  // GET_WCC_ROOT_MASKED
-    atomicAdd(&d_root_counts[root], 1);
+        int root = d_WCC[t] & 0x1FFFFFFF;  // GET_WCC_ROOT_MASKED
+        atomicAdd(&d_root_counts[root], 1);
+    }
 }

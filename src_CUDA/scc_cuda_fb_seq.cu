@@ -141,10 +141,13 @@ __global__ void find_pivot_by_color_kernel(
     int base_color, int* d_pivot)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= num_targets) return;
-    node_t t = d_targets[tid];
-    if (d_Color[t] == base_color) {
-        atomicMin(d_pivot, (int)t);
+    int stride = gridDim.x * blockDim.x;
+
+    for (int i = tid; i < num_targets; i += stride) {
+        node_t t = d_targets[i];
+        if (d_Color[t] == base_color) {
+            atomicMin(d_pivot, (int)t);
+        }
     }
 }
 

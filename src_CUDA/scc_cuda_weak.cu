@@ -208,20 +208,22 @@ __global__ void wcc_init_kernel(
     const int* d_targets, int num_targets)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= num_targets) return;
+    int stride = gridDim.x * blockDim.x;
 
-    node_t t4 = d_targets[tid];
-    if (d_Color[t4] == SCC_FOUND) return;  // OpenMP: if (G_Color[t4] == -2) continue;
+    for (int i = tid; i < num_targets; i += stride) {
+        node_t t4 = d_targets[i];
+        if (d_Color[t4] == SCC_FOUND) continue;  // OpenMP: if (G_Color[t4] == -2) continue;
 
-    // OpenMP: assert(t4 < 0x1FFFFFFF);
-    // OpenMP: if (G.begin[t4+1] - G.begin[t4] >= 50)
-    //             G_WCC[t4] = INIT_WCC_ROOT_LG(t4);
-    //         else
-    //             G_WCC[t4] = t4;
-    if (d_begin[t4 + 1] - d_begin[t4] >= 50) {
-        d_WCC[t4] = CUDA_INIT_WCC_ROOT_LG(t4);
-    } else {
-        d_WCC[t4] = t4;
+        // OpenMP: assert(t4 < 0x1FFFFFFF);
+        // OpenMP: if (G.begin[t4+1] - G.begin[t4] >= 50)
+        //             G_WCC[t4] = INIT_WCC_ROOT_LG(t4);
+        //         else
+        //             G_WCC[t4] = t4;
+        if (d_begin[t4 + 1] - d_begin[t4] >= 50) {
+            d_WCC[t4] = CUDA_INIT_WCC_ROOT_LG(t4);
+        } else {
+            d_WCC[t4] = t4;
+        }
     }
 }
 
@@ -254,31 +256,33 @@ __global__ void wcc_propagate_phase1_kernel(
     const int* d_targets, int num_targets)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= num_targets) return;
+    int stride = gridDim.x * blockDim.x;
 
-    node_t n = d_targets[tid];
-    int color_n = d_Color[n];
-    if (color_n == SCC_FOUND) return;  // OpenMP: if (G_Color[n] == -2) continue;
+    for (int idx = tid; idx < num_targets; idx += stride) {
+        node_t n = d_targets[idx];
+        int color_n = d_Color[n];
+        if (color_n == SCC_FOUND) continue;  // OpenMP: if (G_Color[n] == -2) continue;
 
-    // OpenMP: node_t min_val = G_WCC[n];
-    int min_val = d_WCC[n];
+        // OpenMP: node_t min_val = G_WCC[n];
+        int min_val = d_WCC[n];
 
-    // OpenMP: for each forward neighbor
-    for (edge_t k_idx = d_begin[n]; k_idx < d_begin[n + 1]; k_idx++) {
-        node_t k = d_node_idx[k_idx];
-        // OpenMP: if (G_Color[k] != G_Color[n]) continue;
-        if (d_Color[k] != color_n) continue;
-        // OpenMP: if (G_WCC[k] < min_val) { min_val = G_WCC[k]; finished = false; }
-        int wcc_k = d_WCC[k];
-        if (wcc_k < min_val) {
-            min_val = wcc_k;
+        // OpenMP: for each forward neighbor
+        for (edge_t k_idx = d_begin[n]; k_idx < d_begin[n + 1]; k_idx++) {
+            node_t k = d_node_idx[k_idx];
+            // OpenMP: if (G_Color[k] != G_Color[n]) continue;
+            if (d_Color[k] != color_n) continue;
+            // OpenMP: if (G_WCC[k] < min_val) { min_val = G_WCC[k]; finished = false; }
+            int wcc_k = d_WCC[k];
+            if (wcc_k < min_val) {
+                min_val = wcc_k;
+            }
         }
-    }
 
-    // OpenMP: if (min_val != G_WCC[n]) G_WCC[n] = min_val;
-    if (min_val != d_WCC[n]) {
-        d_WCC[n] = min_val;
-        *d_changed = 1;  // OpenMP: finished = false
+        // OpenMP: if (min_val != G_WCC[n]) G_WCC[n] = min_val;
+        if (min_val != d_WCC[n]) {
+            d_WCC[n] = min_val;
+            *d_changed = 1;  // OpenMP: finished = false
+        }
     }
 }
 
@@ -307,27 +311,29 @@ __global__ void wcc_propagate_phase2_kernel(
     const int* d_targets, int num_targets)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= num_targets) return;
+    int stride = gridDim.x * blockDim.x;
 
-    node_t n = d_targets[tid];
-    int color_n = d_Color[n];
-    if (color_n == SCC_FOUND) return;  // OpenMP: if (G_Color[n] == -2) continue;
+    for (int idx = tid; idx < num_targets; idx += stride) {
+        node_t n = d_targets[idx];
+        int color_n = d_Color[n];
+        if (color_n == SCC_FOUND) continue;  // OpenMP: if (G_Color[n] == -2) continue;
 
-    // OpenMP: GET_WCC_ROOT(n) — mask off the large-degree flag bit
-    int wcc_n    = d_WCC[n];
-    int root_n   = CUDA_GET_WCC_ROOT(wcc_n);
+        // OpenMP: GET_WCC_ROOT(n) — mask off the large-degree flag bit
+        int wcc_n    = d_WCC[n];
+        int root_n   = CUDA_GET_WCC_ROOT(wcc_n);
 
-    // OpenMP: if (GET_WCC_ROOT(n) != n)
-    if (root_n != n) {
-        // OpenMP: node_t root = GET_WCC_ROOT(n);
-        node_t root = root_n;
-        // OpenMP: if (GET_WCC_ROOT(root) != root)
-        int wcc_root  = d_WCC[root];
-        int root_root = CUDA_GET_WCC_ROOT(wcc_root);
-        if (root_root != root) {
-            // OpenMP: G_WCC[n] = G_WCC[root]; (unmasked value)
-            d_WCC[n] = wcc_root;
-            *d_changed = 1;  // OpenMP: finished = false
+        // OpenMP: if (GET_WCC_ROOT(n) != n)
+        if (root_n != n) {
+            // OpenMP: node_t root = GET_WCC_ROOT(n);
+            node_t root = root_n;
+            // OpenMP: if (GET_WCC_ROOT(root) != root)
+            int wcc_root  = d_WCC[root];
+            int root_root = CUDA_GET_WCC_ROOT(wcc_root);
+            if (root_root != root) {
+                // OpenMP: G_WCC[n] = G_WCC[root]; (unmasked value)
+                d_WCC[n] = wcc_root;
+                *d_changed = 1;  // OpenMP: finished = false
+            }
         }
     }
 }
@@ -365,18 +371,20 @@ __global__ void wcc_assign_root_colors_kernel(
     int* d_color_counter)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= num_targets) return;
+    int stride = gridDim.x * blockDim.x;
 
-    node_t t4 = d_targets[tid];
-    if (d_Color[t4] == SCC_FOUND) return;
+    for (int i = tid; i < num_targets; i += stride) {
+        node_t t4 = d_targets[i];
+        if (d_Color[t4] == SCC_FOUND) continue;
 
-    // OpenMP: node_t root = GET_WCC_ROOT(t4);
-    node_t root = CUDA_GET_WCC_ROOT(d_WCC[t4]);
+        // OpenMP: node_t root = GET_WCC_ROOT(t4);
+        node_t root = CUDA_GET_WCC_ROOT(d_WCC[t4]);
 
-    // OpenMP: if (t4 == root) G_Color[t4] = get_new_color();
-    if (t4 == root) {
-        int new_color = atomicAdd(d_color_counter, 1) + 1;
-        d_Color[t4] = new_color;
+        // OpenMP: if (t4 == root) G_Color[t4] = get_new_color();
+        if (t4 == root) {
+            int new_color = atomicAdd(d_color_counter, 1) + 1;
+            d_Color[t4] = new_color;
+        }
     }
 }
 
@@ -385,17 +393,19 @@ __global__ void wcc_propagate_colors_kernel(
     const int* d_targets, int num_targets)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= num_targets) return;
+    int stride = gridDim.x * blockDim.x;
 
-    node_t t4 = d_targets[tid];
-    if (d_Color[t4] == SCC_FOUND) return;
+    for (int i = tid; i < num_targets; i += stride) {
+        node_t t4 = d_targets[i];
+        if (d_Color[t4] == SCC_FOUND) continue;
 
-    // OpenMP: node_t root = GET_WCC_ROOT(t4);
-    node_t root = CUDA_GET_WCC_ROOT(d_WCC[t4]);
+        // OpenMP: node_t root = GET_WCC_ROOT(t4);
+        node_t root = CUDA_GET_WCC_ROOT(d_WCC[t4]);
 
-    // OpenMP: if (t4 != root) G_Color[t4] = G_Color[root];
-    if (t4 != root) {
-        d_Color[t4] = d_Color[root];
+        // OpenMP: if (t4 != root) G_Color[t4] = G_Color[root];
+        if (t4 != root) {
+            d_Color[t4] = d_Color[root];
+        }
     }
 }
 
@@ -411,24 +421,26 @@ __global__ void wcc_insert_members_kernel(
     int** d_wcc_sets_dev)  // [N] device-side array of pointers to per-root buffers
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= num_targets) return;
+    int stride = gridDim.x * blockDim.x;
 
-    node_t t = d_targets[tid];
-    if (d_Color[t] == SCC_FOUND) return;  // OpenMP: if (G_Color[t] == -2) continue;
+    for (int i = tid; i < num_targets; i += stride) {
+        node_t t = d_targets[i];
+        if (d_Color[t] == SCC_FOUND) continue;  // OpenMP: if (G_Color[t] == -2) continue;
 
-    int root = d_WCC[t] & 0x1FFFFFFF;  // GET_WCC_ROOT
+        int root = d_WCC[t] & 0x1FFFFFFF;  // GET_WCC_ROOT
 
-    // OpenMP: if (root == gm_graph::NIL_NODE) continue;
-    if (root < 0) return;
+        // OpenMP: if (root == gm_graph::NIL_NODE) continue;
+        if (root < 0) continue;
 
-    // OpenMP: gm_spinlock_acquire_for_node(root);
-    //         wcc_sets[root]->insert(t4);
-    //         gm_spinlock_release_for_node(root);
-    // CUDA: atomic position + direct write (no spinlock needed)
-    int* root_buf = d_wcc_sets_dev[root];
-    if (root_buf != NULL) {
-        int pos = atomicAdd(&d_root_pos[root], 1);
-        root_buf[pos] = t;
+        // OpenMP: gm_spinlock_acquire_for_node(root);
+        //         wcc_sets[root]->insert(t4);
+        //         gm_spinlock_release_for_node(root);
+        // CUDA: atomic position + direct write (no spinlock needed)
+        int* root_buf = d_wcc_sets_dev[root];
+        if (root_buf != NULL) {
+            int pos = atomicAdd(&d_root_pos[root], 1);
+            root_buf[pos] = t;
+        }
     }
 }
 
