@@ -18,6 +18,11 @@ static int  d_WCC_num_nodes = 0;
 // CUDA: host-side set pointers (mirrored for structure)
 static int** h_wcc_sets = NULL;      // [N] array of host-set pointers (each is device node list)
 static int*  h_wcc_set_sizes = NULL; // [N] size of each set
+
+// OpenMP: static NODE_SET** wcc_sets — device-side pointer mirror
+// CUDA: device-side array of pointers to per-root device buffers
+static int** d_wcc_sets = NULL;      // [N] device-side pointer array (mirror of h_wcc_sets)
+
 static int*  d_temp_buf = NULL;      // [max_sets * avg_size] device temp buffer
 static int   d_temp_buf_capacity = 0;
 
