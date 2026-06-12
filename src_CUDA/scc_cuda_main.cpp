@@ -14,8 +14,9 @@ int main(int argc, char** argv)
     // ---------------------------------------------------------------
     if (argc < 4) {
         printf("Usage: %s <graph_file> <num_threads> <method> [-d|-a|-p]\n", argv[0]);
-        printf("  method 0: Trim1 only (CUDA)\n");
-        printf("  method 2: Trim1 + Trim2 (CUDA)\n");
+        printf("  method 0: Trim1 + FW-BW BFS (Baseline — exact mirror of OpenMP method 0)\n");
+        printf("  method 1: Trim1 + Global FW-BW + Trim1 + FW-BW DFS (exact mirror of OpenMP method 1)\n");
+        printf("  method 2: Trim1 + Global FW-BW + Trim1/2 + WCC + FW-BW DFS (exact mirror of OpenMP method 2)\n");
         printf("  -p: Print SCC list to file\n");
         return 1;
     }
@@ -114,6 +115,7 @@ int main(int argc, char** argv)
 
     initialize_trim1_full(N);
     initialize_trim2(N);
+    initialize_WCC(N);
 
     // Device counter
     int* d_count;
@@ -134,15 +136,176 @@ int main(int argc, char** argv)
     // ---------------------------------------------------------------
     // Run selected method
     // ---------------------------------------------------------------
+    struct timeval R1, R2;
+    double runtime_ms = 0.0;
+    int trimmed = 0;
+
     if (met_algo == 0) {
-        printf("Running CUDA Method 0: Trim1\n");
+        // ============================================================
+        // Method 0 (Baseline): Trim1 + FW-BW (BFS-based)
+        // OpenMP: do_baseline()
+        // ============================================================
+        printf("Running Method 0 (Baseline): Trim1 + FW-BW BFS\n");
+
+        // OpenMP timer starts before the pipeline
+        gettimeofday(&R1, NULL);
+
+        // Phase 1: Trim1 (mirrors OpenMP: repeat_global_trim1)
+        trimmed = repeat_global_trim1(st, gpuG, d_count,
+            met_algo, flag11, da, d_count_trim_spec, 100);
+        int remaining = d_trim_targets_count;
+        printf("[CUDA] Trimmed = %d\n", trimmed);
+
+        if (remaining == 0) {
+            printf("[CUDA] No remaining nodes after trim\n");
+        } else {
+            // Phase 2: Initialize BFS buffers, create work item, run FW-BW BFS
+            // OpenMP:
+            //   my_work* work = new my_work();
+            //   work->color = get_curr_color();  // -1
+            //   work->color_set = NULL;
+            //   work->count = G_num_nodes - trimmed;
+            //   work->depth = 0;
+            //   work_q_put(0, work);
+            //   start_workers_fw_bw(G, 1);
+            initialize_global_fb(N);
+
+            CUDAMyWork* work = new CUDAMyWork();
+            work->color       = COLOR_UNASSIGNED;  // curr_color = -1
+            work->count       = remaining;
+            work->d_set_nodes = NULL;   // NULL -> lazy gen in start_workers_fw_bw
+            work->set_capacity = 0;
+            work->depth       = 0;
+            work->owns_set    = 0;
+            work_q_put(0, work);
+
+            start_workers_fw_bw(st, gpuG, 1);
+
+            finalize_global_fb();
+        }
+
+        gettimeofday(&R2, NULL);
+        runtime_ms = (R2.tv_sec - R1.tv_sec) * 1000.0 +
+                     (R2.tv_usec - R1.tv_usec) * 0.001;
+
+    } else if (met_algo == 1) {
+        // ============================================================
+        // Method 1: Trim1 + Global FW-BW + Trim1 + FW-BW DFS
+        // OpenMP: do_baseline_global_fb()
+        // ============================================================
+        printf("Running Method 1: Trim1 + Global FW-BW + Trim1 + FW-BW DFS\n");
+
+        // OpenMP timer starts before the pipeline
+        gettimeofday(&R1, NULL);
+
+        // Phase 1: Trim1
+        trimmed = repeat_global_trim1(st, gpuG, d_count,
+            met_algo, flag11, da, d_count_trim_spec, 100);
+        printf("[CUDA] Trimmed = %d\n", trimmed);
+
+        int curr_count = d_trim_targets_count;
+        if (curr_count == 0) {
+            printf("[CUDA] No remaining nodes after trim\n");
+        } else {
+            // Phase 2: Global FW-BW (finds one large SCC)
+            // OpenMP: do_fw_bw_global_main(G, curr_color, curr_count, false)
+            initialize_global_fb(N);
+            int scc_size = do_global_fw_bw_main(
+                st, gpuG,
+                COLOR_UNASSIGNED,   // base_color = curr_color = -1
+                curr_count,          // base_count from trim_targets
+                -1,                  // good_init_pivot (-1 = not met_algo 6/11)
+                false);              // create_work_items = false
+            printf("[CUDA] First SCC size = %d\n", scc_size);
+
+            // Phase 3: Re-trim (compact)
+            // OpenMP: repeat_global_trim1_compact(G)
+            trimmed = repeat_global_trim1_compact(st, gpuG, d_count,
+                met_algo, flag11, da, d_count_trim_spec, 100);
+
+            curr_count = d_trim_targets_count;
+            if (curr_count > 0) {
+                // Phase 4: Create work items from colored partition + FB
+                // OpenMP:
+                //   create_works_after_bfs_trim(G);
+                //   start_workers_fw_bw_dfs(G, 1);
+                create_works_after_bfs_trim(st, gpuG);
+                start_workers_fw_bw_dfs(st, gpuG, 1);
+            }
+            finalize_global_fb();
+        }
+
+        gettimeofday(&R2, NULL);
+        runtime_ms = (R2.tv_sec - R1.tv_sec) * 1000.0 +
+                     (R2.tv_usec - R1.tv_usec) * 0.001;
+
     } else if (met_algo == 2) {
-        printf("Running CUDA Method 2: Trim1 + Trim2\n");
+        // ============================================================
+        // Method 2: Trim1 + Global FW-BW + Trim1/2 + WCC + FW-BW DFS
+        // OpenMP: do_baseline_global_wcc_fb()
+        // ============================================================
+        printf("Running Method 2: Trim1 + Global FW-BW + Trim1/2 + WCC + FW-BW DFS\n");
+
+        // OpenMP timer starts before the pipeline
+        gettimeofday(&R1, NULL);
+
+        // Phase 1: Trim1
+        trimmed = repeat_global_trim1(st, gpuG, d_count,
+            met_algo, flag11, da, d_count_trim_spec, 100);
+        printf("[CUDA] Trimmed = %d\n", trimmed);
+
+        int curr_count = d_trim_targets_count;
+        if (curr_count == 0) {
+            printf("[CUDA] No remaining nodes after trim\n");
+        } else {
+            // Phase 2: Global FW-BW (finds one large SCC)
+            // OpenMP: do_fw_bw_global_main(G, curr_color, curr_count, false)
+            initialize_global_fb(N);
+            int scc_size = do_global_fw_bw_main(
+                st, gpuG,
+                COLOR_UNASSIGNED,   // base_color = curr_color = -1
+                curr_count,          // base_count from trim_targets
+                -1,                  // good_init_pivot (-1 = not met_algo 6/11)
+                false);              // create_work_items = false
+            printf("[CUDA] First SCC size = %d\n", scc_size);
+
+            // Phase 3: Re-trim (compact + trim2)
+            // OpenMP:
+            //   trimmed = repeat_global_trim1_compact(G);
+            //   trim_total = do_global_trim2_new(G);
+            //   trim_total += repeat_global_trim1_compact(G, 100);
+            trimmed = repeat_global_trim1_compact(st, gpuG, d_count,
+                met_algo, flag11, da, d_count_trim_spec, 100);
+            int trim_total = do_global_trim2_new(st, gpuG, d_count);
+            trim_total += repeat_global_trim1_compact(st, gpuG, d_count,
+                met_algo, flag11, da, d_count_trim_spec, 100);
+            trimmed += trim_total;
+
+            curr_count = d_trim_targets_count;
+            if (curr_count > 0) {
+                // Phase 4: WCC + create work items + FW-BW DFS
+                // OpenMP:
+                //   do_global_wcc(G);
+                //   create_work_items_from_wcc(G);
+                //   start_workers_fw_bw_dfs(G, 40);
+                do_global_wcc(st, gpuG);
+                create_work_items_from_wcc(st, gpuG);
+                start_workers_fw_bw_dfs(st, gpuG, 40);
+            }
+            finalize_global_fb();
+        }
+
+        gettimeofday(&R2, NULL);
+        runtime_ms = (R2.tv_sec - R1.tv_sec) * 1000.0 +
+                     (R2.tv_usec - R1.tv_usec) * 0.001;
+
     } else {
-        printf("Running CUDA Method %d: (not fully implemented)\n", met_algo);
+        printf("Running CUDA Method %d: (not implemented)\n", met_algo);
+        printf("Supported methods: 0 (Baseline), 1 (Global FB + FB DFS), 2 (Full pipeline)\n");
         cudaFree(d_count);
         if (d_count_trim_spec) cudaFree(d_count_trim_spec);
         dynamic_arrays_free(da);
+        finalize_WCC();
         finalize_trim2();
         finalize_trim1();
         state_free(st);
@@ -150,27 +313,7 @@ int main(int argc, char** argv)
         return 0;
     }
 
-    struct timeval R1, R2;
-    gettimeofday(&R1, NULL);
-
-    int trimmed = 0;
-
-    // Phase 1: Trim1
-    trimmed += repeat_global_trim1(st, gpuG, d_count,
-        met_algo, flag11, da, d_count_trim_spec, 100);
-
-    if (met_algo == 2) {
-        // Phase 2: Trim2
-        trimmed += do_global_trim2_new(st, gpuG, d_count);
-        trimmed += repeat_global_trim1_compact(st, gpuG, d_count,
-            met_algo, flag11, da, d_count_trim_spec, 100);
-    }
-
-    gettimeofday(&R2, NULL);
-    double runtime = (R2.tv_sec - R1.tv_sec) * 1000.0 +
-                     (R2.tv_usec - R1.tv_usec) * 0.001;
-
-    printf("[CUDA]running_time(ms)=%lf\n", runtime);
+    printf("[CUDA]running_time(ms)=%lf\n", runtime_ms);
 
     // ---------------------------------------------------------------
     // Post-processing: count SCCs
@@ -187,8 +330,6 @@ int main(int argc, char** argv)
             else if (h_SCC[i] == -1) trim9_count++;
         }
         printf("Total # SCCs = %d\n", scc_count);
-        if (met_algo == 9)
-            printf("Trimmed nodes=%d\n", trim9_count);
 
         if (print) {
             FILE* fp = fopen("scc_output_cuda.txt", "w");
@@ -207,6 +348,8 @@ int main(int argc, char** argv)
     cudaFree(d_count);
     if (d_count_trim_spec) cudaFree(d_count_trim_spec);
     dynamic_arrays_free(da);
+    if (met_algo >= 1 && met_algo <= 2) finalize_global_fb();
+    finalize_WCC();
     finalize_trim2();
     finalize_trim1();
     state_free(st);

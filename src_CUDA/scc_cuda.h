@@ -48,6 +48,7 @@ struct CUDAMyWork {
     int* d_set_nodes;        // device: compact list of nodes in this set
     int set_capacity;        // allocated capacity
     int depth;               // recursion depth
+    int owns_set;            // 1 if this work item owns d_set_nodes (must free)
 };
 
 // CUDA Error Macro
@@ -247,5 +248,121 @@ __global__ void trim_2nd_new_main_kernel(
 int do_global_trim2_new(GPUState& st, const GPUGraph& g, int* d_count);
 int repeat_global_trim2_new(GPUState& st, const GPUGraph& g,
     int* d_count, int exit_count);
+
+// ---- scc_cuda_fb_global.cu (mirrors scc_fb_global.cc) ----
+
+// BFS queue buffers shared with fb_seq.cu / fb_seq2.cu
+extern int* d_bfs_queue;
+extern int* d_bfs_next_queue;
+extern int* d_bfs_next_count;
+extern int* d_bfs_scc_count;
+extern int* d_bfs_bw_count;
+
+// initialize / finalize
+void initialize_global_fb(int num_nodes);
+void finalize_global_fb();
+
+// Host function — exact mirror of do_fw_bw_global_main()
+// Parameters match CPU: (curr_color, count) + good_init_pivot (for met_algo==6/11)
+int do_global_fw_bw_main(GPUState& st, const GPUGraph& g,
+    int base_color, int base_count, int good_init_pivot,
+    bool create_work_items = false);
+
+// Host function — exact mirror of create_works_after_bfs_trim()
+// Creates work items from the colored partitions after re-trimming
+void create_works_after_bfs_trim(GPUState& st, const GPUGraph& g);
+
+// ---- scc_cuda_weak.cu (mirrors scc_weak.cc) ----
+
+// initialize / finalize
+void initialize_WCC(int num_nodes);
+void finalize_WCC();
+
+// Host functions — exact mirrors of OpenMP functions
+void do_global_wcc(GPUState& st, const GPUGraph& g);
+void create_work_items_from_wcc(GPUState& st, const GPUGraph& g);
+int* get_WCC();
+
+// ---- scc_cuda_work_queue.cu (mirrors my_work_queue.cc) ----
+
+// initialize
+void work_q_init(int num_threads);
+
+// queue operations
+int  work_q_size();
+bool is_work_q_empty_from_seq_context();
+void work_q_print_max_depth();
+
+// put / fetch
+void        work_q_put(int thread_id, CUDAMyWork* w);
+void        work_q_put_all(int thread_id, std::vector<CUDAMyWork*>& works);
+CUDAMyWork* work_q_fetch(int id);
+void        work_q_fetch_N(int id, int N, std::vector<CUDAMyWork*>& works);
+
+// scatter kernels for building compact sets
+__global__ void scatter_by_color_kernel(
+    const int* d_Color,
+    const int* d_targets, int num_targets,
+    int fw_color, int bw_color, int base_color,
+    int* fw_out, int* fw_pos,
+    int* bw_out, int* bw_pos,
+    int* base_out, int* base_pos);
+
+__global__ void scatter_single_color_kernel(
+    const int* d_Color,
+    const int* d_targets, int num_targets,
+    int target_color,
+    int* d_out, int* d_pos);
+
+__global__ void scatter_by_root_kernel(
+    const int* d_Color, const int* d_WCC,
+    const int* d_targets, int num_targets,
+    const int* d_root_offsets,
+    int* d_root_buf);
+
+__global__ void count_by_wcc_root_kernel(
+    const int* d_Color, const int* d_WCC,
+    const int* d_targets, int num_targets,
+    int* d_root_counts);
+
+__global__ void wcc_insert_members_kernel(
+    const int* d_Color, const int* d_WCC,
+    const int* d_targets, int num_targets,
+    int* d_root_pos,
+    int** d_wcc_sets_dev);
+
+// ---- scc_cuda_color.cu (shared color allocator — mirrors scc_color.cc) ----
+// OpenMP: static int _the_color; int get_new_color() { const int CHUNK=1024; ... }
+extern int _cuda_the_color;
+int  cuda_get_new_color();
+
+// Kernels for all-node scan (used when d_trim_targets_count == 0)
+// OpenMP: for(node_t i=0;i<G.num_nodes(); i++) if (G_Color[i]==color) ...
+__global__ void find_pivot_all_nodes_kernel(
+    const int* d_Color, int num_nodes,
+    int base_color, int* d_pivot);
+
+__global__ void scatter_single_color_all_nodes_kernel(
+    const int* d_Color, int num_nodes,
+    int target_color,
+    int* d_out, int* d_pos);
+
+// ---- scc_cuda_fb_seq.cu (mirrors scc_fb_seq.cc) ----
+
+// Host functions — exact mirrors of OpenMP functions
+// Per-subgraph FW-BW (BFS-based): consumes CUDAMyWork items from the work queue
+int do_fw_bw_single_thread(GPUState& st, const GPUGraph& g,
+    CUDAMyWork* w, std::vector<CUDAMyWork*>& new_works);
+
+void start_workers_fw_bw(GPUState& st, const GPUGraph& g, int N);
+
+// ---- scc_cuda_fb_seq2.cu (mirrors scc_fb_seq2.cc) ----
+
+// Host functions — exact mirrors of OpenMP functions
+// Per-subgraph FW-BW (DFS-based): consumes CUDAMyWork items from the work queue
+int do_fw_bw_dfs(GPUState& st, const GPUGraph& g,
+    CUDAMyWork* w, std::vector<CUDAMyWork*>& new_works);
+
+void start_workers_fw_bw_dfs(GPUState& st, const GPUGraph& g, int N);
 
 #endif
