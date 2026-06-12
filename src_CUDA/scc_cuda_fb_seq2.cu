@@ -240,6 +240,8 @@ int do_fw_bw_dfs(GPUState& st, const GPUGraph& g,
             //  mirrors CPU's base_set->size() == 0 branch identically)
             if (w->owns_set && d_base_set != NULL) {
                 CUDA_CHECK(cudaFree(d_base_set));
+                w->d_set_nodes = NULL;
+                w->owns_set = 0;
             }
             d_base_set = NULL;
             int num_targets = d_trim_targets_count;
@@ -282,6 +284,8 @@ int do_fw_bw_dfs(GPUState& st, const GPUGraph& g,
                                cudaMemcpyHostToDevice));
         if (d_base_set != NULL && w->owns_set) {
             CUDA_CHECK(cudaFree(d_base_set));
+            w->d_set_nodes = NULL;
+            w->owns_set = 0;
             d_base_set = NULL;
         }
         return 1;
