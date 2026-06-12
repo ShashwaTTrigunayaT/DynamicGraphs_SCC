@@ -262,6 +262,23 @@ extern int* d_bfs_bw_count;
 void initialize_global_fb(int num_nodes);
 void finalize_global_fb();
 
+// BFS kernels (defined in scc_cuda_fb_global.cu) — extern for separate compilation
+// OpenMP: fw_trim_global / bw_trim_global (BFS template classes)
+extern __global__ void fw_bfs_level_kernel(
+    const edge_t* d_begin, const node_t* d_node_idx,
+    int* d_Color,
+    const int* d_queue, int queue_size,
+    int* d_next_queue, int* d_next_count,
+    int fw_color, int base_color);
+
+extern __global__ void bw_bfs_level_kernel(
+    const edge_t* d_r_begin, const node_t* d_r_node_idx,
+    int* d_Color, int* d_SCC,
+    const int* d_queue, int queue_size,
+    int* d_next_queue, int* d_next_count,
+    int fw_color, int bw_color, int base_color, node_t pivot,
+    int* d_scc_count, int* d_bw_count);
+
 // Host function — exact mirror of do_fw_bw_global_main()
 // Parameters match CPU: (curr_color, count) + good_init_pivot (for met_algo==6/11)
 int do_global_fw_bw_main(GPUState& st, const GPUGraph& g,
