@@ -730,7 +730,7 @@ public:
                 delete_idea1(G, rem_edges);
             }
         }
-        if (met == 2)
+        if (met == 0 || met == 1 || met == 2 || met == 3 || met == 4)
         {
             // cout<<"Num_Threads:"<<omp_get_max_threads()<<" "<<omp_get_num_procs()<<endl;
             int num_vertices = read_file(fname, orig_edges);
