@@ -151,9 +151,12 @@ int main(int argc, char** argv)
         gettimeofday(&R1, NULL);
 
         // Phase 1: Trim1 (mirrors OpenMP: repeat_global_trim1)
+        // Note: GPU stride-parallelism trims fewer nodes per iteration than
+        // CPU's sequential-within-chunk processing (OpenMP schedule(dynamic,512)),
+        // so we use TRIM_STOP=0 to ensure full convergence.
         trimmed = repeat_global_trim1(st, gpuG, d_count,
-            met_algo, flag11, da, d_count_trim_spec, 100);
-        int remaining = d_trim_targets_count;
+            met_algo, flag11, da, d_count_trim_spec, 0);
+        int remaining = N - trimmed;
         printf("[CUDA] Trimmed = %d\n", trimmed);
 
         if (remaining == 0) {
@@ -200,13 +203,16 @@ int main(int argc, char** argv)
 
         // Phase 1: Trim1
         trimmed = repeat_global_trim1(st, gpuG, d_count,
-            met_algo, flag11, da, d_count_trim_spec, 100);
+            met_algo, flag11, da, d_count_trim_spec, 0);
         printf("[CUDA] Trimmed = %d\n", trimmed);
 
-        int curr_count = d_trim_targets_count;
+        int curr_count = N - trimmed;
         if (curr_count == 0) {
             printf("[CUDA] No remaining nodes after trim\n");
         } else {
+            // Ensure d_trim_targets_count is up-to-date for do_global_fw_bw_main
+            create_trim1_compact(st, gpuG);
+
             // Phase 2: Global FW-BW (finds one large SCC)
             // OpenMP: do_fw_bw_global_main(G, curr_color, curr_count, false)
             initialize_global_fb(N);
@@ -221,7 +227,7 @@ int main(int argc, char** argv)
             // Phase 3: Re-trim (compact)
             // OpenMP: repeat_global_trim1_compact(G)
             trimmed = repeat_global_trim1_compact(st, gpuG, d_count,
-                met_algo, flag11, da, d_count_trim_spec, 100);
+                met_algo, flag11, da, d_count_trim_spec, 0);
 
             curr_count = d_trim_targets_count;
             if (curr_count > 0) {
@@ -251,13 +257,16 @@ int main(int argc, char** argv)
 
         // Phase 1: Trim1
         trimmed = repeat_global_trim1(st, gpuG, d_count,
-            met_algo, flag11, da, d_count_trim_spec, 100);
+            met_algo, flag11, da, d_count_trim_spec, 0);
         printf("[CUDA] Trimmed = %d\n", trimmed);
 
-        int curr_count = d_trim_targets_count;
+        int curr_count = N - trimmed;
         if (curr_count == 0) {
             printf("[CUDA] No remaining nodes after trim\n");
         } else {
+            // Ensure d_trim_targets_count is up-to-date for do_global_fw_bw_main
+            create_trim1_compact(st, gpuG);
+
             // Phase 2: Global FW-BW (finds one large SCC)
             // OpenMP: do_fw_bw_global_main(G, curr_color, curr_count, false)
             initialize_global_fb(N);
@@ -275,10 +284,10 @@ int main(int argc, char** argv)
             //   trim_total = do_global_trim2_new(G);
             //   trim_total += repeat_global_trim1_compact(G, 100);
             trimmed = repeat_global_trim1_compact(st, gpuG, d_count,
-                met_algo, flag11, da, d_count_trim_spec, 100);
+                met_algo, flag11, da, d_count_trim_spec, 0);
             int trim_total = do_global_trim2_new(st, gpuG, d_count);
             trim_total += repeat_global_trim1_compact(st, gpuG, d_count,
-                met_algo, flag11, da, d_count_trim_spec, 100);
+                met_algo, flag11, da, d_count_trim_spec, 0);
             trimmed += trim_total;
 
             curr_count = d_trim_targets_count;
