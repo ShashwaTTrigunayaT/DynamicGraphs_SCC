@@ -312,6 +312,8 @@ int do_fw_bw_single_thread(GPUState& st, const GPUGraph& g,
             //         pivot = choose_pivot_from_color(G, base_color);
             if (w->owns_set && d_base_set != NULL) {
                 CUDA_CHECK(cudaFree(d_base_set));
+                w->d_set_nodes = NULL;
+                w->owns_set = 0;
             }
             d_base_set = NULL;
             int num_targets = d_trim_targets_count;
@@ -354,6 +356,8 @@ int do_fw_bw_single_thread(GPUState& st, const GPUGraph& g,
                                cudaMemcpyHostToDevice));
         if (d_base_set != NULL && w->owns_set) {
             CUDA_CHECK(cudaFree(d_base_set));
+            w->d_set_nodes = NULL;
+            w->owns_set = 0;
             d_base_set = NULL;
         }
         return 1;
