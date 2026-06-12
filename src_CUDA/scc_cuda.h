@@ -366,6 +366,16 @@ __global__ void scatter_single_color_all_nodes_kernel(
 
 // ---- scc_cuda_fb_seq.cu (mirrors scc_fb_seq.cc) ----
 
+// Pivot-finding kernels (defined in scc_cuda_fb_seq.cu, also used by fb_seq2.cu)
+extern __global__ void find_pivot_in_set_kernel(
+    const int* d_Color, const int* d_set, int set_size,
+    int target_color, int* d_pivot);
+
+extern __global__ void find_pivot_by_color_kernel(
+    const int* d_Color,
+    const int* d_targets, int num_targets,
+    int base_color, int* d_pivot);
+
 // Host functions — exact mirrors of OpenMP functions
 // Per-subgraph FW-BW (BFS-based): consumes CUDAMyWork items from the work queue
 int do_fw_bw_single_thread(GPUState& st, const GPUGraph& g,
