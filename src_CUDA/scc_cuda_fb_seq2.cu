@@ -276,8 +276,8 @@ int do_fw_bw_dfs(GPUState& st, const GPUGraph& g,
     if (w->count == 1) {
         // OpenMP: G_Color[pivot] = -2; G_SCC[pivot] = pivot;
         //         delete base_set; return 1;
-        CUDA_CHECK(cudaMemcpy(&st.d_Color[h_pivot], &SCC_FOUND, sizeof(int),
-                               cudaMemcpyHostToDevice));
+        { int _scc_val = SCC_FOUND; CUDA_CHECK(cudaMemcpy(&st.d_Color[h_pivot], &_scc_val, sizeof(int),
+                               cudaMemcpyHostToDevice)); }
         CUDA_CHECK(cudaMemcpy(&st.d_SCC[h_pivot], &h_pivot, sizeof(int),
                                cudaMemcpyHostToDevice));
         if (d_base_set != NULL && w->owns_set) {
@@ -354,8 +354,8 @@ int do_fw_bw_dfs(GPUState& st, const GPUGraph& g,
     //   NODE_SET* bw_set = BW_BFS.get_bw_set();
     // ---------------------------------------------------------------
     // Mark pivot itself as SCC
-    CUDA_CHECK(cudaMemcpy(&st.d_Color[h_pivot], &SCC_FOUND, sizeof(int),
-                           cudaMemcpyHostToDevice));
+    { int _scc_val = SCC_FOUND; CUDA_CHECK(cudaMemcpy(&st.d_Color[h_pivot], &_scc_val, sizeof(int),
+                           cudaMemcpyHostToDevice)); }
     CUDA_CHECK(cudaMemcpy(&st.d_SCC[h_pivot], &h_pivot, sizeof(int),
                            cudaMemcpyHostToDevice));
     int scc_count = 1;
