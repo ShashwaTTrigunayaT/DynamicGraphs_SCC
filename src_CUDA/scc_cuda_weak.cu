@@ -63,12 +63,16 @@ int* get_WCC() { return d_WCC; }
 //   }
 // ======================================================================
 void init_node_set_pool(int sz) {
+    // CUDA: Pool is kept for bookkeeping but per-root buffers are allocated
+    //       directly in create_work_items_from_wcc based on actual member counts.
+    //       No GPU memory is pre-allocated here (unlike OpenMP which uses NODE_SET
+    //       from the pool directly). Allocating 65536 * N device buffers would
+    //       consume ~26GB for N=100K — exceeding GPU memory limits.
     pool_cnt = sz;
     node_set_pool_size = sz;
     h_node_set_pool = new int*[sz];
     for (int i = 0; i < sz; i++) {
-        // Each pool entry is a device buffer (placeholder for future node sets)
-        CUDA_CHECK(cudaMalloc(&h_node_set_pool[i], d_WCC_num_nodes * sizeof(int)));
+        h_node_set_pool[i] = NULL;
     }
 }
 

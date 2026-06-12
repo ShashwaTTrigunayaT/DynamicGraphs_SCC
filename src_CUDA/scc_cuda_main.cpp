@@ -116,6 +116,7 @@ int main(int argc, char** argv)
     initialize_trim1_full(N);
     initialize_trim2(N);
     initialize_WCC(N);
+    work_q_init(num_threads);
 
     // Device counter
     int* d_count;
