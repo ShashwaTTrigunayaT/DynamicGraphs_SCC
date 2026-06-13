@@ -444,42 +444,87 @@ int repeat_global_trim1(GPUState& st, const GPUGraph& g,
 // Compact build helpers
 // ======================================================================
 
+// -------------------------------------------------------------------
+// Warp-ballot compact build kernels
+// Each kernel replaces per-thread atomicAdd with one atomicAdd per warp
+// (32x fewer atomics), reducing DRAM contention.
+//
+// Pattern:
+//   1. All threads in warp vote via __ballot_sync
+//   2. Lane 0 does one atomicAdd per warp
+//   3. __shfl_sync broadcasts the base offset
+//   4. __popc(mask & lower_lanes) gives each thread its local rank
+// -------------------------------------------------------------------
+
+// Build compact set of all non-SCC_FOUND nodes
+__global__ void build_compact_from_all_kernel(
+    const int* d_Color, int* d_targets, int* d_count, int num_nodes)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    bool active = (idx < num_nodes) && (d_Color[idx] != SCC_FOUND);
+
+    unsigned mask = __ballot_sync(0xffffffff, active);
+    int lane = threadIdx.x & 31;
+    int warp_count = __popc(mask);
+
+    int warp_base = 0;
+    if (lane == 0 && warp_count > 0)
+        warp_base = atomicAdd(d_count, warp_count);
+    warp_base = __shfl_sync(0xffffffff, warp_base, 0);
+
+    int local_rank = __popc(mask & ((1u << lane) - 1));
+    if (active)
+        d_targets[warp_base + local_rank] = idx;
+}
+
 // Build compact set of nodes matching a specific color
 __global__ void build_compact_by_color_kernel(
     const int* d_Color, int* d_targets, int* d_count,
     int num_nodes, int target_color)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= num_nodes) return;
-    if (d_Color[idx] == target_color) {
-        int pos = atomicAdd(d_count, 1);
-        d_targets[pos] = idx;
-    }
+    bool active = (idx < num_nodes) && (d_Color[idx] == target_color);
+
+    unsigned mask = __ballot_sync(0xffffffff, active);
+    int lane = threadIdx.x & 31;
+    int warp_count = __popc(mask);
+
+    int warp_base = 0;
+    if (lane == 0 && warp_count > 0)
+        warp_base = atomicAdd(d_count, warp_count);
+    warp_base = __shfl_sync(0xffffffff, warp_base, 0);
+
+    int local_rank = __popc(mask & ((1u << lane) - 1));
+    if (active)
+        d_targets[warp_base + local_rank] = idx;
 }
 
-__global__ void build_compact_from_all_kernel(
-    const int* d_Color, int* d_targets, int* d_count, int num_nodes)
-{
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= num_nodes) return;
-    if (d_Color[idx] != SCC_FOUND) {
-        int pos = atomicAdd(d_count, 1);
-        d_targets[pos] = idx;
-    }
-}
-
+// Build compact set of non-SCC_FOUND nodes from an existing source set
 __global__ void build_compact_from_existing_kernel(
     const int* d_Color,
     const int* d_src_targets, int num_src,
     int* d_dst_targets, int* d_count)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= num_src) return;
-    node_t n = d_src_targets[idx];
-    if (d_Color[n] != SCC_FOUND) {
-        int pos = atomicAdd(d_count, 1);
-        d_dst_targets[pos] = n;
+    bool active = false;
+    node_t n = -1;
+    if (idx < num_src) {
+        n = d_src_targets[idx];
+        active = (d_Color[n] != SCC_FOUND);
     }
+
+    unsigned mask = __ballot_sync(0xffffffff, active);
+    int lane = threadIdx.x & 31;
+    int warp_count = __popc(mask);
+
+    int warp_base = 0;
+    if (lane == 0 && warp_count > 0)
+        warp_base = atomicAdd(d_count, warp_count);
+    warp_base = __shfl_sync(0xffffffff, warp_base, 0);
+
+    int local_rank = __popc(mask & ((1u << lane) - 1));
+    if (active)
+        d_dst_targets[warp_base + local_rank] = n;
 }
 
 static void create_trim1_compact_1(GPUState& st, const GPUGraph& g)

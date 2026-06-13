@@ -1,23 +1,6 @@
 #include "scc_cuda.h"
 
-// ======================================================================
-// CUDA Work Queue — mirror of OpenMP my_work_queue.cc
-// OpenMP:
-//   static int max_th=1;
-//   static int padding1[8];
-//   static gm_spinlock_t q_lock = 0;
-//   static int padding2[32];
-//   static long work_sheet[MAX_THREADS * 8];
-//   static int padding3[32];
-//   static bool all_finished = false;
-//   static bool work_queue_empty = true;
-//   static int padding4[32];
-//   std::vector<my_work*> the_q;
-//   static int max_depth = 0;
-// ======================================================================
 
-// OpenMP: static long work_sheet[MAX_THREADS * 8];
-// CUDA: int* with stride-16 (= 64-byte cache line for 4-byte int)
 static int            g_max_th = 1;
 static bool           g_all_finished = false;
 static bool           g_queue_empty = true;
@@ -50,19 +33,7 @@ static void lock_release() {
     __sync_lock_release(&g_q_lock);
 }
 
-// ======================================================================
-// work_q_init()
-// OpenMP:
-//   void work_q_init(int num_threads) {
-//       q_lock = 0;
-//       for(int i=0;i<num_threads;i++)
-//           work_sheet[i*8] = 0;
-//       all_finished = false;
-//       work_queue_empty = true;
-//       max_th = num_threads;
-//       max_depth = 0;
-//   }
-// ======================================================================
+
 void work_q_init(int num_threads)
 {
     g_q_lock = 0;
@@ -346,6 +317,8 @@ void work_q_print_max_depth()
 
 // ======================================================================
 // scatter_by_color_kernel() — scatter targets into per-color compact arrays
+// Uses warp ballot (3 colors × 1 atomic per warp = 3 atomics per warp
+// instead of 3 per thread).
 // Used by create_works_after_bfs_trim() to build device node lists
 // ======================================================================
 __global__ void scatter_by_color_kernel(
@@ -356,24 +329,47 @@ __global__ void scatter_by_color_kernel(
     int* bw_out, int* bw_pos,
     int* base_out, int* base_pos)
 {
-    int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    int stride = gridDim.x * blockDim.x;
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= num_targets) return;
 
-    for (int i = tid; i < num_targets; i += stride) {
-        node_t t = d_targets[i];
-        int c = d_Color[t];
+    node_t t = d_targets[i];
+    int c = d_Color[t];
 
-        if (c == fw_color) {
-            int pos = atomicAdd(fw_pos, 1);
-            fw_out[pos] = t;
-        } else if (c == bw_color) {
-            int pos = atomicAdd(bw_pos, 1);
-            bw_out[pos] = t;
-        } else if (c == base_color) {
-            int pos = atomicAdd(base_pos, 1);
-            base_out[pos] = t;
-        }
-    }
+    bool is_fw   = (c == fw_color);
+    bool is_bw   = (c == bw_color);
+    bool is_base = (c == base_color);
+
+    int lane = threadIdx.x & 31;
+
+    // --- FW scatter ---
+    unsigned mask_fw = __ballot_sync(0xffffffff, is_fw);
+    int fw_warp_cnt = __popc(mask_fw);
+    int fw_base = 0;
+    if (lane == 0 && fw_warp_cnt > 0)
+        fw_base = atomicAdd(fw_pos, fw_warp_cnt);
+    fw_base = __shfl_sync(0xffffffff, fw_base, 0);
+    if (is_fw)
+        fw_out[fw_base + __popc(mask_fw & ((1u << lane) - 1))] = t;
+
+    // --- BW scatter ---
+    unsigned mask_bw = __ballot_sync(0xffffffff, is_bw);
+    int bw_warp_cnt = __popc(mask_bw);
+    int bw_base = 0;
+    if (lane == 0 && bw_warp_cnt > 0)
+        bw_base = atomicAdd(bw_pos, bw_warp_cnt);
+    bw_base = __shfl_sync(0xffffffff, bw_base, 0);
+    if (is_bw)
+        bw_out[bw_base + __popc(mask_bw & ((1u << lane) - 1))] = t;
+
+    // --- BASE scatter ---
+    unsigned mask_base = __ballot_sync(0xffffffff, is_base);
+    int base_warp_cnt = __popc(mask_base);
+    int base_base = 0;
+    if (lane == 0 && base_warp_cnt > 0)
+        base_base = atomicAdd(base_pos, base_warp_cnt);
+    base_base = __shfl_sync(0xffffffff, base_base, 0);
+    if (is_base)
+        base_out[base_base + __popc(mask_base & ((1u << lane) - 1))] = t;
 }
 
 // ======================================================================
@@ -401,6 +397,7 @@ __global__ void scatter_by_root_kernel(
 
 // ======================================================================
 // scatter_single_color_kernel() — scatter targets of one color into output
+// Warp ballot: 1 atomic per warp instead of 1 per thread.
 // ======================================================================
 __global__ void scatter_single_color_kernel(
     const int* d_Color,
@@ -408,16 +405,23 @@ __global__ void scatter_single_color_kernel(
     int target_color,
     int* d_out, int* d_pos)
 {
-    int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    int stride = gridDim.x * blockDim.x;
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= num_targets) return;
 
-    for (int i = tid; i < num_targets; i += stride) {
-        node_t t = d_targets[i];
-        if (d_Color[t] == target_color) {
-            int pos = atomicAdd(d_pos, 1);
-            d_out[pos] = t;
-        }
-    }
+    node_t t = d_targets[i];
+    bool active = (d_Color[t] == target_color);
+
+    unsigned mask = __ballot_sync(0xffffffff, active);
+    int lane = threadIdx.x & 31;
+    int warp_count = __popc(mask);
+
+    int warp_base = 0;
+    if (lane == 0 && warp_count > 0)
+        warp_base = atomicAdd(d_pos, warp_count);
+    warp_base = __shfl_sync(0xffffffff, warp_base, 0);
+
+    if (active)
+        d_out[warp_base + __popc(mask & ((1u << lane) - 1))] = t;
 }
 
 // ======================================================================
@@ -450,15 +454,22 @@ __global__ void scatter_single_color_all_nodes_kernel(
     int target_color,
     int* d_out, int* d_pos)
 {
-    int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    int stride = gridDim.x * blockDim.x;
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= num_nodes) return;
 
-    for (int i = tid; i < num_nodes; i += stride) {
-        if (d_Color[i] == target_color) {
-            int pos = atomicAdd(d_pos, 1);
-            d_out[pos] = i;
-        }
-    }
+    bool active = (d_Color[i] == target_color);
+
+    unsigned mask = __ballot_sync(0xffffffff, active);
+    int lane = threadIdx.x & 31;
+    int warp_count = __popc(mask);
+
+    int warp_base = 0;
+    if (lane == 0 && warp_count > 0)
+        warp_base = atomicAdd(d_pos, warp_count);
+    warp_base = __shfl_sync(0xffffffff, warp_base, 0);
+
+    if (active)
+        d_out[warp_base + __popc(mask & ((1u << lane) - 1))] = i;
 }
 
 // ======================================================================

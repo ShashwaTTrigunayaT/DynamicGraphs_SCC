@@ -380,14 +380,16 @@ int do_fw_bw_single_thread(GPUState& st, const GPUGraph& g,
     //   NODE_SET* fw_set = FW_BFS.get_fw_set();
     // ---------------------------------------------------------------
     int queue_size = 1;
-    CUDA_CHECK(cudaMemcpy(d_bfs_queue, &h_pivot, sizeof(int), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(&st.d_Color[h_pivot], &fw_color, sizeof(int),
-                           cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpyAsync(d_bfs_queue, &h_pivot, sizeof(int),
+                                cudaMemcpyHostToDevice, bfs_stream));
+    CUDA_CHECK(cudaMemcpyAsync(&st.d_Color[h_pivot], &fw_color, sizeof(int),
+                                cudaMemcpyHostToDevice, bfs_stream));
+    CUDA_CHECK(cudaStreamSynchronize(bfs_stream));
 
     int total_fw = 1;  // pivot counted (mirrors visit_fw on root in OpenMP)
 
     while (queue_size > 0) {
-        CUDA_CHECK(cudaMemset(d_bfs_next_count, 0, sizeof(int)));
+        CUDA_CHECK(cudaMemsetAsync(d_bfs_next_count, 0, sizeof(int), bfs_stream));
 
         int grid = (queue_size + block_size - 1) / block_size;
         grid = min(grid, 1024);
@@ -395,21 +397,25 @@ int do_fw_bw_single_thread(GPUState& st, const GPUGraph& g,
         // OpenMP: iterate_neighbor_small(t) + visit_fw(t)
         // CUDA: fw_bfs_level_kernel — same navigator check:
         //       check_navigator: return (G_Color[k9] == base_color)
-        fw_bfs_level_kernel<<<grid, block_size>>>(
+        fw_bfs_level_kernel<<<grid, block_size, 0, bfs_stream>>>(
             g.d_begin, g.d_node_idx,
             st.d_Color,
             d_bfs_queue, queue_size,
             d_bfs_next_queue, d_bfs_next_count,
             fw_color, base_color);
-        CUDA_CHECK(cudaDeviceSynchronize());
 
-        // OpenMP: do_end_of_level_fw() — sum thread counters
+        // Async D2H copy — starts after kernel on stream
+        CUDA_CHECK(cudaMemcpyAsync(h_pinned_next_count, d_bfs_next_count,
+                                    sizeof(int), cudaMemcpyDeviceToHost, bfs_stream));
+
+        // Single sync point instead of DeviceSynchronize + blocking Memcpy
+        CUDA_CHECK(cudaStreamSynchronize(bfs_stream));
+
         int* tmp = d_bfs_queue;
         d_bfs_queue = d_bfs_next_queue;
         d_bfs_next_queue = tmp;
 
-        CUDA_CHECK(cudaMemcpy(&queue_size, d_bfs_next_count, sizeof(int),
-                               cudaMemcpyDeviceToHost));
+        queue_size = *h_pinned_next_count;
         total_fw += queue_size;
     }
 
@@ -429,19 +435,20 @@ int do_fw_bw_single_thread(GPUState& st, const GPUGraph& g,
     //   NODE_SET* bw_set = BW_BFS.get_bw_set();
     // ---------------------------------------------------------------
     // Mark pivot itself as SCC (mirrors BW visit_fw on pivot with fw_color)
-    { int _scc_val = SCC_FOUND; CUDA_CHECK(cudaMemcpy(&st.d_Color[h_pivot], &_scc_val, sizeof(int),
-                           cudaMemcpyHostToDevice)); }
-    CUDA_CHECK(cudaMemcpy(&st.d_SCC[h_pivot], &h_pivot, sizeof(int),
-                           cudaMemcpyHostToDevice));
+    { int _scc_val = SCC_FOUND; CUDA_CHECK(cudaMemcpyAsync(&st.d_Color[h_pivot], &_scc_val, sizeof(int),
+                                   cudaMemcpyHostToDevice, bfs_stream)); }
+    CUDA_CHECK(cudaMemcpyAsync(&st.d_SCC[h_pivot], &h_pivot, sizeof(int),
+                                cudaMemcpyHostToDevice, bfs_stream));
+    CUDA_CHECK(cudaMemcpyAsync(d_bfs_queue, &h_pivot, sizeof(int),
+                                cudaMemcpyHostToDevice, bfs_stream));
+    CUDA_CHECK(cudaMemsetAsync(d_bfs_scc_count, 0, sizeof(int), bfs_stream));
+    CUDA_CHECK(cudaMemsetAsync(d_bfs_bw_count, 0, sizeof(int), bfs_stream));
+    CUDA_CHECK(cudaStreamSynchronize(bfs_stream));
+    queue_size = 1;
     int scc_count = 1;  // pivot counted (mirrors visit_fw on root in OpenMP)
 
-    CUDA_CHECK(cudaMemcpy(d_bfs_queue, &h_pivot, sizeof(int), cudaMemcpyHostToDevice));
-    queue_size = 1;
-    CUDA_CHECK(cudaMemset(d_bfs_scc_count, 0, sizeof(int)));
-    CUDA_CHECK(cudaMemset(d_bfs_bw_count, 0, sizeof(int)));
-
     while (queue_size > 0) {
-        CUDA_CHECK(cudaMemset(d_bfs_next_count, 0, sizeof(int)));
+        CUDA_CHECK(cudaMemsetAsync(d_bfs_next_count, 0, sizeof(int), bfs_stream));
 
         int grid = (queue_size + block_size - 1) / block_size;
         grid = min(grid, 1024);
@@ -449,31 +456,36 @@ int do_fw_bw_single_thread(GPUState& st, const GPUGraph& g,
         // OpenMP: iterate_neighbor_small(t) + visit_fw(t)
         // CUDA: bw_bfs_level_kernel — same navigator check:
         //       check_navigator: return (color == fw_color) || (color == base_color)
-        bw_bfs_level_kernel<<<grid, block_size>>>(
+        bw_bfs_level_kernel<<<grid, block_size, 0, bfs_stream>>>(
             g.d_r_begin, g.d_r_node_idx,
             st.d_Color, st.d_SCC,
             d_bfs_queue, queue_size,
             d_bfs_next_queue, d_bfs_next_count,
             fw_color, bw_color, base_color, h_pivot,
             d_bfs_scc_count, d_bfs_bw_count);
-        CUDA_CHECK(cudaDeviceSynchronize());
+
+        // Async D2H — starts after kernel on stream
+        CUDA_CHECK(cudaMemcpyAsync(h_pinned_next_count, d_bfs_next_count,
+                                    sizeof(int), cudaMemcpyDeviceToHost, bfs_stream));
+
+        CUDA_CHECK(cudaStreamSynchronize(bfs_stream));
 
         int* tmp = d_bfs_queue;
         d_bfs_queue = d_bfs_next_queue;
         d_bfs_next_queue = tmp;
 
-        CUDA_CHECK(cudaMemcpy(&queue_size, d_bfs_next_count, sizeof(int),
-                               cudaMemcpyDeviceToHost));
+        queue_size = *h_pinned_next_count;
     }
 
-    int extra_scc;
-    CUDA_CHECK(cudaMemcpy(&extra_scc, d_bfs_scc_count, sizeof(int),
-                           cudaMemcpyDeviceToHost));
+    // Read final SCC / BW counts via pinned memory
+    CUDA_CHECK(cudaMemcpyAsync(h_pinned_scc_count, d_bfs_scc_count, sizeof(int),
+                                cudaMemcpyDeviceToHost, bfs_stream));
+    CUDA_CHECK(cudaMemcpyAsync(h_pinned_bw_count, d_bfs_bw_count, sizeof(int),
+                                cudaMemcpyDeviceToHost, bfs_stream));
+    CUDA_CHECK(cudaStreamSynchronize(bfs_stream));
+    int extra_scc = *h_pinned_scc_count;
     scc_count += extra_scc;
-
-    int bw_count;
-    CUDA_CHECK(cudaMemcpy(&bw_count, d_bfs_bw_count, sizeof(int),
-                           cudaMemcpyDeviceToHost));
+    int bw_count = *h_pinned_bw_count;
 
     // ---------------------------------------------------------------
     // Compute partition sizes (mirrors OpenMP exactly)

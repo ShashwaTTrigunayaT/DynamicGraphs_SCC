@@ -31,6 +31,13 @@ int* d_bfs_next_count   = NULL;  // [1] atomic counter for next level size
 int* d_bfs_scc_count    = NULL;  // [1] atomic counter for SCC nodes found
 int* d_bfs_bw_count     = NULL;  // [1] atomic counter for bw-colored nodes
 
+// Pinned host memory + stream for async BFS level loop
+// Pinned memory enables faster D2H transfers (avoids staging buffer)
+cudaStream_t bfs_stream        = NULL;
+int*         h_pinned_next_count = NULL;  // pinned: next frontier size
+int*         h_pinned_scc_count  = NULL;  // pinned: SCC count
+int*         h_pinned_bw_count   = NULL;  // pinned: BW count
+
 static int init_fw_color;
 static int init_bw_color;
 static int init_base_color;
@@ -99,6 +106,14 @@ void initialize_global_fb(int num_nodes)
     CUDA_CHECK(cudaMalloc(&d_bfs_scc_count,   sizeof(int)));
     CUDA_CHECK(cudaMalloc(&d_bfs_bw_count,    sizeof(int)));
 
+    // Allocate pinned host memory for async D2H copies (faster D2H, no staging)
+    if (!h_pinned_next_count) CUDA_CHECK(cudaMallocHost(&h_pinned_next_count, sizeof(int)));
+    if (!h_pinned_scc_count)  CUDA_CHECK(cudaMallocHost(&h_pinned_scc_count,  sizeof(int)));
+    if (!h_pinned_bw_count)   CUDA_CHECK(cudaMallocHost(&h_pinned_bw_count,  sizeof(int)));
+
+    // Create stream for async kernel launches + memcpy
+    if (!bfs_stream) CUDA_CHECK(cudaStreamCreate(&bfs_stream));
+
     init_fw_color = 0;
     init_bw_color = 0;
     init_base_color = 0;
@@ -116,6 +131,12 @@ void finalize_global_fb()
     if (d_bfs_next_count) { cudaFree(d_bfs_next_count); d_bfs_next_count = NULL; }
     if (d_bfs_scc_count)  { cudaFree(d_bfs_scc_count);  d_bfs_scc_count = NULL; }
     if (d_bfs_bw_count)   { cudaFree(d_bfs_bw_count);   d_bfs_bw_count = NULL; }
+
+    // Free pinned memory and destroy stream
+    if (h_pinned_next_count) { cudaFreeHost(h_pinned_next_count); h_pinned_next_count = NULL; }
+    if (h_pinned_scc_count)  { cudaFreeHost(h_pinned_scc_count); h_pinned_scc_count = NULL; }
+    if (h_pinned_bw_count)   { cudaFreeHost(h_pinned_bw_count);  h_pinned_bw_count = NULL; }
+    if (bfs_stream)          { cudaStreamDestroy(bfs_stream);     bfs_stream = NULL; }
 }
 
 // ======================================================================
@@ -498,34 +519,39 @@ int do_global_fw_bw_main(GPUState& st, const GPUGraph& g,
     //   int fw_count = FW_BFS.get_fw_count();
     // ---------------------------------------------------------------
     int queue_size = 1;
-    CUDA_CHECK(cudaMemcpy(d_bfs_queue, &h_pivot, sizeof(int), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(&st.d_Color[h_pivot], &fw_color, sizeof(int),
-                           cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpyAsync(d_bfs_queue, &h_pivot, sizeof(int),
+                                cudaMemcpyHostToDevice, bfs_stream));
+    CUDA_CHECK(cudaMemcpyAsync(&st.d_Color[h_pivot], &fw_color, sizeof(int),
+                                cudaMemcpyHostToDevice, bfs_stream));
+    CUDA_CHECK(cudaStreamSynchronize(bfs_stream));
 
     int total_fw = 1;  // pivot counted
 
     while (queue_size > 0) {
-        CUDA_CHECK(cudaMemset(d_bfs_next_count, 0, sizeof(int)));
+        CUDA_CHECK(cudaMemsetAsync(d_bfs_next_count, 0, sizeof(int), bfs_stream));
 
         int grid = (queue_size + block_size - 1) / block_size;
         grid = min(grid, 1024);
 
-        fw_bfs_level_kernel<<<grid, block_size>>>(
+        fw_bfs_level_kernel<<<grid, block_size, 0, bfs_stream>>>(
             g.d_begin, g.d_node_idx,
             st.d_Color,
             d_bfs_queue, queue_size,
             d_bfs_next_queue, d_bfs_next_count,
             fw_color, base_color);
-        CUDA_CHECK(cudaDeviceSynchronize());
 
-        // OpenMP: do_end_of_level_fw() — sum thread counters
-        // CUDA: read atomic counter
+        // Async D2H copy — starts as soon as kernel completes on stream
+        CUDA_CHECK(cudaMemcpyAsync(h_pinned_next_count, d_bfs_next_count,
+                                    sizeof(int), cudaMemcpyDeviceToHost, bfs_stream));
+
+        // Single sync point instead of DeviceSynchronize + blocking Memcpy
+        CUDA_CHECK(cudaStreamSynchronize(bfs_stream));
+
         int* tmp = d_bfs_queue;
         d_bfs_queue = d_bfs_next_queue;
         d_bfs_next_queue = tmp;
 
-        CUDA_CHECK(cudaMemcpy(&queue_size, d_bfs_next_count, sizeof(int),
-                               cudaMemcpyDeviceToHost));
+        queue_size = *h_pinned_next_count;
         total_fw += queue_size;
     }
 
@@ -546,48 +572,54 @@ int do_global_fw_bw_main(GPUState& st, const GPUGraph& g,
     //   base_count = base_count - fw_count - bw_count - scc_count;
     // ---------------------------------------------------------------
     // Mark pivot itself as SCC (always in intersection)
-    { int _scc_val = SCC_FOUND; CUDA_CHECK(cudaMemcpy(&st.d_Color[h_pivot], &_scc_val, sizeof(int),
-                           cudaMemcpyHostToDevice)); }
-    CUDA_CHECK(cudaMemcpy(&st.d_SCC[h_pivot], &h_pivot, sizeof(int),
-                           cudaMemcpyHostToDevice));
+    { int _scc_val = SCC_FOUND; CUDA_CHECK(cudaMemcpyAsync(&st.d_Color[h_pivot], &_scc_val, sizeof(int),
+                                   cudaMemcpyHostToDevice, bfs_stream)); }
+    CUDA_CHECK(cudaMemcpyAsync(&st.d_SCC[h_pivot], &h_pivot, sizeof(int),
+                                cudaMemcpyHostToDevice, bfs_stream));
+    CUDA_CHECK(cudaMemcpyAsync(d_bfs_queue, &h_pivot, sizeof(int),
+                                cudaMemcpyHostToDevice, bfs_stream));
+    CUDA_CHECK(cudaMemsetAsync(d_bfs_scc_count, 0, sizeof(int), bfs_stream));
+    CUDA_CHECK(cudaMemsetAsync(d_bfs_bw_count, 0, sizeof(int), bfs_stream));
+    CUDA_CHECK(cudaStreamSynchronize(bfs_stream));
+    queue_size = 1;
     int scc_count = 1;
 
-    CUDA_CHECK(cudaMemcpy(d_bfs_queue, &h_pivot, sizeof(int), cudaMemcpyHostToDevice));
-    queue_size = 1;
-    CUDA_CHECK(cudaMemset(d_bfs_scc_count, 0, sizeof(int)));
-    CUDA_CHECK(cudaMemset(d_bfs_bw_count, 0, sizeof(int)));
-
     while (queue_size > 0) {
-        CUDA_CHECK(cudaMemset(d_bfs_next_count, 0, sizeof(int)));
+        CUDA_CHECK(cudaMemsetAsync(d_bfs_next_count, 0, sizeof(int), bfs_stream));
 
         int grid = (queue_size + block_size - 1) / block_size;
         grid = min(grid, 1024);
 
-        bw_bfs_level_kernel<<<grid, block_size>>>(
+        bw_bfs_level_kernel<<<grid, block_size, 0, bfs_stream>>>(
             g.d_r_begin, g.d_r_node_idx,
             st.d_Color, st.d_SCC,
             d_bfs_queue, queue_size,
             d_bfs_next_queue, d_bfs_next_count,
             fw_color, bw_color, base_color, h_pivot,
             d_bfs_scc_count, d_bfs_bw_count);
-        CUDA_CHECK(cudaDeviceSynchronize());
+
+        // Async D2H — starts after kernel on stream
+        CUDA_CHECK(cudaMemcpyAsync(h_pinned_next_count, d_bfs_next_count,
+                                    sizeof(int), cudaMemcpyDeviceToHost, bfs_stream));
+
+        CUDA_CHECK(cudaStreamSynchronize(bfs_stream));
 
         int* tmp = d_bfs_queue;
         d_bfs_queue = d_bfs_next_queue;
         d_bfs_next_queue = tmp;
 
-        CUDA_CHECK(cudaMemcpy(&queue_size, d_bfs_next_count, sizeof(int),
-                               cudaMemcpyDeviceToHost));
+        queue_size = *h_pinned_next_count;
     }
 
-    int extra_scc;
-    CUDA_CHECK(cudaMemcpy(&extra_scc, d_bfs_scc_count, sizeof(int),
-                           cudaMemcpyDeviceToHost));
+    // Read final SCC / BW counts via pinned memory (async, then single sync)
+    CUDA_CHECK(cudaMemcpyAsync(h_pinned_scc_count, d_bfs_scc_count, sizeof(int),
+                                cudaMemcpyDeviceToHost, bfs_stream));
+    CUDA_CHECK(cudaMemcpyAsync(h_pinned_bw_count, d_bfs_bw_count, sizeof(int),
+                                cudaMemcpyDeviceToHost, bfs_stream));
+    CUDA_CHECK(cudaStreamSynchronize(bfs_stream));
+    int extra_scc = *h_pinned_scc_count;
     scc_count += extra_scc;
-
-    int bw_count;
-    CUDA_CHECK(cudaMemcpy(&bw_count, d_bfs_bw_count, sizeof(int),
-                           cudaMemcpyDeviceToHost));
+    int bw_count = *h_pinned_bw_count;
 
     // OpenMP: compute counts for each partition
     //   int bw_count = BW_BFS.get_bw_count();

@@ -258,6 +258,12 @@ extern int* d_bfs_next_count;
 extern int* d_bfs_scc_count;
 extern int* d_bfs_bw_count;
 
+// Pinned host memory + stream for async BFS level loop (pinned = faster D2H)
+extern int* h_pinned_next_count;
+extern int* h_pinned_scc_count;
+extern int* h_pinned_bw_count;
+extern cudaStream_t bfs_stream;
+
 // initialize / finalize
 void initialize_global_fb(int num_nodes);
 void finalize_global_fb();
