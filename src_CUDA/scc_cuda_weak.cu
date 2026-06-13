@@ -26,6 +26,10 @@ static int** d_wcc_sets = NULL;      // [N] device-side pointer array (mirror of
 static int*  d_temp_buf = NULL;      // [max_sets * avg_size] device temp buffer
 static int   d_temp_buf_capacity = 0;
 
+// Big buffer for WCC per-root sets (single allocation, sliced by pointer arithmetic)
+static int*  d_wcc_big_buffer = NULL;
+static int   d_wcc_big_buffer_size = 0;
+
 // OpenMP: static int pool_cnt=0;
 //         static NODE_SET** node_set_pool;
 // CUDA: pool of pre-allocated device buffers for work sets
@@ -147,12 +151,14 @@ void finalize_WCC()
     if (d_WCC) { cudaFree(d_WCC); d_WCC = NULL; }
     d_WCC_num_nodes = 0;
 
+    // Free the single big buffer (replaces thousands of per-root cudaFree calls)
+    if (d_wcc_big_buffer) { cudaFree(d_wcc_big_buffer); d_wcc_big_buffer = NULL; }
+    d_wcc_big_buffer_size = 0;
+
     // OpenMP: delete [] wcc_sets;
     if (h_wcc_sets) {
-        // Free any individual set buffers that were allocated
-        for (int i = 0; i < saved_num_nodes; i++) {
-            if (h_wcc_sets[i]) cudaFree(h_wcc_sets[i]);
-        }
+        // Individual h_wcc_sets[i] are slices of d_wcc_big_buffer — do NOT free them.
+        // The big buffer is freed above as a single cudaFree call.
         delete[] h_wcc_sets;
         h_wcc_sets = NULL;
     }
@@ -653,13 +659,15 @@ void create_work_items_from_wcc(GPUState& st, const GPUGraph& g)
     CUDA_CHECK(cudaMemcpy(h_root_counts, d_root_counts,
                            N * sizeof(int), cudaMemcpyDeviceToHost));
 
-    // Allocate per-root device buffers and store in h_wcc_sets[root]
-    // OpenMP: wcc_sets[t4] = get_node_set_from_pool();
+
+    // Build root list and compute prefix sums
     std::vector<int> root_list;
+    std::vector<int> offsets;  // prefix sum of root counts
+    offsets.push_back(0);
     for (int i = 0; i < N; i++) {
         if (h_root_counts[i] > 0) {
-            CUDA_CHECK(cudaMalloc(&h_wcc_sets[i], h_root_counts[i] * sizeof(int)));
             root_list.push_back(i);
+            offsets.push_back(offsets.back() + h_root_counts[i]);
         }
     }
 
@@ -667,6 +675,18 @@ void create_work_items_from_wcc(GPUState& st, const GPUGraph& g)
         delete[] h_root_counts;
         CUDA_CHECK(cudaFree(d_root_counts));
         return;
+    }
+
+    // Single large allocation instead of thousands of per-root cudaMalloc calls
+    int total_members = offsets.back();
+    if (d_wcc_big_buffer) cudaFree(d_wcc_big_buffer);  // guard against re-entrant calls
+    CUDA_CHECK(cudaMalloc(&d_wcc_big_buffer, total_members * sizeof(int)));
+    d_wcc_big_buffer_size = total_members;
+
+    // Assign slices to each root via pointer arithmetic
+    for (size_t ri = 0; ri < root_list.size(); ri++) {
+        node_t root = root_list[ri];
+        h_wcc_sets[root] = d_wcc_big_buffer + offsets[ri];
     }
 
     // ---------------------------------------------------------------
@@ -728,26 +748,31 @@ void create_work_items_from_wcc(GPUState& st, const GPUGraph& g)
     std::vector<CUDAMyWork*> new_works;
     new_works.reserve(root_list.size());
 
+    // Batch-read entire d_Color array (one D2H instead of N per-root copies)
+    int* h_Color = new int[N];
+    CUDA_CHECK(cudaMemcpy(h_Color, st.d_Color,
+                           N * sizeof(int), cudaMemcpyDeviceToHost));
+
     for (size_t ri = 0; ri < root_list.size(); ri++) {
         node_t root = root_list[ri];
         int root_count = h_root_counts[root];
 
         // OpenMP: w1->color = G_Color[i];
-        int root_color;
-        CUDA_CHECK(cudaMemcpy(&root_color, &st.d_Color[root],
-                               sizeof(int), cudaMemcpyDeviceToHost));
+        int root_color = h_Color[root];  // host read — zero device calls
 
         // OpenMP: my_work* w1 = new my_work();
         CUDAMyWork* w1 = new CUDAMyWork();
         w1->color = root_color;
         w1->count = root_count;
         // OpenMP: w1->color_set = wcc_sets[i];
-        w1->d_set_nodes = h_wcc_sets[root];  // take ownership of the device buffer
+        w1->d_set_nodes = h_wcc_sets[root];  // slice of big buffer
         w1->set_capacity = root_count;
-        w1->owns_set = 1;  // CUDA: buffer was allocated with cudaMalloc, must free
+        w1->owns_set = 0;  // CUDA: no per-root cudaFree — part of big buffer
         w1->depth = 0;
         new_works.push_back(w1);
     }
+
+    delete[] h_Color;
 
     // Clear h_wcc_sets entries (ownership transferred to CUDAMyWork)
     for (size_t ri = 0; ri < root_list.size(); ri++) {
