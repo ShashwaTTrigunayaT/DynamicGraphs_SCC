@@ -198,8 +198,9 @@ __device__ bool fw_check_navigator_device(int* d_Color, node_t k9, int base_colo
 //
 // Optimization: Per-thread local staging of claimed nodes.
 // Instead of per-node atomicAdd to d_next_count (1 atomic per claimed
-// node), collect up to 128 claimed nodes locally, then flush with a
-// single atomicAdd per thread. Reduces atomic contention by ~128x.
+// node), collect up to STAGE_SIZE claimed nodes locally, then flush
+// with a single atomicAdd per thread. Reduces atomic contention by
+// ~STAGE_SIZE x.
 // ======================================================================
 __global__ void fw_bfs_level_kernel(
     const edge_t* d_begin, const node_t* d_node_idx,
@@ -210,6 +211,22 @@ __global__ void fw_bfs_level_kernel(
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     int stride = blockDim.x * gridDim.x;
+
+    // Per-thread staging buffer for claimed nodes
+    const int STAGE_SIZE = 32;
+    int staged[STAGE_SIZE];
+    int staged_cnt = 0;
+
+    // Helper: flush local buffer to global queue (single atomicAdd)
+#define FW_FLUSH() do {                                                 \
+    if (staged_cnt > 0) {                                               \
+        int base = atomicAdd(d_next_count, staged_cnt);                 \
+        for (int _j = 0; _j < staged_cnt; _j++)                         \
+            d_next_queue[base + _j] = staged[_j];                       \
+        staged_cnt = 0;                                                  \
+    }                                                                    \
+} while(0)
+
     for (int i = tid; i < queue_size; i += stride) {
         node_t t = d_queue[i];
         for (edge_t nx = d_begin[t]; nx < d_begin[t + 1]; nx++) {
@@ -217,12 +234,18 @@ __global__ void fw_bfs_level_kernel(
             if (fw_check_navigator_device(d_Color, k, base_color)) {
                 int old = atomicCAS(&d_Color[k], base_color, fw_color);
                 if (old == base_color) {
-                    int pos = atomicAdd(d_next_count, 1);
-                    d_next_queue[pos] = k;
+                    staged[staged_cnt++] = k;
+                    if (staged_cnt == STAGE_SIZE) {
+                        FW_FLUSH();
+                    }
                 }
             }
         }
     }
+
+    // Flush remaining
+    FW_FLUSH();
+#undef FW_FLUSH
 }
 
 // ======================================================================
@@ -291,9 +314,9 @@ __device__ bool bw_check_navigator_device(int* d_Color, node_t k10,
 //      eliminates the window where another thread could change the
 //      color between the navigator check and the if-else dispatch.
 //
-// Optimization: Per-thread local staging for all three counters
-// (d_next_count, d_scc_count, d_bw_count). Reduces global atomic
-// contention by ~128x.
+// Optimization: Per-thread local staging for d_next_count + per-thread
+// local accumulators for d_scc_count and d_bw_count. Reduces global
+// atomic contention by ~STAGE_SIZE x.
 // ======================================================================
 __global__ void bw_bfs_level_kernel(
     const edge_t* d_r_begin, const node_t* d_r_node_idx,
@@ -305,6 +328,24 @@ __global__ void bw_bfs_level_kernel(
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     int stride = blockDim.x * gridDim.x;
+
+    // Per-thread staging buffer for claimed nodes + local counters
+    const int STAGE_SIZE = 32;
+    int staged[STAGE_SIZE];
+    int staged_cnt = 0;
+    int local_scc = 0;
+    int local_bw = 0;
+
+    // Helper: flush local buffer to global queue (single atomicAdd)
+#define BW_FLUSH() do {                                                 \
+    if (staged_cnt > 0) {                                               \
+        int base = atomicAdd(d_next_count, staged_cnt);                 \
+        for (int _j = 0; _j < staged_cnt; _j++)                         \
+            d_next_queue[base + _j] = staged[_j];                       \
+        staged_cnt = 0;                                                  \
+    }                                                                    \
+} while(0)
+
     for (int i = tid; i < queue_size; i += stride) {
         node_t t = d_queue[i];
         for (edge_t nx = d_r_begin[t]; nx < d_r_begin[t + 1]; nx++) {
@@ -314,21 +355,33 @@ __global__ void bw_bfs_level_kernel(
                 int old = atomicCAS(&d_Color[k], fw_color, SCC_FOUND);
                 if (old == fw_color) {
                     d_SCC[k] = pivot;
-                    atomicAdd(d_scc_count, 1);
-                    int pos = atomicAdd(d_next_count, 1);
-                    d_next_queue[pos] = k;
+                    local_scc++;
+                    staged[staged_cnt++] = k;
+                    if (staged_cnt == STAGE_SIZE) {
+                        BW_FLUSH();
+                    }
                 }
             }
             else if (k_color == base_color) {
                 int old = atomicCAS(&d_Color[k], base_color, bw_color);
                 if (old == base_color) {
-                    atomicAdd(d_bw_count, 1);
-                    int pos = atomicAdd(d_next_count, 1);
-                    d_next_queue[pos] = k;
+                    local_bw++;
+                    staged[staged_cnt++] = k;
+                    if (staged_cnt == STAGE_SIZE) {
+                        BW_FLUSH();
+                    }
                 }
             }
         }
     }
+
+    // Flush remaining queue entries
+    BW_FLUSH();
+#undef BW_FLUSH
+
+    // Flush local SCC / BW counters (one atomicAdd per thread per counter)
+    if (local_scc > 0) atomicAdd(d_scc_count, local_scc);
+    if (local_bw > 0) atomicAdd(d_bw_count, local_bw);
 }
 
 // ======================================================================
