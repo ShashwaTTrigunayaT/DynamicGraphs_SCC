@@ -6,6 +6,8 @@
 #include <string.h>
 #include <assert.h>
 #include <sys/time.h>
+#include <string>
+#include <queue>
 #include <vector>
 #include <cuda_runtime.h>
 
