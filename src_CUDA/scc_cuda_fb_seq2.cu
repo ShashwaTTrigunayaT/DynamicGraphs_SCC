@@ -897,10 +897,14 @@ static void host_fw_bw_partition(
     host_bw_dfs(pivot, pivot, h_Color, h_SCC, node_set, in_set,
                 fw_color, bw_color, base_color, bw_set, scc_count);
 
-    // Compute partition sizes (both fw_count and scc_count include pivot)
+    // Debug: detect potential non-trivial SCCs
     int fw_only = fw_count - scc_count;
     int bw_count = (int)bw_set.size();
     int base_count = (int)node_set.size() - fw_count - bw_count;
+    if (scc_count >= 3 || (scc_count >= 2 && fw_only > 0)) {
+        printf("[DBG] SCC>=2: setSize=%d fw=%d scc=%d bw=%d base=%d\n",
+               (int)node_set.size(), fw_count, scc_count, bw_count, base_count);
+    }
 
     // Build fw partition (nodes still with fw_color, not in SCC)
     if (fw_only > 0) {
