@@ -1,4 +1,5 @@
 #include "scc_cuda.h"
+#include <omp.h>
 
 // ======================================================================
 // fw_trim_dfs — Forward DFS (sequential in OpenMP)
@@ -788,13 +789,10 @@ void start_workers_fw_bw_dfs(GPUState& st, const GPUGraph& g, int N)
 static void host_fw_dfs(
     int start,
     std::vector<int>& h_Color,
-    const std::vector<int>& node_set,     // which nodes are in scope
-    const std::vector<int>& marker,        // versioned marker for O(1) membership
-    int marker_version,                     // current marker version
     int base_color, int fw_color,
     std::vector<int>& fw_result)           // output: nodes marked fw_color
 {
-    // Use a queue (BFS) to match GPU kernel behavior
+    // BFS: only traverse nodes with base_color (confined to current component)
     std::vector<int> queue;
     int head = 0;
     queue.push_back(start);
@@ -805,7 +803,7 @@ static void host_fw_dfs(
         head++;
         for (edge_t e = g_h_begin[n]; e < g_h_begin[n + 1]; e++) {
             node_t k = g_h_node_idx[e];
-            if (h_Color[k] == base_color && marker[k] == marker_version) {
+            if (h_Color[k] == base_color) {
                 h_Color[k] = fw_color;
                 fw_result.push_back(k);
                 queue.push_back(k);
@@ -860,10 +858,7 @@ static void host_bw_dfs(
 // Recursive host-side FW-BW processing for a set of nodes
 static void host_fw_bw_partition(
     std::vector<int>& h_Color, std::vector<int>& h_SCC,
-    int N, int num_nodes_total,
     std::vector<int>& node_set,   // nodes to process (sorted base_color)
-    const std::vector<int>& marker,  // versioned marker for membership
-    int marker_version,              // current marker version
     int base_color,
     std::vector<std::pair<std::vector<int>, int>>& pending_tasks)
 {
@@ -888,7 +883,7 @@ static void host_fw_bw_partition(
 
     // FW DFS from pivot (pivot is included in fw_set)
     std::vector<int> fw_set;
-    host_fw_dfs(pivot, h_Color, node_set, marker, marker_version, base_color, fw_color, fw_set);
+    host_fw_dfs(pivot, h_Color, base_color, fw_color, fw_set);
     int fw_count = (int)fw_set.size();  // includes pivot
 
     // BW DFS from pivot
@@ -948,59 +943,62 @@ void start_workers_fw_bw_dfs_host(GPUState& st, const GPUGraph& g, int N)
                            num_nodes * sizeof(int), cudaMemcpyDeviceToHost));
 
     // ---------------------------------------------------------------
-    // Phase 2: Drain the work queue and process each work item on host
+    // Phase 2: Drain work queue and pre-download node sets
     // ---------------------------------------------------------------
     std::vector<CUDAMyWork*> all_works;
     work_q_fetch_N(0, 999999, all_works);  // drain entire queue
 
-    // Reusable marker array for O(1) membership checks (avoids per-component vector<bool> alloc)
-    std::vector<int> marker(num_nodes, 0);
-    int marker_version = 0;
+    // Extract: (node_set_copy, color) — no CUDA calls inside parallel region
+    struct HostWorkItem {
+        std::vector<int> node_set;
+        int color;
+    };
+    std::vector<HostWorkItem> items;
+    items.reserve(all_works.size());
 
-    // Process each work item's set
     for (CUDAMyWork* w : all_works) {
         if (w->count == 0) { delete w; continue; }
 
-        // d_set_nodes may be NULL — if so, find nodes of w->color in h_Color
-        std::vector<int> node_set;
+        HostWorkItem item;
+        item.color = w->color;
         if (w->d_set_nodes != NULL) {
-            node_set.resize(w->count);
-            CUDA_CHECK(cudaMemcpy(node_set.data(), w->d_set_nodes,
+            item.node_set.resize(w->count);
+            CUDA_CHECK(cudaMemcpy(item.node_set.data(), w->d_set_nodes,
                                    w->count * sizeof(int), cudaMemcpyDeviceToHost));
             if (w->owns_set) {
                 CUDA_CHECK(cudaFree(w->d_set_nodes));
-                w->d_set_nodes = NULL;
             }
         } else {
-            // Scan all nodes for w->color
             for (int i = 0; i < num_nodes; i++) {
-                if (h_Color[i] == w->color) node_set.push_back(i);
+                if (h_Color[i] == w->color) item.node_set.push_back(i);
             }
         }
-
-        int w_color = w->color;   // save before delete (fix use-after-free)
         delete w;
-
-        if (node_set.empty()) continue;
-
-        // Mark membership with versioned marker (avoids O(N) per-component alloc)
-        marker_version++;
-        for (int n : node_set) marker[n] = marker_version;
-
-        // Process this WCC component recursively
-        std::vector<std::pair<std::vector<int>, int>> pending;
-        pending.push_back({node_set, w_color});
-
-        while (!pending.empty()) {
-            auto task = pending.back();
-            pending.pop_back();
-            host_fw_bw_partition(h_Color, h_SCC, num_nodes, num_nodes,
-                                 task.first, marker, marker_version, task.second, pending);
+        if (!item.node_set.empty()) {
+            items.push_back(std::move(item));
         }
     }
 
     // ---------------------------------------------------------------
-    // Phase 3: Upload modified d_Color and d_SCC back to GPU
+    // Phase 3: Process each WCC component in parallel (OpenMP)
+    //          Each component has a unique color — no overlap between threads.
+    //          cuda_get_new_color() uses atomic fetch-and-add — thread-safe.
+    // ---------------------------------------------------------------
+    #pragma omp parallel for schedule(dynamic, 1)
+    for (int wi = 0; wi < (int)items.size(); wi++) {
+        HostWorkItem& item = items[wi];
+        std::vector<std::pair<std::vector<int>, int>> pending;
+        pending.push_back({std::move(item.node_set), item.color});
+
+        while (!pending.empty()) {
+            auto task = pending.back();
+            pending.pop_back();
+            host_fw_bw_partition(h_Color, h_SCC, task.first, task.second, pending);
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Phase 4: Upload modified d_Color and d_SCC back to GPU
     // ---------------------------------------------------------------
     CUDA_CHECK(cudaMemcpy(st.d_Color, h_Color.data(),
                            num_nodes * sizeof(int), cudaMemcpyHostToDevice));

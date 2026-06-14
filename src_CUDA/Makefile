@@ -30,7 +30,7 @@ else
   ARCH = sm_89
 endif
 
-NVCCFLAGS = -O3 -I. -I$(GM_INC) -std=c++11 -arch=$(ARCH)
+NVCCFLAGS = -O3 -I. -I$(GM_INC) -std=c++11 -arch=$(ARCH) -Xcompiler -fopenmp
 CXXFLAGS  = -O3 -I. -I$(GM_INC) -I$(CUDA_HOME)/include -std=c++11 -fopenmp
 LFLAGS    = -L$(CUDA_HOME)/lib64 -lcudart -L$(GM_LIB) -lgmgraph -lgomp
 
