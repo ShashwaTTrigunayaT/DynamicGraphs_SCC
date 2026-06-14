@@ -819,9 +819,6 @@ static void host_fw_dfs(
 static void host_bw_dfs(
     int start, int pivot,
     std::vector<int>& h_Color, std::vector<int>& h_SCC,
-    const std::vector<int>& node_set,
-    const std::vector<int>& marker,
-    int marker_version,
     int fw_color, int bw_color, int base_color,
     std::vector<int>& bw_result, int& scc_count)
 {
@@ -897,8 +894,7 @@ static void host_fw_bw_partition(
     // BW DFS from pivot
     std::vector<int> bw_set;
     int scc_count = 0;
-    host_bw_dfs(pivot, pivot, h_Color, h_SCC, node_set, marker, marker_version,
-                fw_color, bw_color, base_color, bw_set, scc_count);
+    host_bw_dfs(pivot, pivot, h_Color, h_SCC, fw_color, bw_color, base_color, bw_set, scc_count);
 
     int fw_only = fw_count - scc_count;
     int bw_count = (int)bw_set.size();
@@ -942,7 +938,7 @@ void start_workers_fw_bw_dfs_host(GPUState& st, const GPUGraph& g, int N)
     int num_nodes = g.num_nodes;
 
     // ---------------------------------------------------------------
-    // Phase 1: Download entire d_Color, d_SCC, and verify CSR alignment
+    // Phase 1: Download entire d_Color and d_SCC to host
     // ---------------------------------------------------------------
     std::vector<int> h_Color(num_nodes);
     std::vector<int> h_SCC(num_nodes);
