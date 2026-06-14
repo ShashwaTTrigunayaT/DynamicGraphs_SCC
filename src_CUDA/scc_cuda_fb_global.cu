@@ -632,6 +632,8 @@ int do_global_fw_bw_main(GPUState& st, const GPUGraph& g,
     int h_bw;
     CUDA_CHECK(cudaMemcpy(&h_scc, d_bfs_scc_count, sizeof(int), cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaMemcpy(&h_bw, d_bfs_bw_count, sizeof(int), cudaMemcpyDeviceToHost));
+    scc_count += h_scc;
+    bw_count = h_bw;
     printf("[CUDA BFS DEBUG] BW done: scc_found=%d (excluding pivot) bw_found=%d\n", h_scc, h_bw);
 
     // Read final SCC / BW counts via pinned memory (async, then single sync)
