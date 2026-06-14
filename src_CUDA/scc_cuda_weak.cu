@@ -640,7 +640,7 @@ void do_global_wcc(GPUState& st, const GPUGraph& g)
         d_trim_targets, num_targets);
     CUDA_CHECK(cudaDeviceSynchronize());
 
-    printf("[CUDA WCC] %d components, %d iterations\n", num_roots, cuda_iters);
+    printf("[CUDA WCC] %d components, %d iterations\n", h_num_roots, cuda_iters);
 }
 
 // ======================================================================
