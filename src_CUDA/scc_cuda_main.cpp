@@ -596,10 +596,13 @@ int main(int argc, char** argv)
     // ---------------------------------------------------------------
     // Cleanup
     // ---------------------------------------------------------------
+    // Note: finalize_global_fb() is called inside each method block (0, 1, 2)
+    // when initialize_global_fb() was called. Do NOT call it again here —
+    // the double-free causes "double free or corruption (out)" on larger
+    // datasets where the BFS allocates many pinned-memory buffers.
     cudaFree(d_count);
     if (d_count_trim_spec) cudaFree(d_count_trim_spec);
     dynamic_arrays_free(da);
-    if (met_algo >= 1 && met_algo <= 2) finalize_global_fb();
     finalize_WCC();
     finalize_trim2();
     finalize_trim1();
