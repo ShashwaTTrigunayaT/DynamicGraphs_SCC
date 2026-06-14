@@ -998,6 +998,17 @@ void start_workers_fw_bw_dfs_host(GPUState& st, const GPUGraph& g, int N)
     }
 
     // ---------------------------------------------------------------
+    // Debug: count SCCs before and after host-side processing
+    // ---------------------------------------------------------------
+    int host_total = 0, host_before = 0, host_found = 0;
+    for (int i = 0; i < num_nodes; i++) {
+        if (h_SCC[i] == i) host_total++;
+        if (h_SCC[i] != -1) host_found++;
+    }
+    printf("[CUDA FB HOST] Before upload: SCC roots=%d, assigned=%.4f%%\n",
+           host_total, 100.0 * host_found / num_nodes);
+
+    // ---------------------------------------------------------------
     // Phase 3: Upload modified d_Color and d_SCC back to GPU
     // ---------------------------------------------------------------
     CUDA_CHECK(cudaMemcpy(st.d_Color, h_Color.data(),
