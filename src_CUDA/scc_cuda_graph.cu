@@ -21,12 +21,7 @@ void graph_upload(GPUGraph& gpu,
     CUDA_CHECK(cudaMemcpy(gpu.d_r_begin,    h_r_begin.data(),   (N + 1) * sizeof(edge_t), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(gpu.d_r_node_idx, h_r_node_idx.data(), M * sizeof(node_t), cudaMemcpyHostToDevice));
 
-    // Prefetch graph arrays to GPU device memory for faster kernel access.
-    // This migrates pages to the GPU and avoids cold-cache misses during BFS.
-    cudaMemPrefetchAsync(gpu.d_begin,     (N + 1) * sizeof(edge_t), 0, NULL);
-    cudaMemPrefetchAsync(gpu.d_node_idx,   M * sizeof(node_t),      0, NULL);
-    cudaMemPrefetchAsync(gpu.d_r_begin,    (N + 1) * sizeof(edge_t), 0, NULL);
-    cudaMemPrefetchAsync(gpu.d_r_node_idx, M * sizeof(node_t),      0, NULL);
+
 }
 
 void graph_free(GPUGraph& gpu) {
@@ -42,9 +37,7 @@ void state_allocate(GPUState& st, int N) {
     CUDA_CHECK(cudaMalloc(&st.d_Color, N * sizeof(int)));
     CUDA_CHECK(cudaMalloc(&st.d_SCC,   N * sizeof(int)));
 
-    // Prefetch state arrays to GPU for faster kernel access
-    cudaMemPrefetchAsync(st.d_Color, N * sizeof(int), 0, NULL);
-    cudaMemPrefetchAsync(st.d_SCC,   N * sizeof(int), 0, NULL);
+
 }
 
 // Initialize: G_Color = -1, G_SCC = -1 (CUDA_NIL_NODE)
