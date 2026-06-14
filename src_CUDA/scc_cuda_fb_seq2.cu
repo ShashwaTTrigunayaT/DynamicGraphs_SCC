@@ -1014,14 +1014,7 @@ void start_workers_fw_bw_dfs_host(GPUState& st, const GPUGraph& g, int N)
             }
         }
 
-        // DEBUG 2: WCC item before partition (print BEFORE delete w)
-        if (node_set.size() > 2) {
-            printf("[WCC-ITEM] color=%d count=%d node_set.size=%d first3=[", w->color, w->count, (int)node_set.size());
-            for (int i = 0; i < min(3,(int)node_set.size()); i++)
-                printf("%d:c%d ", node_set[i], h_Color[node_set[i]]);
-            printf("]\n");
-        }
-
+        int w_color = w->color;   // save before delete (fix use-after-free)
         delete w;
 
         if (node_set.empty()) continue;
@@ -1032,7 +1025,7 @@ void start_workers_fw_bw_dfs_host(GPUState& st, const GPUGraph& g, int N)
 
         // Process this WCC component recursively
         std::vector<std::pair<std::vector<int>, int>> pending;
-        pending.push_back({node_set, w->color});
+        pending.push_back({node_set, w_color});
 
         while (!pending.empty()) {
             auto task = pending.back();
