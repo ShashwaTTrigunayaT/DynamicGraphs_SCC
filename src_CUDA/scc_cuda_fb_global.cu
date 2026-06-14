@@ -636,16 +636,6 @@ int do_global_fw_bw_main(GPUState& st, const GPUGraph& g,
     int bw_count = h_bw;
     printf("[CUDA BFS DEBUG] BW done: scc_found=%d (excluding pivot) bw_found=%d\n", h_scc, h_bw);
 
-    // Read final SCC / BW counts via pinned memory (async, then single sync)
-    CUDA_CHECK(cudaMemcpyAsync(h_pinned_scc_count, d_bfs_scc_count, sizeof(int),
-                                cudaMemcpyDeviceToHost, bfs_stream));
-    CUDA_CHECK(cudaMemcpyAsync(h_pinned_bw_count, d_bfs_bw_count, sizeof(int),
-                                cudaMemcpyDeviceToHost, bfs_stream));
-    CUDA_CHECK(cudaStreamSynchronize(bfs_stream));
-    int extra_scc = *h_pinned_scc_count;
-    scc_count += extra_scc;
-    int bw_count = *h_pinned_bw_count;
-
     // OpenMP: compute counts for each partition
     //   int bw_count = BW_BFS.get_bw_count();
     fw_count = fw_count - scc_count;
