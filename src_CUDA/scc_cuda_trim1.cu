@@ -54,12 +54,12 @@ int  get_compact_trim_targets_count()  { return d_trim_targets_count; }
 //                                      int& count, node_t n)
 //
 // Called by all three kernels below (global, compact, local).
+// Returns 1 if node was trimmed, 0 otherwise.
 // ======================================================================
-__device__ void trim_once_node_device(
+__device__ int trim_once_node_device(
     const edge_t* d_begin, const node_t* d_node_idx,
     const edge_t* d_r_begin, const node_t* d_r_node_idx,
     int* d_Color, int* d_SCC,
-    int* d_count,
     node_t n,
     int met_algo, int flag11,
     const int* d_scc_list, const int* d_vec_scc_count,
@@ -67,7 +67,7 @@ __device__ void trim_once_node_device(
     int* d_count_trim_spec)
 {
     // === OpenMP: if (G_Color[n] == -2) continue; ===
-    if (d_Color[n] == SCC_FOUND) return;
+    if (d_Color[n] == SCC_FOUND) return 0;
 
     // === int curr_color = G_Color[n]; ===
     int curr_color = d_Color[n];
@@ -77,9 +77,8 @@ __device__ void trim_once_node_device(
         if (d_SCC[n] < 0) {
             d_Color[n] = -2;
             d_SCC[n] = n;
-            atomicAdd(d_count, 1);
             atomicAdd(d_count_trim_spec, 1);
-            return;
+            return 1;
         }
     }
 
@@ -87,20 +86,18 @@ __device__ void trim_once_node_device(
     if (met_algo == 9 && d_vec_scc_count[d_scc_list[n]] == -1) {
         d_Color[n] = -2;
         d_SCC[n] = -1;
-        atomicAdd(d_count, 1);
-        // NO RETURN — falls through to guard below
+        return 1;
     }
 
     // === OpenMP: met_algo==7 && affect_level[level_ver[n]] == 0 ===
     if (met_algo == 7 && d_affect_level[d_level_ver[n]] == 0) {
         d_SCC[n] = n;
         d_Color[n] = -2;
-        atomicAdd(d_count, 1);
-        return;
+        return 1;
     }
 
     // === OpenMP: if (G_Color[n] != curr_color) return; ===
-    if (d_Color[n] != curr_color) return;
+    if (d_Color[n] != curr_color) return 0;
 
     // === OpenMP: out-degree check ===
     int degree = 0;
@@ -113,8 +110,7 @@ __device__ void trim_once_node_device(
     if (degree == 0) {
         d_SCC[n] = n;
         d_Color[n] = -2;
-        atomicAdd(d_count, 1);
-        return;
+        return 1;
     }
 
     // === OpenMP: in-degree check ===
@@ -128,13 +124,16 @@ __device__ void trim_once_node_device(
     if (degree == 0) {
         d_SCC[n] = n;
         d_Color[n] = -2;
-        atomicAdd(d_count, 1);
-        return;
+        return 1;
     }
+
+    return 0;
 }
 
 // ======================================================================
 // Kernel 1: do_global_trim1 — iterates over ALL nodes
+// Each block accumulates its count in shared memory, then one thread
+// per block does a single global atomicAdd (reduces contention 256x).
 // ======================================================================
 __global__ void trim_once_node_kernel(
     const edge_t* d_begin, const node_t* d_node_idx,
@@ -147,22 +146,35 @@ __global__ void trim_once_node_kernel(
     const int* d_level_ver, const int* d_affect_level,
     int* d_count_trim_spec)
 {
+    __shared__ int s_count;
+    if (threadIdx.x == 0) s_count = 0;
+    __syncthreads();
+
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     int stride = gridDim.x * blockDim.x;
+    int local_count = 0;
 
     for (int n = tid; n < num_nodes; n += stride) {
-        trim_once_node_device(
+        local_count += trim_once_node_device(
             d_begin, d_node_idx, d_r_begin, d_r_node_idx,
-            d_Color, d_SCC, d_count, n,
+            d_Color, d_SCC, n,
             met_algo, flag11,
             d_scc_list, d_vec_scc_count,
             d_level_ver, d_affect_level,
             d_count_trim_spec);
     }
+
+    if (local_count > 0) atomicAdd(&s_count, local_count);
+    __syncthreads();
+
+    if (threadIdx.x == 0 && s_count > 0)
+        atomicAdd(d_count, s_count);
 }
 
 // ======================================================================
 // Kernel 2: do_global_trim1_compact — iterates over trim_targets
+// Each block accumulates its count in shared memory, then one thread
+// per block does a single global atomicAdd (reduces contention 256x).
 // ======================================================================
 __global__ void trim_once_node_compact_kernel(
     const edge_t* d_begin, const node_t* d_node_idx,
@@ -175,22 +187,33 @@ __global__ void trim_once_node_compact_kernel(
     const int* d_level_ver, const int* d_affect_level,
     int* d_count_trim_spec)
 {
+    __shared__ int s_count;
+    if (threadIdx.x == 0) s_count = 0;
+    __syncthreads();
+
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     int stride = gridDim.x * blockDim.x;
+    int local_count = 0;
 
     for (int ix = tid; ix < num_targets; ix += stride) {
         node_t n = d_trim_targets[ix];
-        trim_once_node_device(
+        local_count += trim_once_node_device(
             d_begin, d_node_idx, d_r_begin, d_r_node_idx,
-            d_Color, d_SCC, d_count, n,
+            d_Color, d_SCC, n,
             met_algo, flag11,
             d_scc_list, d_vec_scc_count,
             d_level_ver, d_affect_level,
             d_count_trim_spec);
     }
+
+    if (local_count > 0) atomicAdd(&s_count, local_count);
+    __syncthreads();
+
+    if (threadIdx.x == 0 && s_count > 0)
+        atomicAdd(d_count, s_count);
 }
 
-//Kernel 3: do_local_trim1 — iterates over a work item's set--------------------------------------
+//Kernel 3: do_local_trim1 — iterates over a work item's set
 
 __global__ void trim_once_node_local_set_kernel(
     const edge_t* d_begin, const node_t* d_node_idx,
@@ -203,19 +226,30 @@ __global__ void trim_once_node_local_set_kernel(
     const int* d_level_ver, const int* d_affect_level,
     int* d_count_trim_spec)
 {
+    __shared__ int s_count;
+    if (threadIdx.x == 0) s_count = 0;
+    __syncthreads();
+
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     int stride = gridDim.x * blockDim.x;
+    int local_count = 0;
 
     for (int ix = tid; ix < set_size; ix += stride) {
         node_t n = d_set_nodes[ix];
-        trim_once_node_device(
+        local_count += trim_once_node_device(
             d_begin, d_node_idx, d_r_begin, d_r_node_idx,
-            d_Color, d_SCC, d_count, n,
+            d_Color, d_SCC, n,
             met_algo, flag11,
             d_scc_list, d_vec_scc_count,
             d_level_ver, d_affect_level,
             d_count_trim_spec);
     }
+
+    if (local_count > 0) atomicAdd(&s_count, local_count);
+    __syncthreads();
+
+    if (threadIdx.x == 0 && s_count > 0)
+        atomicAdd(d_count, s_count);
 }
 
 // ======================================================================
@@ -368,7 +402,8 @@ int do_local_trim1(GPUState& st, const GPUGraph& g,
             int set_size;
             CUDA_CHECK(cudaMemcpy(&set_size, d_compact_prefix, sizeof(int),
                                   cudaMemcpyDeviceToHost));
-            w->d_set_nodes = d_trim_targets;
+            w->d_set_nodes = d_compact_scratch;  // use separate scratch buffer (not shared d_trim_targets)
+            w->owns_set = 0;                      // don't own it — shared scratch buffer
             w->count = set_size;
             
             // Now process via the local set kernel
@@ -609,5 +644,8 @@ int repeat_local_trim1(GPUState& st, const GPUGraph& g,
                                da, d_count_trim_spec);
         total_count += count;
     } while (count > 0);
+    // Reset d_set_nodes so caller doesn't try to free the shared scratch buffer
+    w->d_set_nodes = NULL;
+    w->owns_set = 0;
     return total_count;
 }

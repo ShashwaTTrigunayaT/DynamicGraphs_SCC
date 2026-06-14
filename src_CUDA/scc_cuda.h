@@ -9,6 +9,10 @@
 #include <vector>
 #include <cuda_runtime.h>
 
+// Forward declaration of gm_graph (used as reference parameter in dynamic helpers)
+// Full definition is in gm.h, included by the .cpp files that instantiate these
+class gm_graph;
+
 typedef int32_t node_t;
 typedef int32_t edge_t;
 #define CUDA_NIL_NODE ((node_t)-1)
@@ -369,6 +373,50 @@ __global__ void scatter_single_color_all_nodes_kernel(
     const int* d_Color, int num_nodes,
     int target_color,
     int* d_out, int* d_pos);
+
+// ---- scc_cuda_dynamic.cpp (mirrors common_main.h helpers) ----
+// Host-side helpers for dynamic graph construction (compiled with g++)
+
+int  read_file(const std::string& filename,
+               std::vector<std::pair<int,int>>& edges_list);
+
+int  read_file1(const std::string& filename,
+                std::vector<int>& scc_list_out, int num_vertices);
+
+void create_scc_edges(
+    std::vector<std::pair<int,int>> orig_edges,
+    std::vector<std::pair<int,int>> insert_edges,
+    std::vector<std::pair<int,int>>& scc_edges,
+    int num_vertices, int num_sccs, int met_algo,
+    std::vector<int>& scc_list,
+    std::vector<int>& level_ver,
+    std::vector<int>& affect_level,
+    std::vector<int>& new_edge_nodes,
+    double& insert_runtime);
+
+void BFS(std::vector<std::vector<int>>& adj_list,
+         std::vector<int>& level,
+         std::queue<int>& qu,
+         std::vector<int>& in_degree, int* max_level);
+
+void parallel_prefix_sum(std::vector<int>& a);
+
+// ---- scc_cuda_dynamic.cpp (mirrors scc_incremental.cc) ----
+void insert_idea1(gm_graph& G,
+                  std::vector<std::pair<int,int>> orig_edges,
+                  std::vector<std::pair<int,int>> insert_edges);
+void insert_idea2(gm_graph& G,
+                  std::vector<std::pair<int,int>> scc_edges);
+
+// DynamicArrays upload helpers — upload host data to existing device buffers
+void dynamic_arrays_upload_scc_list(DynamicArrays& da,
+    const std::vector<int>& h_scc_list, int N);
+void dynamic_arrays_upload_vec_scc_count(DynamicArrays& da,
+    const std::vector<int>& h_vec_scc_count, int num_sccs);
+void dynamic_arrays_upload_level_ver(DynamicArrays& da,
+    const std::vector<int>& h_level_ver, int N);
+void dynamic_arrays_upload_affect_level(DynamicArrays& da,
+    const std::vector<int>& h_affect_level, int size);
 
 // ---- scc_cuda_fb_seq.cu (mirrors scc_fb_seq.cc) ----
 

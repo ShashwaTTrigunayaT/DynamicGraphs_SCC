@@ -330,14 +330,18 @@ __global__ void scatter_by_color_kernel(
     int* base_out, int* base_pos)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= num_targets) return;
-
-    node_t t = d_targets[i];
-    int c = d_Color[t];
-
-    bool is_fw   = (c == fw_color);
-    bool is_bw   = (c == bw_color);
-    bool is_base = (c == base_color);
+    // NOTE: Do NOT early-return — all threads in warp must participate in
+    // __ballot_sync below to avoid undefined behavior (warp divergence).
+    // Guard data access with conditional instead:
+    node_t t = 0;
+    bool is_fw = false, is_bw = false, is_base = false;
+    if (i < num_targets) {
+        t = d_targets[i];
+        int c = d_Color[t];
+        is_fw   = (c == fw_color);
+        is_bw   = (c == bw_color);
+        is_base = (c == base_color);
+    }
 
     int lane = threadIdx.x & 31;
 
@@ -406,10 +410,15 @@ __global__ void scatter_single_color_kernel(
     int* d_out, int* d_pos)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= num_targets) return;
-
-    node_t t = d_targets[i];
-    bool active = (d_Color[t] == target_color);
+    // NOTE: Do NOT early-return — all threads in warp must participate in
+    // __ballot_sync below to avoid undefined behavior (warp divergence).
+    // Guard data access with conditional instead:
+    bool active = false;
+    node_t t = 0;
+    if (i < num_targets) {
+        t = d_targets[i];
+        active = (d_Color[t] == target_color);
+    }
 
     unsigned mask = __ballot_sync(0xffffffff, active);
     int lane = threadIdx.x & 31;
@@ -455,9 +464,13 @@ __global__ void scatter_single_color_all_nodes_kernel(
     int* d_out, int* d_pos)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= num_nodes) return;
-
-    bool active = (d_Color[i] == target_color);
+    // NOTE: Do NOT early-return — all threads in warp must participate in
+    // __ballot_sync below to avoid undefined behavior (warp divergence).
+    // Guard data access with conditional instead:
+    bool active = false;
+    if (i < num_nodes) {
+        active = (d_Color[i] == target_color);
+    }
 
     unsigned mask = __ballot_sync(0xffffffff, active);
     int lane = threadIdx.x & 31;

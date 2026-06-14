@@ -571,29 +571,38 @@ void do_global_wcc(GPUState& st, const GPUGraph& g)
     propagate_color(st, g, num_targets, cuda_iters);
 
     // ---------------------------------------------------------------
-    // Assign colors to WCC roots
-    // OpenMP: #pragma omp parallel for — assign colors to roots
+    // Assign colors to WCC roots using the SHARED color counter
+    // OpenMP: G_Color[t4] = get_new_color();
+    //
+    // FIX: Use host-side cuda_get_new_color() to share the SAME color
+    // counter with FW-BW phases. The old code used a separate device
+    // counter d_color_counter, which re-issued colors 1,2,3,... that
+    // had already been used by Global FW-BW — causing DFS to traverse
+    // into unrelated nodes (out-of-bounds memory access).
     // ---------------------------------------------------------------
-    int* d_color_counter = NULL;
-    CUDA_CHECK(cudaMalloc(&d_color_counter, sizeof(int)));
-    CUDA_CHECK(cudaMemset(d_color_counter, 0, sizeof(int)));
+    int* h_WCC = new int[g.num_nodes];
+    CUDA_CHECK(cudaMemcpy(h_WCC, d_WCC, g.num_nodes * sizeof(int),
+                           cudaMemcpyDeviceToHost));
 
-    wcc_assign_root_colors_kernel<<<grid_size, block_size>>>(
-        st.d_Color, d_WCC,
-        d_trim_targets, num_targets,
-        d_color_counter);
-    CUDA_CHECK(cudaDeviceSynchronize());
+    int num_roots = 0;
+    for (node_t n = 0; n < g.num_nodes; n++) {
+        if (h_WCC[n] == -1) continue;                         // NIL_NODE: not in any component
+        node_t root = CUDA_GET_WCC_ROOT(h_WCC[n]);
+        if (root == n) {
+            // OpenMP: G_Color[t4] = get_new_color();
+            int new_color = cuda_get_new_color();
+            CUDA_CHECK(cudaMemcpy(&st.d_Color[n], &new_color, sizeof(int),
+                                   cudaMemcpyHostToDevice));
+            num_roots++;
+        }
+    }
+    delete[] h_WCC;
 
     // OpenMP: #pragma omp parallel for — propagate colors to members
     wcc_propagate_colors_kernel<<<grid_size, block_size>>>(
         st.d_Color, d_WCC,
         d_trim_targets, num_targets);
     CUDA_CHECK(cudaDeviceSynchronize());
-
-    int num_roots;
-    CUDA_CHECK(cudaMemcpy(&num_roots, d_color_counter, sizeof(int),
-                           cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaFree(d_color_counter));
 
     printf("[CUDA WCC] %d components, %d iterations\n", num_roots, cuda_iters);
 }
