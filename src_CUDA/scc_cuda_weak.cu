@@ -769,11 +769,6 @@ void create_work_items_from_wcc(GPUState& st, const GPUGraph& g)
         // OpenMP: w1->color = G_Color[i];
         int root_color = h_Color[root];  // host read — zero device calls
 
-        // DEBUG 3: WCC work items with root_count > 2
-        if (root_count > 2) {
-            printf("[WCC-WORK] root=%d root_color=%d root_count=%d\n", root, root_color, root_count);
-        }
-
         // OpenMP: my_work* w1 = new my_work();
         CUDAMyWork* w1 = new CUDAMyWork();
         w1->color = root_color;

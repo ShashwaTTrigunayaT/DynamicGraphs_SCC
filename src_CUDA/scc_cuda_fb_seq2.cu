@@ -789,7 +789,8 @@ static void host_fw_dfs(
     int start,
     std::vector<int>& h_Color,
     const std::vector<int>& node_set,     // which nodes are in scope
-    std::vector<bool>& in_set,             // fast lookup: is n in node_set?
+    const std::vector<int>& marker,        // versioned marker for O(1) membership
+    int marker_version,                     // current marker version
     int base_color, int fw_color,
     std::vector<int>& fw_result)           // output: nodes marked fw_color
 {
@@ -804,7 +805,7 @@ static void host_fw_dfs(
         head++;
         for (edge_t e = g_h_begin[n]; e < g_h_begin[n + 1]; e++) {
             node_t k = g_h_node_idx[e];
-            if (h_Color[k] == base_color && in_set[k]) {
+            if (h_Color[k] == base_color && marker[k] == marker_version) {
                 h_Color[k] = fw_color;
                 fw_result.push_back(k);
                 queue.push_back(k);
@@ -819,7 +820,8 @@ static void host_bw_dfs(
     int start, int pivot,
     std::vector<int>& h_Color, std::vector<int>& h_SCC,
     const std::vector<int>& node_set,
-    std::vector<bool>& in_set,
+    const std::vector<int>& marker,
+    int marker_version,
     int fw_color, int bw_color, int base_color,
     std::vector<int>& bw_result, int& scc_count)
 {
@@ -863,30 +865,19 @@ static void host_fw_bw_partition(
     std::vector<int>& h_Color, std::vector<int>& h_SCC,
     int N, int num_nodes_total,
     std::vector<int>& node_set,   // nodes to process (sorted base_color)
-    std::vector<bool>& in_set,    // fast membership check
+    const std::vector<int>& marker,  // versioned marker for membership
+    int marker_version,              // current marker version
     int base_color,
     std::vector<std::pair<std::vector<int>, int>>& pending_tasks)
 {
     if (node_set.empty()) return;
-
-    // DEBUG 1: entry trace for sets > 2
-    if (node_set.size() > 2) {
-        printf("[FB-ENTRY] setSize=%d base_color=%d first3=[", (int)node_set.size(), base_color);
-        for (int i = 0; i < min(3,(int)node_set.size()); i++)
-            printf("%d:c%d ", node_set[i], h_Color[node_set[i]]);
-        printf("]\n");
-    }
 
     // Pick pivot = first node still with base_color
     int pivot = -1;
     for (int n : node_set) {
         if (h_Color[n] == base_color) { pivot = n; break; }
     }
-    if (pivot == -1) {
-        if (node_set.size() > 2)
-            printf("[FB-ENTRY] *** pivot NOT FOUND, base_color=%d ***\n", base_color);
-        return;
-    }
+    if (pivot == -1) return;
 
     if (node_set.size() == 1) {
         h_Color[pivot] = SCC_FOUND;
@@ -900,24 +891,18 @@ static void host_fw_bw_partition(
 
     // FW DFS from pivot (pivot is included in fw_set)
     std::vector<int> fw_set;
-    host_fw_dfs(pivot, h_Color, node_set, in_set, base_color, fw_color, fw_set);
+    host_fw_dfs(pivot, h_Color, node_set, marker, marker_version, base_color, fw_color, fw_set);
     int fw_count = (int)fw_set.size();  // includes pivot
 
     // BW DFS from pivot
     std::vector<int> bw_set;
     int scc_count = 0;
-    host_bw_dfs(pivot, pivot, h_Color, h_SCC, node_set, in_set,
+    host_bw_dfs(pivot, pivot, h_Color, h_SCC, node_set, marker, marker_version,
                 fw_color, bw_color, base_color, bw_set, scc_count);
 
     int fw_only = fw_count - scc_count;
     int bw_count = (int)bw_set.size();
     int base_count = (int)node_set.size() - fw_count - bw_count;
-    // Debug: print all calls with more than 1 node
-    if ((int)node_set.size() > 2) {
-        printf("[FB] setSize=%d pivot=%d fw=%d scc=%d bw=%d base=%d base_c=%d\n",
-               (int)node_set.size(), pivot, fw_count, scc_count, bw_count, base_count, base_color);
-    }
-
     // Build fw partition (nodes still with fw_color, not in SCC)
     if (fw_only > 0) {
         std::vector<int> fw_partition;
@@ -966,32 +951,15 @@ void start_workers_fw_bw_dfs_host(GPUState& st, const GPUGraph& g, int N)
     CUDA_CHECK(cudaMemcpy(h_SCC.data(), st.d_SCC,
                            num_nodes * sizeof(int), cudaMemcpyDeviceToHost));
 
-    // Verify host CSR by checking degree of node 0
-    {
-        edge_t host_deg0 = g_h_begin[1] - g_h_begin[0];
-        int* h_gpu_begin = new int[num_nodes + 1];
-        CUDA_CHECK(cudaMemcpy(h_gpu_begin, g.d_begin,
-                               (num_nodes + 1) * sizeof(int), cudaMemcpyDeviceToHost));
-        int gpu_deg0 = h_gpu_begin[1] - h_gpu_begin[0];
-        printf("[CSR CHK] node0: host_deg=%d gpu_deg=%d match=%s\n",
-               host_deg0, gpu_deg0, (host_deg0 == gpu_deg0) ? "YES" : "NO");
-        delete[] h_gpu_begin;
-    }
-    // Also check a random high-degree node
-    {
-        int check_node = 500000;
-        if (check_node < num_nodes) {
-            edge_t host_deg = g_h_begin[check_node + 1] - g_h_begin[check_node];
-            printf("[CSR CHK] node%d: host_deg=%d\n", check_node, host_deg);
-        }
-    }
-
     // ---------------------------------------------------------------
     // Phase 2: Drain the work queue and process each work item on host
     // ---------------------------------------------------------------
     std::vector<CUDAMyWork*> all_works;
     work_q_fetch_N(0, 999999, all_works);  // drain entire queue
-    printf("[WCC DBG] workItems=%d\n", (int)all_works.size());
+
+    // Reusable marker array for O(1) membership checks (avoids per-component vector<bool> alloc)
+    std::vector<int> marker(num_nodes, 0);
+    int marker_version = 0;
 
     // Process each work item's set
     for (CUDAMyWork* w : all_works) {
@@ -1019,9 +987,9 @@ void start_workers_fw_bw_dfs_host(GPUState& st, const GPUGraph& g, int N)
 
         if (node_set.empty()) continue;
 
-        // Build fast membership lookup
-        std::vector<bool> in_set(num_nodes, false);
-        for (int n : node_set) in_set[n] = true;
+        // Mark membership with versioned marker (avoids O(N) per-component alloc)
+        marker_version++;
+        for (int n : node_set) marker[n] = marker_version;
 
         // Process this WCC component recursively
         std::vector<std::pair<std::vector<int>, int>> pending;
@@ -1031,34 +999,9 @@ void start_workers_fw_bw_dfs_host(GPUState& st, const GPUGraph& g, int N)
             auto task = pending.back();
             pending.pop_back();
             host_fw_bw_partition(h_Color, h_SCC, num_nodes, num_nodes,
-                                 task.first, in_set, task.second, pending);
+                                 task.first, marker, marker_version, task.second, pending);
         }
     }
-
-    // ---------------------------------------------------------------
-    // Debug: count SCCs found by host-side processing
-    // ---------------------------------------------------------------
-    int host_total = 0;
-    int scc_sizes[33] = {0}; // track sizes 1..32
-    for (int i = 0; i < num_nodes; i++) {
-        if (h_SCC[i] == i) host_total++;
-    }
-    // Count SCC sizes from h_SCC
-    std::vector<int> size_count(num_nodes, 0);
-    for (int i = 0; i < num_nodes; i++) {
-        if (h_SCC[i] >= 0) size_count[h_SCC[i]]++;
-    }
-    for (int i = 0; i < num_nodes; i++) {
-        if (h_SCC[i] == i) {
-            int sz = size_count[i];
-            if (sz <= 32) scc_sizes[sz]++;
-        }
-    }
-    printf("[CUDA FB HOST] SCC roots=%d | size1=%d size2=%d size3=%d size4+=%d\n",
-           host_total, scc_sizes[1], scc_sizes[2], scc_sizes[3],
-           scc_sizes[4]+scc_sizes[5]+scc_sizes[6]+scc_sizes[7]+scc_sizes[8]+
-           scc_sizes[9]+scc_sizes[10]+scc_sizes[11]+scc_sizes[12]+scc_sizes[13]+
-           scc_sizes[14]+scc_sizes[15]+scc_sizes[16]);
 
     // ---------------------------------------------------------------
     // Phase 3: Upload modified d_Color and d_SCC back to GPU
