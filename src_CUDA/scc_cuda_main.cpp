@@ -397,36 +397,27 @@ int main(int argc, char** argv)
         // ============================================================
         printf("Running Method 2: Trim1 + Global FW-BW + Trim1/2 + WCC + FW-BW DFS\n");
 
-        // CUDA events for per-phase timing
-        cudaEvent_t ev_start, ev_trim1, ev_compact, ev_bfs, ev_trim12, ev_wcc, ev_end;
-        cudaEventCreate(&ev_start);
-        cudaEventCreate(&ev_trim1);
-        cudaEventCreate(&ev_compact);
-        cudaEventCreate(&ev_bfs);
-        cudaEventCreate(&ev_trim12);
-        cudaEventCreate(&ev_wcc);
-        cudaEventCreate(&ev_end);
-
-        cudaEventRecord(ev_start);
+        // Per-phase timing using gettimeofday (host-side, works on any server)
+        struct timeval t_start, t_trim1, t_compact, t_bfs, t_trim12, t_wcc, t_end;
+        gettimeofday(&t_start, NULL);
 
         // ---------- Phase 1: TRIM1 ----------
         trimmed = repeat_global_trim1(st, gpuG, d_count,
             met_algo, flag11, da, d_count_trim_spec, 0);
-        cudaEventRecord(ev_trim1);
+        gettimeofday(&t_trim1, NULL);
         printf("[CUDA] Trimmed = %d\n", trimmed);
 
         int curr_count = N - trimmed;
         if (curr_count == 0) {
             printf("[CUDA] No remaining nodes after trim\n");
-            // Record compact+bfs+trim12 at trim1 time so elapsed time is 0
-            cudaEventRecord(ev_compact, 0);
-            cudaEventRecord(ev_bfs, 0);
-            cudaEventRecord(ev_trim12, 0);
-            cudaEventRecord(ev_wcc, 0);
+            gettimeofday(&t_compact, NULL);
+            gettimeofday(&t_bfs, NULL);
+            gettimeofday(&t_trim12, NULL);
+            gettimeofday(&t_wcc, NULL);
         } else {
             // Ensure d_trim_targets_count is up-to-date for do_global_fw_bw_main
             create_trim1_compact(st, gpuG);
-            cudaEventRecord(ev_compact);
+            gettimeofday(&t_compact, NULL);
 
             // ---------- Phase 2: GLOBAL BFS ----------
             // OpenMP: do_fw_bw_global_main(G, curr_color, curr_count, false)
@@ -437,7 +428,7 @@ int main(int argc, char** argv)
                 curr_count,          // base_count from trim_targets
                 -1,                  // good_init_pivot (-1 = not met_algo 6/11)
                 false);              // create_work_items = false
-            cudaEventRecord(ev_bfs);
+            gettimeofday(&t_bfs, NULL);
             printf("[CUDA] First SCC size = %d\n", scc_size);
 
             // ---------------------------------------------------------------
@@ -475,45 +466,46 @@ int main(int argc, char** argv)
             trim_total += repeat_global_trim1_compact(st, gpuG, d_count,
                 met_algo, flag11, da, d_count_trim_spec, 0);
             trimmed += trim_total;
-            cudaEventRecord(ev_trim12);
+            gettimeofday(&t_trim12, NULL);
 
             curr_count = d_trim_targets_count;
             if (curr_count > 0) {
                 // ---------- Phase 4: WCC ----------
                 do_global_wcc(st, gpuG);
                 create_work_items_from_wcc(st, gpuG);
-                cudaEventRecord(ev_wcc);
+                gettimeofday(&t_wcc, NULL);
 
                 // ---------- Phase 5: FB (DFS) ----------
                 start_workers_fw_bw_dfs(st, gpuG, 40);
             } else {
-                cudaEventRecord(ev_wcc);
+                gettimeofday(&t_wcc, NULL);
             }
             finalize_global_fb();
         }
 
-        cudaEventRecord(ev_end);
+        gettimeofday(&t_end, NULL);
 
-        // Synchronize and print timings
-        cudaEventSynchronize(ev_end);
-        float t_total=0, t1=0, t2=0, t3=0, t4=0, t5=0, t6=0;
-        cudaEventElapsedTime(&t1, ev_start, ev_trim1);
-        cudaEventElapsedTime(&t2, ev_trim1, ev_compact);
-        cudaEventElapsedTime(&t3, ev_compact, ev_bfs);
-        cudaEventElapsedTime(&t4, ev_bfs, ev_trim12);
-        cudaEventElapsedTime(&t5, ev_trim12, ev_wcc);
-        cudaEventElapsedTime(&t6, ev_wcc, ev_end);
-        cudaEventElapsedTime(&t_total, ev_start, ev_end);
+        // Compute per-phase timings using gettimeofday
+        double t1 = (t_trim1.tv_sec - t_start.tv_sec) * 1000.0 +
+                    (t_trim1.tv_usec - t_start.tv_usec) * 0.001;
+        double t2 = (t_compact.tv_sec - t_trim1.tv_sec) * 1000.0 +
+                    (t_compact.tv_usec - t_trim1.tv_usec) * 0.001;
+        double t3 = (t_bfs.tv_sec - t_compact.tv_sec) * 1000.0 +
+                    (t_bfs.tv_usec - t_compact.tv_usec) * 0.001;
+        double t4 = (t_trim12.tv_sec - t_bfs.tv_sec) * 1000.0 +
+                    (t_trim12.tv_usec - t_bfs.tv_usec) * 0.001;
+        double t5 = (t_wcc.tv_sec - t_trim12.tv_sec) * 1000.0 +
+                    (t_wcc.tv_usec - t_trim12.tv_usec) * 0.001;
+        double t6 = (t_end.tv_sec - t_wcc.tv_sec) * 1000.0 +
+                    (t_end.tv_usec - t_wcc.tv_usec) * 0.001;
+        double t_total = (t_end.tv_sec - t_start.tv_sec) * 1000.0 +
+                         (t_end.tv_usec - t_start.tv_usec) * 0.001;
 
         printf(">>>>CUDA_PROFILE: TRIM1=%.2fms COMPACT_BUILD=%.2fms GLOBAL_BFS=%.2fms TRIM12=%.2fms WCC=%.2fms FB=%.2fms TOTAL=%.2fms\n",
                t1, t2, t3, t4, t5, t6, t_total);
         fflush(stdout);
         fprintf(stderr, "[CUDA_PROFILE_STDERR] TRIM1=%.2f COMPACT=%.2f GLOBAL_BFS=%.2f TRIM12=%.2f WCC=%.2f FB=%.2f TOTAL=%.2f\n",
                 t1, t2, t3, t4, t5, t6, t_total);
-
-        cudaEventDestroy(ev_start); cudaEventDestroy(ev_trim1);
-        cudaEventDestroy(ev_compact); cudaEventDestroy(ev_bfs);
-        cudaEventDestroy(ev_trim12); cudaEventDestroy(ev_wcc); cudaEventDestroy(ev_end);
 
         // Original timing (for total)
         gettimeofday(&R2, NULL);
