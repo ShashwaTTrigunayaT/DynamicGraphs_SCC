@@ -31,6 +31,12 @@ int* d_bfs_next_count   = NULL;  // [1] atomic counter for next level size
 int* d_bfs_scc_count    = NULL;  // [1] atomic counter for SCC nodes found
 int* d_bfs_bw_count     = NULL;  // [1] atomic counter for bw-colored nodes
 
+// Visited bitmap for BFS node claiming (separate from d_Color to avoid L2 thrashing)
+// Bitmask: 1 bit per node, size = ceil(N/32) uint32_t ≈ 200KB for 1.6M nodes
+// Node n corresponds to bit d_bfs_visited_bits[n/32] & (1 << (n%32))
+uint32_t* d_bfs_visited_bits = NULL;
+int d_bfs_visited_words = 0;
+
 // Persistent scratch buffers to avoid cudaMalloc/cudaFree in hot BFS path
 int* d_pivot_scratch    = NULL;  // [1] temp for pivot selection
 int* d_remain_scratch   = NULL;  // [1] temp for remaining count
@@ -110,6 +116,12 @@ void initialize_global_fb(int num_nodes)
     CUDA_CHECK(cudaMalloc(&d_bfs_scc_count,   sizeof(int)));
     CUDA_CHECK(cudaMalloc(&d_bfs_bw_count,    sizeof(int)));
 
+    // Allocate visited bitmap: 1 bit per node, sized as uint32_t words
+    d_bfs_visited_words = (num_nodes + 31) / 32;
+    if (d_bfs_visited_bits) cudaFree(d_bfs_visited_bits);
+    CUDA_CHECK(cudaMalloc(&d_bfs_visited_bits, d_bfs_visited_words * sizeof(uint32_t)));
+    CUDA_CHECK(cudaMemset(d_bfs_visited_bits, 0, d_bfs_visited_words * sizeof(uint32_t)));
+
     // Allocate persistent scratch buffers (allocated once, reused across multiple
     // do_global_fw_bw_main calls, avoiding per-call cudaMalloc/cudaFree overhead)
     if (!d_pivot_scratch)  CUDA_CHECK(cudaMalloc(&d_pivot_scratch,  sizeof(int)));
@@ -140,6 +152,10 @@ void finalize_global_fb()
     if (d_bfs_next_count) { cudaFree(d_bfs_next_count); d_bfs_next_count = NULL; }
     if (d_bfs_scc_count)  { cudaFree(d_bfs_scc_count);  d_bfs_scc_count = NULL; }
     if (d_bfs_bw_count)   { cudaFree(d_bfs_bw_count);   d_bfs_bw_count = NULL; }
+
+    // Free visited bitmap (200KB)
+    if (d_bfs_visited_bits) { cudaFree(d_bfs_visited_bits); d_bfs_visited_bits = NULL; }
+    d_bfs_visited_words = 0;
 
     // Free persistent scratch buffers
     if (d_pivot_scratch)  { cudaFree(d_pivot_scratch);  d_pivot_scratch = NULL; }
@@ -196,11 +212,12 @@ __device__ bool fw_check_navigator_device(int* d_Color, node_t k9, int base_colo
 // ======================================================================
 // Kernel: one level of forward BFS
 //
-// Optimization: Per-thread local staging of claimed nodes.
-// Instead of per-node atomicAdd to d_next_count (1 atomic per claimed
-// node), collect up to STAGE_SIZE claimed nodes locally, then flush
-// with a single atomicAdd per thread. Reduces atomic contention by
-// ~STAGE_SIZE x.
+// Optimization: Visited bitmap (atomicOr) + per-thread staging.
+// Instead of atomicCAS on d_Color (which invalidates L2 cache lines
+// needed by navigator reads), claim nodes via atomicOr on a separate
+// visited bitmap (200KB, stays L2-resident). On claim success, write
+// d_Color with a simple store (no CAS).
+// Also: per-thread staging of claimed nodes reduces atomicAdd by 32x.
 // ======================================================================
 __global__ void fw_bfs_level_kernel(
     const edge_t* d_begin, const node_t* d_node_idx,
@@ -231,9 +248,18 @@ __global__ void fw_bfs_level_kernel(
         node_t t = d_queue[i];
         for (edge_t nx = d_begin[t]; nx < d_begin[t + 1]; nx++) {
             node_t k = d_node_idx[nx];
+            // Navigate: check if node has base_color (d_Color stays in L2 because
+            // we don't CAS it — only write with simple store after claiming)
             if (fw_check_navigator_device(d_Color, k, base_color)) {
-                int old = atomicCAS(&d_Color[k], base_color, fw_color);
-                if (old == base_color) {
+                // Claim via visited bitmap: atomicOr on 200KB bitmask (L2-resident)
+                // atomicOr is faster than atomicCAS and doesn't pollute d_Color L2
+                int word = k >> 5;  // k / 32
+                uint32_t bit = 1u << (k & 31);
+                uint32_t old = atomicOr(&d_bfs_visited_bits[word], bit);
+                if ((old & bit) == 0) {
+                    // Claimed! Write color with simple store (no CAS — visited bitmap
+                    // guarantees exclusive access)
+                    d_Color[k] = fw_color;
                     staged[staged_cnt++] = k;
                     if (staged_cnt == STAGE_SIZE) {
                         FW_FLUSH();
@@ -314,9 +340,9 @@ __device__ bool bw_check_navigator_device(int* d_Color, node_t k10,
 //      eliminates the window where another thread could change the
 //      color between the navigator check and the if-else dispatch.
 //
-// Optimization: Per-thread local staging for d_next_count + per-thread
-// local accumulators for d_scc_count and d_bw_count. Reduces global
-// atomic contention by ~STAGE_SIZE x.
+// Optimization: Visited bitmap (atomicOr) + per-thread staging.
+// Same approach as FW BFS: claim via atomicOr on 200KB visited bitmap,
+// then write d_Color with simple stores (no CAS).
 // ======================================================================
 __global__ void bw_bfs_level_kernel(
     const edge_t* d_r_begin, const node_t* d_r_node_idx,
@@ -350,22 +376,28 @@ __global__ void bw_bfs_level_kernel(
         node_t t = d_queue[i];
         for (edge_t nx = d_r_begin[t]; nx < d_r_begin[t + 1]; nx++) {
             node_t k = d_r_node_idx[nx];
+            // Single read of d_Color[k] for TOCTOU safety (unchanged from original)
             int k_color = d_Color[k];
-            if (k_color == fw_color) {
-                int old = atomicCAS(&d_Color[k], fw_color, SCC_FOUND);
-                if (old == fw_color) {
-                    d_SCC[k] = pivot;
-                    local_scc++;
-                    staged[staged_cnt++] = k;
-                    if (staged_cnt == STAGE_SIZE) {
-                        BW_FLUSH();
+            // Navigate: check if node is fw_color (intersection candidate) or
+            // base_color (bw-set candidate). d_Color reads stay L2-cached because
+            // we don't CAS on d_Color anymore.
+            if (k_color == fw_color || k_color == base_color) {
+                // Claim via visited bitmap (200KB L2-resident, atomicOr << atomicCAS)
+                int word = k >> 5;
+                uint32_t bit = 1u << (k & 31);
+                uint32_t old = atomicOr(&d_bfs_visited_bits[word], bit);
+                if ((old & bit) == 0) {
+                    // Claimed! Dispatch based on the color snapshot from our single read
+                    if (k_color == fw_color) {
+                        // Intersection: mark as SCC
+                        d_Color[k] = SCC_FOUND;
+                        d_SCC[k] = pivot;
+                        local_scc++;
+                    } else {
+                        // BW-set
+                        d_Color[k] = bw_color;
+                        local_bw++;
                     }
-                }
-            }
-            else if (k_color == base_color) {
-                int old = atomicCAS(&d_Color[k], base_color, bw_color);
-                if (old == base_color) {
-                    local_bw++;
                     staged[staged_cnt++] = k;
                     if (staged_cnt == STAGE_SIZE) {
                         BW_FLUSH();
@@ -608,6 +640,16 @@ int do_global_fw_bw_main(GPUState& st, const GPUGraph& g,
 
     // OpenMP: int fw_count = FW_BFS.get_fw_count();
     int fw_count = total_fw;
+
+    // ---------------------------------------------------------------
+    // Reset visited bitmap between FW and BW BFS
+    // FW BFS set bits for all FW-reachable nodes; BW BFS needs a clean bitmap
+    // for claiming SCC/bw-set nodes (tiny 200KB memset, ~0.01ms)
+    // ---------------------------------------------------------------
+    CUDA_CHECK(cudaMemsetAsync(d_bfs_visited_bits, 0,
+                                d_bfs_visited_words * sizeof(uint32_t),
+                                bfs_stream));
+    CUDA_CHECK(cudaStreamSynchronize(bfs_stream));
 
     // ---------------------------------------------------------------
     // Backward BFS

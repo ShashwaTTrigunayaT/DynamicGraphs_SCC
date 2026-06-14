@@ -264,6 +264,9 @@ extern int* d_bfs_next_count;
 extern int* d_bfs_scc_count;
 extern int* d_bfs_bw_count;
 
+// Visited bitmap for BFS node claiming (separate from d_Color to avoid L2 thrashing)
+extern uint32_t* d_bfs_visited_bits;
+
 // Pinned host memory + stream for async BFS level loop (pinned = faster D2H)
 extern int* h_pinned_next_count;
 extern int* h_pinned_scc_count;
