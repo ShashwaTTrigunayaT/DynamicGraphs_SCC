@@ -756,8 +756,7 @@ void create_work_items_from_wcc(GPUState& st, const GPUGraph& g)
         h_wcc_sets[root] = d_wcc_big_buffer + offsets[ri];
     }
 
-    // Free intermediate buffers
-    CUDA_CHECK(cudaFree(d_root_counts));
+    // Free count-gather buffer (d_root_counts kept for Pass 2 position counters)
     CUDA_CHECK(cudaFree(d_root_counts_out));
 
     // ---------------------------------------------------------------
@@ -791,6 +790,10 @@ void create_work_items_from_wcc(GPUState& st, const GPUGraph& g)
         d_root_counts,   // per-root position counters
         d_wcc_sets);     // device-side array of pointers to per-root buffers
     CUDA_CHECK(cudaDeviceSynchronize());
+
+    // Free root counts buffer (no longer needed after Pass 2)
+    CUDA_CHECK(cudaFree(d_root_counts));
+    d_root_counts = NULL;
 
     // ---------------------------------------------------------------
     // Pass 3: create CUDAMyWork for each WCC root and push to queue
