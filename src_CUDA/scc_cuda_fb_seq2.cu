@@ -982,7 +982,7 @@ void start_workers_fw_bw_dfs_host(GPUState& st, const GPUGraph& g, int N)
             auto task = pending.back();
             pending.pop_back();
             host_fw_bw_partition(h_Color, h_SCC, num_nodes, num_nodes,
-                                 task.first, in_set, task.second, 0, pending);
+                                 task.first, in_set, task.second, pending);
         }
     }
 
@@ -993,104 +993,4 @@ void start_workers_fw_bw_dfs_host(GPUState& st, const GPUGraph& g, int N)
                            num_nodes * sizeof(int), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(st.d_SCC, h_SCC.data(),
                            num_nodes * sizeof(int), cudaMemcpyHostToDevice));
-}
-
-{
-    // CUDA: Single-threaded host loop (mirrors OpenMP parallel body)
-    //       Each "iteration" simulates one thread's work loop.
-    std::vector<CUDAMyWork*> new_works;
-    std::vector<CUDAMyWork*> my_works;
-    my_works.reserve(4096);  // OpenMP: my_works.reserve(4096);
-
-    // OpenMP: while (true) { ... }
-    while (true) {
-        // OpenMP: if (my_works.size() == 0) work_q_fetch_N(tid, std::max(N/2,1), my_works);
-        if (my_works.size() == 0) {
-            work_q_fetch_N(0, std::max(N/2,1), my_works);
-        }
-
-        // OpenMP: if (my_works.size() == 0) break;
-        if (my_works.size() == 0) break;
-
-        // OpenMP: while (my_works.size() > 0) { ... }
-        while (my_works.size() > 0) {
-            CUDAMyWork* w = my_works.back();
-            my_works.pop_back();
-
-            // OpenMP: lazy compact set generation
-            //   if ((w->count < G.num_nodes() * 1) && (w->color_set == NULL))
-            //       w->color_set = generate_compact_set(G, w->color);
-            //
-            // Note: CPU uses threshold * 1 (i.e., count < N always true),
-            // so this branch ALWAYS fires on CPU. CUDA mirrors this behavior.
-            if ((w->count < g.num_nodes * 1) && (w->d_set_nodes == NULL)) {
-                // OpenMP: w->color_set = generate_compact_set(G, w->color);
-                //         generate_compact_set:
-                //           if (get_compact_trim_targets().size() == 0)
-                //               for(node_t i=0;i<G.num_nodes(); i++) if (G_Color[i]==color) ...
-                //           else
-                //               for each node in compact_trim_targets ...
-                int* d_new_set = NULL;
-                int* d_pos = NULL;
-                CUDA_CHECK(cudaMalloc(&d_pos, sizeof(int)));
-                CUDA_CHECK(cudaMemset(d_pos, 0, sizeof(int)));
-                CUDA_CHECK(cudaMalloc(&d_new_set, w->count * sizeof(int)));
-
-                int bs = 256;
-                if (d_trim_targets_count > 0) {
-                    int gs = (d_trim_targets_count + bs - 1) / bs;
-                    scatter_single_color_kernel<<<gs, bs>>>(
-                        st.d_Color,
-                        d_trim_targets, d_trim_targets_count,
-                        w->color,
-                        d_new_set, d_pos);
-                    CUDA_CHECK(cudaDeviceSynchronize());
-                } else {
-                    // OpenMP: for(node_t i=0;i<G.num_nodes(); i++) ...
-                    int gs = (g.num_nodes + bs - 1) / bs;
-                    scatter_single_color_all_nodes_kernel<<<gs, bs>>>(
-                        st.d_Color, g.num_nodes,
-                        w->color,
-                        d_new_set, d_pos);
-                    CUDA_CHECK(cudaDeviceSynchronize());
-                }
-
-                CUDA_CHECK(cudaFree(d_pos));
-                w->d_set_nodes = d_new_set;
-                w->set_capacity = w->count;
-                w->owns_set = 1;
-            }
-
-            // OpenMP: do_fw_bw_dfs(G, w, new_works);
-            do_fw_bw_dfs(st, g, w, new_works);
-
-            // OpenMP: delete w;
-            if (w->d_set_nodes != NULL && w->owns_set) {
-                CUDA_CHECK(cudaFree(w->d_set_nodes));
-            }
-            delete w;
-            w = NULL;
-
-            // OpenMP: keep some new items locally
-            //   while ((my_works.size() < N) && (new_works.size() > 0)) {
-            //       my_work* w = new_works.back();
-            //       new_works.pop_back();
-            //       my_works.push_back(w);
-            //   }
-            while ((my_works.size() < (size_t)N) && (new_works.size() > 0)) {
-                CUDAMyWork* w = new_works.back();
-                new_works.pop_back();
-                my_works.push_back(w);
-            }
-
-            // OpenMP: push rest to global queue
-            //   if (new_works.size() > 0) {
-            //       work_q_put_all(tid, new_works); new_works.clear();
-            //   }
-            if (new_works.size() > 0) {
-                work_q_put_all(0, new_works);
-                new_works.clear();
-            }
-        }
-    }
 }
