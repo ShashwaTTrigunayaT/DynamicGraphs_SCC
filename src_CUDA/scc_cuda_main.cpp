@@ -596,18 +596,22 @@ int main(int argc, char** argv)
     // ---------------------------------------------------------------
     // Cleanup
     // ---------------------------------------------------------------
-    // Note: finalize_global_fb() is called inside each method block (0, 1, 2)
-    // when initialize_global_fb() was called. Do NOT call it again here —
-    // the double-free causes "double free or corruption (out)" on larger
-    // datasets where the BFS allocates many pinned-memory buffers.
+    fprintf(stderr, "[DEBUG] cleanup: cudaFree(d_count)\n");
     cudaFree(d_count);
-    if (d_count_trim_spec) cudaFree(d_count_trim_spec);
+    if (d_count_trim_spec) { fprintf(stderr, "[DEBUG] cleanup: cudaFree(d_count_trim_spec)\n"); cudaFree(d_count_trim_spec); }
+    fprintf(stderr, "[DEBUG] cleanup: dynamic_arrays_free\n");
     dynamic_arrays_free(da);
+    fprintf(stderr, "[DEBUG] cleanup: finalize_WCC\n");
     finalize_WCC();
+    fprintf(stderr, "[DEBUG] cleanup: finalize_trim2\n");
     finalize_trim2();
+    fprintf(stderr, "[DEBUG] cleanup: finalize_trim1\n");
     finalize_trim1();
+    fprintf(stderr, "[DEBUG] cleanup: state_free\n");
     state_free(st);
+    fprintf(stderr, "[DEBUG] cleanup: graph_free\n");
     graph_free(gpuG);
+    fprintf(stderr, "[DEBUG] cleanup: DONE\n");
 
     return 0;
 }
