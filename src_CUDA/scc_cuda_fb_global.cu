@@ -224,7 +224,8 @@ __global__ void fw_bfs_level_kernel(
     int* d_Color,
     const int* d_queue, int queue_size,
     int* d_next_queue, int* d_next_count,
-    int fw_color, int base_color)
+    int fw_color, int base_color,
+    uint32_t* d_visited_bits)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     int stride = blockDim.x * gridDim.x;
@@ -255,7 +256,7 @@ __global__ void fw_bfs_level_kernel(
                 // atomicOr is faster than atomicCAS and doesn't pollute d_Color L2
                 int word = k >> 5;  // k / 32
                 uint32_t bit = 1u << (k & 31);
-                uint32_t old = atomicOr(&d_bfs_visited_bits[word], bit);
+                uint32_t old = atomicOr(&d_visited_bits[word], bit);
                 if ((old & bit) == 0) {
                     // Claimed! Write color with simple store (no CAS — visited bitmap
                     // guarantees exclusive access)
@@ -350,7 +351,8 @@ __global__ void bw_bfs_level_kernel(
     const int* d_queue, int queue_size,
     int* d_next_queue, int* d_next_count,
     int fw_color, int bw_color, int base_color, node_t pivot,
-    int* d_scc_count, int* d_bw_count)
+    int* d_scc_count, int* d_bw_count,
+    uint32_t* d_visited_bits)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     int stride = blockDim.x * gridDim.x;
@@ -385,7 +387,7 @@ __global__ void bw_bfs_level_kernel(
                 // Claim via visited bitmap (200KB L2-resident, atomicOr << atomicCAS)
                 int word = k >> 5;
                 uint32_t bit = 1u << (k & 31);
-                uint32_t old = atomicOr(&d_bfs_visited_bits[word], bit);
+                uint32_t old = atomicOr(&d_visited_bits[word], bit);
                 if ((old & bit) == 0) {
                     // Claimed! Dispatch based on the color snapshot from our single read
                     if (k_color == fw_color) {
@@ -500,7 +502,6 @@ int do_global_fw_bw_main(GPUState& st, const GPUGraph& g,
     bool create_work_items)
 {
     // OpenMP: base_color = curr_color; base_count = count;
-    int N = g.num_nodes;
     int num_targets = d_trim_targets_count;
     if (num_targets == 0) return 0;
 
@@ -621,7 +622,8 @@ int do_global_fw_bw_main(GPUState& st, const GPUGraph& g,
             st.d_Color,
             d_bfs_queue, queue_size,
             d_bfs_next_queue, d_bfs_next_count,
-            fw_color, base_color);
+            fw_color, base_color,
+            d_bfs_visited_bits);
 
         // Async D2H copy — starts as soon as kernel completes on stream
         CUDA_CHECK(cudaMemcpyAsync(h_pinned_next_count, d_bfs_next_count,
@@ -689,7 +691,8 @@ int do_global_fw_bw_main(GPUState& st, const GPUGraph& g,
             d_bfs_queue, queue_size,
             d_bfs_next_queue, d_bfs_next_count,
             fw_color, bw_color, base_color, h_pivot,
-            d_bfs_scc_count, d_bfs_bw_count);
+            d_bfs_scc_count, d_bfs_bw_count,
+            d_bfs_visited_bits);
 
         // Async D2H — starts after kernel on stream
         CUDA_CHECK(cudaMemcpyAsync(h_pinned_next_count, d_bfs_next_count,

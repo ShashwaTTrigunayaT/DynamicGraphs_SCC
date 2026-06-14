@@ -284,7 +284,8 @@ extern __global__ void fw_bfs_level_kernel(
     int* d_Color,
     const int* d_queue, int queue_size,
     int* d_next_queue, int* d_next_count,
-    int fw_color, int base_color);
+    int fw_color, int base_color,
+    uint32_t* d_visited_bits);
 
 extern __global__ void bw_bfs_level_kernel(
     const edge_t* d_r_begin, const node_t* d_r_node_idx,
@@ -292,7 +293,8 @@ extern __global__ void bw_bfs_level_kernel(
     const int* d_queue, int queue_size,
     int* d_next_queue, int* d_next_count,
     int fw_color, int bw_color, int base_color, node_t pivot,
-    int* d_scc_count, int* d_bw_count);
+    int* d_scc_count, int* d_bw_count,
+    uint32_t* d_visited_bits);
 
 // Host function — exact mirror of do_fw_bw_global_main()
 // Parameters match CPU: (curr_color, count) + good_init_pivot (for met_algo==6/11)
