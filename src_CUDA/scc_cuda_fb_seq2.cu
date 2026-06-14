@@ -998,15 +998,29 @@ void start_workers_fw_bw_dfs_host(GPUState& st, const GPUGraph& g, int N)
     }
 
     // ---------------------------------------------------------------
-    // Debug: count SCCs before and after host-side processing
+    // Debug: count SCCs found by host-side processing
     // ---------------------------------------------------------------
-    int host_total = 0, host_before = 0, host_found = 0;
+    int host_total = 0;
+    int scc_sizes[33] = {0}; // track sizes 1..32
     for (int i = 0; i < num_nodes; i++) {
         if (h_SCC[i] == i) host_total++;
-        if (h_SCC[i] != -1) host_found++;
     }
-    printf("[CUDA FB HOST] Before upload: SCC roots=%d, assigned=%.4f%%\n",
-           host_total, 100.0 * host_found / num_nodes);
+    // Count SCC sizes from h_SCC
+    std::vector<int> size_count(num_nodes, 0);
+    for (int i = 0; i < num_nodes; i++) {
+        if (h_SCC[i] >= 0) size_count[h_SCC[i]]++;
+    }
+    for (int i = 0; i < num_nodes; i++) {
+        if (h_SCC[i] == i) {
+            int sz = size_count[i];
+            if (sz <= 32) scc_sizes[sz]++;
+        }
+    }
+    printf("[CUDA FB HOST] SCC roots=%d | size1=%d size2=%d size3=%d size4+=%d\n",
+           host_total, scc_sizes[1], scc_sizes[2], scc_sizes[3],
+           scc_sizes[4]+scc_sizes[5]+scc_sizes[6]+scc_sizes[7]+scc_sizes[8]+
+           scc_sizes[9]+scc_sizes[10]+scc_sizes[11]+scc_sizes[12]+scc_sizes[13]+
+           scc_sizes[14]+scc_sizes[15]+scc_sizes[16]);
 
     // ---------------------------------------------------------------
     // Phase 3: Upload modified d_Color and d_SCC back to GPU
