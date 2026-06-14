@@ -401,8 +401,8 @@ int do_fw_bw_single_thread(GPUState& st, const GPUGraph& g,
             g.d_begin, g.d_node_idx,
             st.d_Color,
             d_bfs_queue, queue_size,
-            d_bfs_next_queue, d_bfs_next_count,
-            fw_color, base_color);
+            d_bfs_next_queue, d_bfs_next_count,              fw_color, base_color,
+              d_bfs_visited_bits);
 
         // Async D2H copy — starts after kernel on stream
         CUDA_CHECK(cudaMemcpyAsync(h_pinned_next_count, d_bfs_next_count,
@@ -461,8 +461,8 @@ int do_fw_bw_single_thread(GPUState& st, const GPUGraph& g,
             st.d_Color, st.d_SCC,
             d_bfs_queue, queue_size,
             d_bfs_next_queue, d_bfs_next_count,
-            fw_color, bw_color, base_color, h_pivot,
-            d_bfs_scc_count, d_bfs_bw_count);
+            fw_color, bw_color, base_color, h_pivot,              d_bfs_scc_count, d_bfs_bw_count,
+              d_bfs_visited_bits);
 
         // Async D2H — starts after kernel on stream
         CUDA_CHECK(cudaMemcpyAsync(h_pinned_next_count, d_bfs_next_count,
