@@ -781,7 +781,10 @@ void start_workers_fw_bw_dfs(GPUState& st, const GPUGraph& g, int N)
 // (set in scc_cuda_main.cpp).
 // ======================================================================
 
-// Host-side DFS traversal: marks all nodes reachable from 'start' within 'nodes' set
+// Host-side BFS traversal: marks all nodes reachable from 'start' within 'nodes' set
+// Uses a queue (BFS) instead of a stack (DFS) to match the GPU's BFS kernel,
+// which correctly found all SCCs. The set of reachable nodes is identical
+// for BFS and DFS — only traversal order differs.
 static void host_fw_dfs(
     int start,
     std::vector<int>& h_Color,
@@ -790,24 +793,28 @@ static void host_fw_dfs(
     int base_color, int fw_color,
     std::vector<int>& fw_result)           // output: nodes marked fw_color
 {
-    std::vector<int> stack;
-    stack.push_back(start);
-    while (!stack.empty()) {
-        int n = stack.back();
-        stack.pop_back();
-        if (h_Color[n] != base_color) continue;
-        h_Color[n] = fw_color;
-        fw_result.push_back(n);
+    // Use a queue (BFS) to match GPU kernel behavior
+    std::vector<int> queue;
+    int head = 0;
+    queue.push_back(start);
+    h_Color[start] = fw_color;
+    fw_result.push_back(start);
+    while (head < (int)queue.size()) {
+        int n = queue[head];
+        head++;
         for (edge_t e = g_h_begin[n]; e < g_h_begin[n + 1]; e++) {
             node_t k = g_h_node_idx[e];
             if (h_Color[k] == base_color && in_set[k]) {
-                stack.push_back(k);
+                h_Color[k] = fw_color;
+                fw_result.push_back(k);
+                queue.push_back(k);
             }
         }
     }
 }
 
-// Host-side BW DFS: traverses reverse edges, marks intersection as SCC
+// Host-side BW BFS: traverses reverse edges, marks intersection as SCC
+// Uses a queue (BFS) to match the GPU's BFS kernel, which correctly found all SCCs.
 static void host_bw_dfs(
     int start, int pivot,
     std::vector<int>& h_Color, std::vector<int>& h_SCC,
@@ -816,32 +823,36 @@ static void host_bw_dfs(
     int fw_color, int bw_color, int base_color,
     std::vector<int>& bw_result, int& scc_count)
 {
-    std::vector<int> stack;
-    stack.push_back(start);
-    while (!stack.empty()) {
-        int n = stack.back();
-        stack.pop_back();
-        int c = h_Color[n];
+    std::vector<int> queue;
+    int head = 0;
+    queue.push_back(start);
+    // Process start immediately
+    {
+        int c = h_Color[start];
         if (c == fw_color) {
-            h_Color[n] = SCC_FOUND;
-            h_SCC[n] = pivot;
+            h_Color[start] = SCC_FOUND;
+            h_SCC[start] = pivot;
             scc_count++;
-            for (edge_t e = g_h_r_begin[n]; e < g_h_r_begin[n + 1]; e++) {
-                node_t k = g_h_r_node_idx[e];
-                int kc = h_Color[k];
-                if ((kc == fw_color || kc == base_color) && in_set[k]) {
-                    stack.push_back(k);
-                }
-            }
         } else if (c == base_color) {
-            h_Color[n] = bw_color;
-            bw_result.push_back(n);
-            for (edge_t e = g_h_r_begin[n]; e < g_h_r_begin[n + 1]; e++) {
-                node_t k = g_h_r_node_idx[e];
-                int kc = h_Color[k];
-                if ((kc == fw_color || kc == base_color) && in_set[k]) {
-                    stack.push_back(k);
-                }
+            h_Color[start] = bw_color;
+            bw_result.push_back(start);
+        }
+    }
+    while (head < (int)queue.size()) {
+        int n = queue[head];
+        head++;
+        for (edge_t e = g_h_r_begin[n]; e < g_h_r_begin[n + 1]; e++) {
+            node_t k = g_h_r_node_idx[e];
+            int kc = h_Color[k];
+            if (kc == fw_color) {
+                h_Color[k] = SCC_FOUND;
+                h_SCC[k] = pivot;
+                scc_count++;
+                queue.push_back(k);
+            } else if (kc == base_color) {
+                h_Color[k] = bw_color;
+                bw_result.push_back(k);
+                queue.push_back(k);
             }
         }
     }
