@@ -961,8 +961,12 @@ void start_workers_fw_bw_dfs_host(GPUState& st, const GPUGraph& g, int N)
     work_q_fetch_N(0, 999999, all_works);  // drain entire queue
 
     // Process each work item's set
+    int total_work_count = 0;
+    int work_items_count = 0;
     for (CUDAMyWork* w : all_works) {
         if (w->count == 0) { delete w; continue; }
+        work_items_count++;
+        total_work_count += w->count;
 
         // d_set_nodes may be NULL — if so, find nodes of w->color in h_Color
         std::vector<int> node_set;
@@ -979,6 +983,13 @@ void start_workers_fw_bw_dfs_host(GPUState& st, const GPUGraph& g, int N)
             for (int i = 0; i < num_nodes; i++) {
                 if (h_Color[i] == w->color) node_set.push_back(i);
             }
+        }
+
+        // Debug: show first work item details
+        if (work_items_count == 1 && !node_set.empty()) {
+            int first = node_set[0];
+            printf("[WCC DBG] work#1: count=%d setSize=%d firstNode=%d color=%d h_Color[first]=%d\n",
+                   w->count, (int)node_set.size(), first, w->color, h_Color[first]);
         }
 
         delete w;
@@ -1000,6 +1011,7 @@ void start_workers_fw_bw_dfs_host(GPUState& st, const GPUGraph& g, int N)
                                  task.first, in_set, task.second, pending);
         }
     }
+    printf("[WCC DBG] workItems=%d totalNodes=%d\n", work_items_count, total_work_count);
 
     // ---------------------------------------------------------------
     // Debug: count SCCs found by host-side processing
