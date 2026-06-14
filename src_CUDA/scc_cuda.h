@@ -360,6 +360,18 @@ __global__ void wcc_insert_members_kernel(
     int* d_root_pos,
     int** d_wcc_sets_dev);
 
+// ---- Compact extraction kernels (for WCC optimization) ----
+__global__ void extract_wcc_roots_kernel(
+    const int* d_WCC,
+    const int* d_targets, int num_targets,
+    int* d_root_list,
+    int* d_num_roots);
+
+__global__ void gather_root_counts_kernel(
+    const int* d_root_counts,
+    const int* d_root_list, int num_roots,
+    int* d_root_counts_out);
+
 // ---- scc_cuda_color.cu (shared color allocator — mirrors scc_color.cc) ----
 // OpenMP: static int _the_color; int get_new_color() { const int CHUNK=1024; ... }
 extern int _cuda_the_color;

@@ -38,6 +38,10 @@ static int** h_node_set_pool = NULL;  // host array of device pointers
 static int*  d_node_set_pool = NULL;  // [pool_size] device-side list handles (not used directly)
 static int   node_set_pool_size = 0;
 
+// Cache of (root_id, root_color) pairs populated by do_global_wcc(),
+// consumed by create_work_items_from_wcc() to avoid re-downloading d_Color
+static std::vector<std::pair<int,int>> g_wcc_root_colors;
+
 // ======================================================================
 // check_WCC()
 // OpenMP:
@@ -574,29 +578,61 @@ void do_global_wcc(GPUState& st, const GPUGraph& g)
     // Assign colors to WCC roots using the SHARED color counter
     // OpenMP: G_Color[t4] = get_new_color();
     //
-    // FIX: Use host-side cuda_get_new_color() to share the SAME color
-    // counter with FW-BW phases. The old code used a separate device
-    // counter d_color_counter, which re-issued colors 1,2,3,... that
-    // had already been used by Global FW-BW — causing DFS to traverse
-    // into unrelated nodes (out-of-bounds memory access).
+    // OPTIMIZED: Extract roots from d_trim_targets compactly via GPU kernel,
+    // download only the root list (~756 bytes), batch upload colors.
+    // Replaces: full d_WCC D2H (6.4MB) + 189 individual H2D cudaMemcpy calls.
     // ---------------------------------------------------------------
-    int* h_WCC = new int[g.num_nodes];
-    CUDA_CHECK(cudaMemcpy(h_WCC, d_WCC, g.num_nodes * sizeof(int),
+    g_wcc_root_colors.clear();
+
+    // Allocate device buffers for compact root extraction
+    int* d_root_list = NULL;
+    int* d_num_roots = NULL;
+    CUDA_CHECK(cudaMalloc(&d_root_list, num_targets * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_num_roots, sizeof(int)));
+    CUDA_CHECK(cudaMemset(d_num_roots, 0, sizeof(int)));
+
+    // Kernel: find roots from compact trim targets
+    extract_wcc_roots_kernel<<<grid_size, block_size>>>(
+        d_WCC, d_trim_targets, num_targets,
+        d_root_list, d_num_roots);
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    int h_num_roots = 0;
+    CUDA_CHECK(cudaMemcpy(&h_num_roots, d_num_roots, sizeof(int),
                            cudaMemcpyDeviceToHost));
 
-    int num_roots = 0;
-    for (node_t n = 0; n < g.num_nodes; n++) {
-        if (h_WCC[n] == -1) continue;                         // NIL_NODE: not in any component
-        node_t root = CUDA_GET_WCC_ROOT(h_WCC[n]);
-        if (root == n) {
+    if (h_num_roots > 0) {
+        // Download compact root list (~h_num_roots * 4 bytes = ~756 bytes)
+        int* h_root_list = new int[h_num_roots];
+        CUDA_CHECK(cudaMemcpy(h_root_list, d_root_list,
+                               h_num_roots * sizeof(int), cudaMemcpyDeviceToHost));
+
+        // Assign colors on host (fast — ~189 iterations on CPU)
+        std::vector<int> h_root_colors(h_num_roots);
+        for (int i = 0; i < h_num_roots; i++) {
             // OpenMP: G_Color[t4] = get_new_color();
             int new_color = cuda_get_new_color();
-            CUDA_CHECK(cudaMemcpy(&st.d_Color[n], &new_color, sizeof(int),
-                                   cudaMemcpyHostToDevice));
-            num_roots++;
+            h_root_colors[i] = new_color;
+            g_wcc_root_colors.push_back({h_root_list[i], new_color});
         }
+
+        // Batch upload all root colors (single H2D cudaMemcpy + scatter kernel)
+        int* d_color_values = NULL;
+        CUDA_CHECK(cudaMalloc(&d_color_values, h_num_roots * sizeof(int)));
+        CUDA_CHECK(cudaMemcpy(d_color_values, h_root_colors.data(),
+                               h_num_roots * sizeof(int), cudaMemcpyHostToDevice));
+
+        // reuse scatter_scc_kernel: d_Color[root_list[i]] = color_values[i]
+        scatter_scc_kernel<<<grid_size, block_size>>>(
+            st.d_Color, d_root_list, d_color_values, h_num_roots);
+        CUDA_CHECK(cudaDeviceSynchronize());
+
+        CUDA_CHECK(cudaFree(d_color_values));
+        delete[] h_root_list;
     }
-    delete[] h_WCC;
+
+    CUDA_CHECK(cudaFree(d_root_list));
+    CUDA_CHECK(cudaFree(d_num_roots));
 
     // OpenMP: #pragma omp parallel for — propagate colors to members
     wcc_propagate_colors_kernel<<<grid_size, block_size>>>(
@@ -642,17 +678,34 @@ void create_work_items_from_wcc(GPUState& st, const GPUGraph& g)
 
     // ---------------------------------------------------------------
     // Pass 1: count members per root, allocate per-root device buffers
-    // OpenMP:
-    //   #pragma omp parallel for
-    //   for (int index = 0; index < wcc_candidate.size(); index++) {
-    //       node_t t4 = wcc_candidate[index];
-    //       if (G_Color[t4] == -2) continue;
-    //       node_t root = GET_WCC_ROOT(t4);
-    //       if (root == t4) {
-    //           wcc_sets[t4] = get_node_set_from_pool();
-    //       }
-    //   }
+    //
+    // OPTIMIZED: Use cached root list from do_global_wcc + gather kernel
+    // to avoid full d_root_counts D2H (6.4MB).
+    // Replaces: full d_root_counts D2H + host scan of all N nodes
     // ---------------------------------------------------------------
+    // Use cached root list populated by do_global_wcc
+    if (g_wcc_root_colors.empty()) {
+        // Fallback: should not happen in normal Method 2 pipeline
+        printf("[CUDA WCC WARN] g_wcc_root_colors empty — creating work items without d_Color cache\n");
+    }
+
+    int num_roots = (int)g_wcc_root_colors.size();
+    std::vector<int> root_list;
+    std::vector<int> root_colors;
+    root_list.reserve(num_roots);
+    root_colors.reserve(num_roots);
+    for (int i = 0; i < num_roots; i++) {
+        root_list.push_back(g_wcc_root_colors[i].first);
+        root_colors.push_back(g_wcc_root_colors[i].second);
+    }
+
+    // Upload root list to device (for gather kernel)
+    int* d_root_list = NULL;
+    CUDA_CHECK(cudaMalloc(&d_root_list, num_roots * sizeof(int)));
+    CUDA_CHECK(cudaMemcpy(d_root_list, root_list.data(),
+                           num_roots * sizeof(int), cudaMemcpyHostToDevice));
+
+    // Count members per root (GPU kernel — same as before)
     int* d_root_counts = NULL;
     CUDA_CHECK(cudaMalloc(&d_root_counts, N * sizeof(int)));
     CUDA_CHECK(cudaMemset(d_root_counts, 0, N * sizeof(int)));
@@ -663,40 +716,49 @@ void create_work_items_from_wcc(GPUState& st, const GPUGraph& g)
         d_root_counts);
     CUDA_CHECK(cudaDeviceSynchronize());
 
-    // Copy root counts to host to know how many members per root
-    int* h_root_counts = new int[N];
-    CUDA_CHECK(cudaMemcpy(h_root_counts, d_root_counts,
-                           N * sizeof(int), cudaMemcpyDeviceToHost));
+    // Gather only the counts we need (compact D2H instead of full N array)
+    int* d_root_counts_out = NULL;
+    CUDA_CHECK(cudaMalloc(&d_root_counts_out, num_roots * sizeof(int)));
+    int gather_gs = (num_roots + block_size - 1) / block_size;
+    gather_root_counts_kernel<<<gather_gs, block_size>>>(
+        d_root_counts, d_root_list, num_roots, d_root_counts_out);
+    CUDA_CHECK(cudaDeviceSynchronize());
 
+    // Download compact root counts (~num_roots * 4 bytes = ~756 bytes)
+    int* h_root_counts = new int[num_roots];
+    CUDA_CHECK(cudaMemcpy(h_root_counts, d_root_counts_out,
+                           num_roots * sizeof(int), cudaMemcpyDeviceToHost));
 
-    // Build root list and compute prefix sums
-    std::vector<int> root_list;
-    std::vector<int> offsets;  // prefix sum of root counts
+    // Build offsets using compact root list
+    std::vector<int> offsets;
     offsets.push_back(0);
-    for (int i = 0; i < N; i++) {
-        if (h_root_counts[i] > 0) {
-            root_list.push_back(i);
-            offsets.push_back(offsets.back() + h_root_counts[i]);
-        }
+    for (int i = 0; i < num_roots; i++) {
+        offsets.push_back(offsets.back() + h_root_counts[i]);
     }
 
-    if (root_list.empty()) {
+    if (num_roots == 0 || offsets.back() == 0) {
         delete[] h_root_counts;
         CUDA_CHECK(cudaFree(d_root_counts));
+        CUDA_CHECK(cudaFree(d_root_counts_out));
+        CUDA_CHECK(cudaFree(d_root_list));
         return;
     }
 
     // Single large allocation instead of thousands of per-root cudaMalloc calls
     int total_members = offsets.back();
-    if (d_wcc_big_buffer) cudaFree(d_wcc_big_buffer);  // guard against re-entrant calls
+    if (d_wcc_big_buffer) cudaFree(d_wcc_big_buffer);
     CUDA_CHECK(cudaMalloc(&d_wcc_big_buffer, total_members * sizeof(int)));
     d_wcc_big_buffer_size = total_members;
 
     // Assign slices to each root via pointer arithmetic
-    for (size_t ri = 0; ri < root_list.size(); ri++) {
+    for (int ri = 0; ri < num_roots; ri++) {
         node_t root = root_list[ri];
         h_wcc_sets[root] = d_wcc_big_buffer + offsets[ri];
     }
+
+    // Free intermediate buffers
+    CUDA_CHECK(cudaFree(d_root_counts));
+    CUDA_CHECK(cudaFree(d_root_counts_out));
 
     // ---------------------------------------------------------------
     // Pass 2: insert members into per-root buffers
@@ -730,10 +792,14 @@ void create_work_items_from_wcc(GPUState& st, const GPUGraph& g)
         d_wcc_sets);     // device-side array of pointers to per-root buffers
     CUDA_CHECK(cudaDeviceSynchronize());
 
-    CUDA_CHECK(cudaFree(d_root_counts));
-
     // ---------------------------------------------------------------
     // Pass 3: create CUDAMyWork for each WCC root and push to queue
+    //
+    // OPTIMIZED: Use cached root colors from do_global_wcc instead of
+    // downloading full d_Color D2H (6.4MB).
+    // Also uses compact h_root_counts (indexed by root_list position
+    // instead of node ID).
+    //
     // OpenMP:
     //   #pragma omp parallel
     //   {
@@ -755,19 +821,14 @@ void create_work_items_from_wcc(GPUState& st, const GPUGraph& g)
     //   }
     // ---------------------------------------------------------------
     std::vector<CUDAMyWork*> new_works;
-    new_works.reserve(root_list.size());
+    new_works.reserve(num_roots);
 
-    // Batch-read entire d_Color array (one D2H instead of N per-root copies)
-    int* h_Color = new int[N];
-    CUDA_CHECK(cudaMemcpy(h_Color, st.d_Color,
-                           N * sizeof(int), cudaMemcpyDeviceToHost));
-
-    for (size_t ri = 0; ri < root_list.size(); ri++) {
+    for (int ri = 0; ri < num_roots; ri++) {
         node_t root = root_list[ri];
-        int root_count = h_root_counts[root];
+        int root_count = h_root_counts[ri];  // compact index (was: h_root_counts[root])
 
         // OpenMP: w1->color = G_Color[i];
-        int root_color = h_Color[root];  // host read — zero device calls
+        int root_color = root_colors[ri];  // from cache (was: h_Color[root] after 6.4MB D2H)
 
         // OpenMP: my_work* w1 = new my_work();
         CUDAMyWork* w1 = new CUDAMyWork();
@@ -781,14 +842,13 @@ void create_work_items_from_wcc(GPUState& st, const GPUGraph& g)
         new_works.push_back(w1);
     }
 
-    delete[] h_Color;
-
     // Clear h_wcc_sets entries (ownership transferred to CUDAMyWork)
-    for (size_t ri = 0; ri < root_list.size(); ri++) {
+    for (int ri = 0; ri < num_roots; ri++) {
         h_wcc_sets[root_list[ri]] = NULL;
     }
 
     delete[] h_root_counts;
+    CUDA_CHECK(cudaFree(d_root_list));
 
     // OpenMP: work_q_put_all(tid, small_works);
     if (!new_works.empty()) {

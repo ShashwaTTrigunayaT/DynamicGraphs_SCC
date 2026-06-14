@@ -522,3 +522,50 @@ __global__ void count_by_wcc_root_kernel(
         atomicAdd(&d_root_counts[root], 1);
     }
 }
+
+// ======================================================================
+// extract_wcc_roots_kernel() — from d_trim_targets, extract nodes that
+// are WCC roots (GET_WCC_ROOT(d_WCC[n]) == n && d_WCC[n] != -1)
+// Writes compact list of root IDs -> d_root_list
+// ======================================================================
+__global__ void extract_wcc_roots_kernel(
+    const int* d_WCC,
+    const int* d_targets, int num_targets,
+    int* d_root_list,
+    int* d_num_roots)
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = gridDim.x * blockDim.x;
+
+    for (int i = tid; i < num_targets; i += stride) {
+        node_t n = d_targets[i];
+        int wcc_val = d_WCC[n];
+        if (wcc_val == -1) continue;  // CUDA_NIL_NODE
+        node_t root = wcc_val & 0x1FFFFFFF;  // CUDA_GET_WCC_ROOT
+        if (root == n) {
+            int pos = atomicAdd(d_num_roots, 1);
+            d_root_list[pos] = n;
+        }
+    }
+}
+
+// ======================================================================
+// gather_root_counts_kernel() — for specific root IDs in d_root_list,
+// read counts from d_root_counts (which was computed by
+// count_by_wcc_root_kernel over all targets).
+// Output: d_root_counts_out[i] = d_root_counts[d_root_list[i]]
+// ======================================================================
+__global__ void gather_root_counts_kernel(
+    const int* d_root_counts,
+    const int* d_root_list, int num_roots,
+    int* d_root_counts_out)
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = gridDim.x * blockDim.x;
+
+    for (int i = tid; i < num_roots; i += stride) {
+        int root = d_root_list[i];
+        d_root_counts_out[i] = d_root_counts[root];
+    }
+}
+
