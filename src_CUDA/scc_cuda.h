@@ -377,6 +377,12 @@ __global__ void gather_root_counts_kernel(
     const int* d_root_list, int num_roots,
     int* d_root_counts_out);
 
+// ---- Gather kernel (for FB optimization) ----
+__global__ void gather_colors_kernel(
+    const int* d_Color,
+    const int* d_node_ids, int num_ids,
+    int* d_colors_out);
+
 // ---- scc_cuda_color.cu (shared color allocator — mirrors scc_color.cc) ----
 // OpenMP: static int _the_color; int get_new_color() { const int CHUNK=1024; ... }
 extern int _cuda_the_color;

@@ -936,56 +936,110 @@ void start_workers_fw_bw_dfs_host(GPUState& st, const GPUGraph& g, int N)
     gettimeofday(&t0, NULL);
 
     // ---------------------------------------------------------------
-    // Phase 1: Download d_Color only (BFS needs colors).
-    //          d_SCC is NOT downloaded — we only WRITE to SCC, never read it.
-    //          h_SCC is initialized fresh and only changed nodes are uploaded.
-    // ---------------------------------------------------------------
-    std::vector<int> h_Color(num_nodes);
-    CUDA_CHECK(cudaMemcpy(h_Color.data(), st.d_Color,
-                           num_nodes * sizeof(int), cudaMemcpyDeviceToHost));
-    std::vector<int> h_SCC(num_nodes, -1);  // don't download, will upload changes via scatter
-    gettimeofday(&t1, NULL);
-
-    // ---------------------------------------------------------------
-    // Phase 2: Drain work queue and pre-download node sets
+    // Phase 1: Drain work queue and download node sets FIRST.
+    //          We need to know WHICH nodes to gather colors for before
+    //          we can avoid the full 6.4MB d_Color download.
     // ---------------------------------------------------------------
     std::vector<CUDAMyWork*> all_works;
     work_q_fetch_N(0, 999999, all_works);  // drain entire queue
 
-    // Collect all node IDs to track which SCCs changed (for compact upload)
     struct HostWorkItem {
         std::vector<int> node_set;
         int color;
     };
+    struct NullSetInfo {
+        int color;
+        int count;
+    };
     std::vector<HostWorkItem> items;
+    std::vector<NullSetInfo> null_sets;  // saved info for NULL-set items (before delete)
     items.reserve(all_works.size());
 
     for (CUDAMyWork* w : all_works) {
         if (w->count == 0) { delete w; continue; }
 
-        HostWorkItem item;
-        item.color = w->color;
         if (w->d_set_nodes != NULL) {
+            HostWorkItem item;
+            item.color = w->color;
             item.node_set.resize(w->count);
             CUDA_CHECK(cudaMemcpy(item.node_set.data(), w->d_set_nodes,
                                    w->count * sizeof(int), cudaMemcpyDeviceToHost));
             if (w->owns_set) {
                 CUDA_CHECK(cudaFree(w->d_set_nodes));
             }
-        } else {
-            for (int i = 0; i < num_nodes; i++) {
-                if (h_Color[i] == w->color) item.node_set.push_back(i);
+            if (!item.node_set.empty()) {
+                items.push_back(std::move(item));
             }
+        } else {
+            // Save NULL-set info BEFORE deleting w
+            null_sets.push_back({w->color, w->count});
         }
         delete w;
-        if (!item.node_set.empty()) {
-            items.push_back(std::move(item));
-        }
     }
-    // Save all node IDs BEFORE Phase 3 (std::move in parallel loop empties the vectors)
+    gettimeofday(&t1, NULL);
+
+    // ---------------------------------------------------------------
+    // Phase 2: Download d_Color values (only for needed nodes via gather kernel,
+    //          or full D2H if any work items have NULL d_set_nodes).
+    //          d_SCC is NOT downloaded — we only WRITE to SCC, never read it.
+    // ---------------------------------------------------------------
+    std::vector<int> h_Color(num_nodes, 0);  // will be filled from gathered colors
+    std::vector<int> h_SCC(num_nodes, -1);    // don't download, upload changes via scatter
+
+    // Build list of all node IDs we need colors for
     std::vector<int> all_node_ids;
     for (const auto& item : items) {
-        all_node_ids.insert(all_node_ids.end(), item.node_set.begin(), item.node_set.end());
+        all_node_ids.insert(all_node_ids.end(),
+                            item.node_set.begin(), item.node_set.end());
+    }
+
+    if (!null_sets.empty() || all_node_ids.empty()) {
+        // Fallback: full D2H download (needed for NULL-set items — can't gather
+        // without knowing which nodes have the target color)
+        CUDA_CHECK(cudaMemcpy(h_Color.data(), st.d_Color,
+                               num_nodes * sizeof(int), cudaMemcpyDeviceToHost));
+
+        // Build node sets for NULL-set items from h_Color
+        for (const NullSetInfo& info : null_sets) {
+            HostWorkItem item;
+            item.color = info.color;
+            for (int i = 0; i < num_nodes; i++) {
+                if (h_Color[i] == info.color) item.node_set.push_back(i);
+            }
+            if (!item.node_set.empty()) {
+                all_node_ids.insert(all_node_ids.end(),
+                                    item.node_set.begin(), item.node_set.end());
+                items.push_back(std::move(item));
+            }
+        }
+    } else {
+        // Gather only needed colors via GPU kernel (~36KB vs 6.4MB)
+        int num_needed = (int)all_node_ids.size();
+        int* d_node_ids = NULL;
+        int* d_gathered_colors = NULL;
+        CUDA_CHECK(cudaMalloc(&d_node_ids, num_needed * sizeof(int)));
+        CUDA_CHECK(cudaMalloc(&d_gathered_colors, num_needed * sizeof(int)));
+        CUDA_CHECK(cudaMemcpy(d_node_ids, all_node_ids.data(),
+                               num_needed * sizeof(int), cudaMemcpyHostToDevice));
+
+        int bs = 256;
+        int gs = (num_needed + bs - 1) / bs;
+        gather_colors_kernel<<<gs, bs>>>(
+            st.d_Color, d_node_ids, num_needed, d_gathered_colors);
+        CUDA_CHECK(cudaDeviceSynchronize());
+
+        // Download compact colors
+        std::vector<int> h_gathered(num_needed);
+        CUDA_CHECK(cudaMemcpy(h_gathered.data(), d_gathered_colors,
+                               num_needed * sizeof(int), cudaMemcpyDeviceToHost));
+
+        CUDA_CHECK(cudaFree(d_node_ids));
+        CUDA_CHECK(cudaFree(d_gathered_colors));
+
+        // Scatter gathered colors into h_Color by node ID
+        for (int i = 0; i < num_needed; i++) {
+            h_Color[all_node_ids[i]] = h_gathered[i];
+        }
     }
     gettimeofday(&t2, NULL);
 
@@ -1033,11 +1087,11 @@ void start_workers_fw_bw_dfs_host(GPUState& st, const GPUGraph& g, int N)
         }
 
         // Upload packed data to GPU
-        int* d_node_ids = NULL;
+        int* d_node_ids_up = NULL;
         int* d_scc_values = NULL;
-        CUDA_CHECK(cudaMalloc(&d_node_ids, num_changed * sizeof(int)));
+        CUDA_CHECK(cudaMalloc(&d_node_ids_up, num_changed * sizeof(int)));
         CUDA_CHECK(cudaMalloc(&d_scc_values, num_changed * sizeof(int)));
-        CUDA_CHECK(cudaMemcpy(d_node_ids, changed_nodes.data(),
+        CUDA_CHECK(cudaMemcpy(d_node_ids_up, changed_nodes.data(),
                                num_changed * sizeof(int), cudaMemcpyHostToDevice));
         CUDA_CHECK(cudaMemcpy(d_scc_values, h_packed_scc.data(),
                                num_changed * sizeof(int), cudaMemcpyHostToDevice));
@@ -1045,18 +1099,19 @@ void start_workers_fw_bw_dfs_host(GPUState& st, const GPUGraph& g, int N)
         // Scatter kernel: d_SCC[node_id] = scc_value
         int bs = 256;
         int gs = (num_changed + bs - 1) / bs;
-        scatter_scc_kernel<<<gs, bs>>>(st.d_SCC, d_node_ids, d_scc_values, num_changed);
+        scatter_scc_kernel<<<gs, bs>>>(st.d_SCC, d_node_ids_up, d_scc_values, num_changed);
         CUDA_CHECK(cudaDeviceSynchronize());
 
-        CUDA_CHECK(cudaFree(d_node_ids));
+        CUDA_CHECK(cudaFree(d_node_ids_up));
         CUDA_CHECK(cudaFree(d_scc_values));
     }
     gettimeofday(&t4, NULL);
 
-    double d_color_d2h = (t1.tv_sec - t0.tv_sec) * 1000.0 + (t1.tv_usec - t0.tv_usec) * 0.001;
-    double node_sets_d2h = (t2.tv_sec - t1.tv_sec) * 1000.0 + (t2.tv_usec - t1.tv_usec) * 0.001;
+    double sets_d2h = (t1.tv_sec - t0.tv_sec) * 1000.0 + (t1.tv_usec - t0.tv_usec) * 0.001;
+    double gather_color = (t2.tv_sec - t1.tv_sec) * 1000.0 + (t2.tv_usec - t1.tv_usec) * 0.001;
     double cpu_fb = (t3.tv_sec - t2.tv_sec) * 1000.0 + (t3.tv_usec - t2.tv_usec) * 0.001;
     double scatter_h2d = (t4.tv_sec - t3.tv_sec) * 1000.0 + (t4.tv_usec - t3.tv_usec) * 0.001;
-    printf("[FB_XFER] D2H_Color=%.3fms  D2H_Sets=%.3fms(%d)  CPU_OMP=%.3fms  H2D_Scatter=%.3fms(%d)\n",
-           d_color_d2h, node_sets_d2h, (int)items.size(), cpu_fb, scatter_h2d, num_changed);
+    printf("[FB_XFER] Sets_D2H=%.3fms(%d)  Gather_Color=%.3fms(%d)  CPU_OMP=%.3fms  H2D_Scatter=%.3fms(%d)\n",
+           sets_d2h, (int)items.size(), gather_color, (int)all_node_ids.size(),
+           cpu_fb, scatter_h2d, num_changed);
 }

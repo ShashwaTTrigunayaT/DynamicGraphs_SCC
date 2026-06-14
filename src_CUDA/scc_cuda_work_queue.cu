@@ -569,3 +569,20 @@ __global__ void gather_root_counts_kernel(
     }
 }
 
+// ======================================================================
+// gather_colors_kernel() — gather d_Color values for a compact list of node IDs
+// Used by start_workers_fw_bw_dfs_host to download only needed colors
+// instead of the full 6.4MB d_Color array (~8,980 color values = ~36KB)
+// ======================================================================
+__global__ void gather_colors_kernel(
+    const int* d_Color,
+    const int* d_node_ids, int num_ids,
+    int* d_colors_out)
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = gridDim.x * blockDim.x;
+    for (int i = tid; i < num_ids; i += stride) {
+        d_colors_out[i] = d_Color[d_node_ids[i]];
+    }
+}
+
