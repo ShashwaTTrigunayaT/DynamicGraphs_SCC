@@ -208,16 +208,18 @@ __global__ void fw_bfs_level_kernel(
     int* d_next_queue, int* d_next_count,
     int fw_color, int base_color)
 {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= queue_size) return;
-    node_t t = d_queue[i];
-    for (edge_t nx = d_begin[t]; nx < d_begin[t + 1]; nx++) {
-        node_t k = d_node_idx[nx];
-        if (fw_check_navigator_device(d_Color, k, base_color)) {
-            int old = atomicCAS(&d_Color[k], base_color, fw_color);
-            if (old == base_color) {
-                int pos = atomicAdd(d_next_count, 1);
-                d_next_queue[pos] = k;
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+    for (int i = tid; i < queue_size; i += stride) {
+        node_t t = d_queue[i];
+        for (edge_t nx = d_begin[t]; nx < d_begin[t + 1]; nx++) {
+            node_t k = d_node_idx[nx];
+            if (fw_check_navigator_device(d_Color, k, base_color)) {
+                int old = atomicCAS(&d_Color[k], base_color, fw_color);
+                if (old == base_color) {
+                    int pos = atomicAdd(d_next_count, 1);
+                    d_next_queue[pos] = k;
+                }
             }
         }
     }
@@ -301,27 +303,29 @@ __global__ void bw_bfs_level_kernel(
     int fw_color, int bw_color, int base_color, node_t pivot,
     int* d_scc_count, int* d_bw_count)
 {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= queue_size) return;
-    node_t t = d_queue[i];
-    for (edge_t nx = d_r_begin[t]; nx < d_r_begin[t + 1]; nx++) {
-        node_t k = d_r_node_idx[nx];
-        int k_color = d_Color[k];
-        if (k_color == fw_color) {
-            int old = atomicCAS(&d_Color[k], fw_color, SCC_FOUND);
-            if (old == fw_color) {
-                d_SCC[k] = pivot;
-                atomicAdd(d_scc_count, 1);
-                int pos = atomicAdd(d_next_count, 1);
-                d_next_queue[pos] = k;
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+    for (int i = tid; i < queue_size; i += stride) {
+        node_t t = d_queue[i];
+        for (edge_t nx = d_r_begin[t]; nx < d_r_begin[t + 1]; nx++) {
+            node_t k = d_r_node_idx[nx];
+            int k_color = d_Color[k];
+            if (k_color == fw_color) {
+                int old = atomicCAS(&d_Color[k], fw_color, SCC_FOUND);
+                if (old == fw_color) {
+                    d_SCC[k] = pivot;
+                    atomicAdd(d_scc_count, 1);
+                    int pos = atomicAdd(d_next_count, 1);
+                    d_next_queue[pos] = k;
+                }
             }
-        }
-        else if (k_color == base_color) {
-            int old = atomicCAS(&d_Color[k], base_color, bw_color);
-            if (old == base_color) {
-                atomicAdd(d_bw_count, 1);
-                int pos = atomicAdd(d_next_count, 1);
-                d_next_queue[pos] = k;
+            else if (k_color == base_color) {
+                int old = atomicCAS(&d_Color[k], base_color, bw_color);
+                if (old == base_color) {
+                    atomicAdd(d_bw_count, 1);
+                    int pos = atomicAdd(d_next_count, 1);
+                    d_next_queue[pos] = k;
+                }
             }
         }
     }
@@ -521,11 +525,16 @@ int do_global_fw_bw_main(GPUState& st, const GPUGraph& g,
 
     int total_fw = 1;  // pivot counted
 
+    int level = 0;
     while (queue_size > 0) {
         CUDA_CHECK(cudaMemsetAsync(d_bfs_next_count, 0, sizeof(int), bfs_stream));
 
         int grid = (queue_size + block_size - 1) / block_size;
         grid = min(grid, 1024);
+        if (grid * block_size < queue_size) {
+            printf("[CUDA BFS DEBUG] FW level %d: WARNING grid=%d x %d = %d threads < queue_size=%d! Nodes will be DROPPED!\n",
+                   level, grid, block_size, grid * block_size, queue_size);
+        }
 
         fw_bfs_level_kernel<<<grid, block_size, 0, bfs_stream>>>(
             g.d_begin, g.d_node_idx,
@@ -546,8 +555,13 @@ int do_global_fw_bw_main(GPUState& st, const GPUGraph& g,
         d_bfs_next_queue = tmp;
 
         queue_size = *h_pinned_next_count;
+        printf("[CUDA BFS DEBUG] FW level %d: frontier=%d\n", level, queue_size);
+        fflush(stdout);
         total_fw += queue_size;
+        level++;
     }
+
+    printf("[CUDA BFS DEBUG] FW total (including pivot) = %d\n", total_fw);
 
     // OpenMP: int fw_count = FW_BFS.get_fw_count();
     int fw_count = total_fw;
@@ -578,11 +592,16 @@ int do_global_fw_bw_main(GPUState& st, const GPUGraph& g,
     queue_size = 1;
     int scc_count = 1;
 
+    int level_bw = 0;
     while (queue_size > 0) {
         CUDA_CHECK(cudaMemsetAsync(d_bfs_next_count, 0, sizeof(int), bfs_stream));
 
         int grid = (queue_size + block_size - 1) / block_size;
         grid = min(grid, 1024);
+        if (grid * block_size < queue_size) {
+            printf("[CUDA BFS DEBUG] BW level %d: WARNING grid=%d x %d = %d threads < queue_size=%d! Nodes will be DROPPED!\n",
+                   level_bw, grid, block_size, grid * block_size, queue_size);
+        }
 
         bw_bfs_level_kernel<<<grid, block_size, 0, bfs_stream>>>(
             g.d_r_begin, g.d_r_node_idx,
@@ -603,7 +622,17 @@ int do_global_fw_bw_main(GPUState& st, const GPUGraph& g,
         d_bfs_next_queue = tmp;
 
         queue_size = *h_pinned_next_count;
+        printf("[CUDA BFS DEBUG] BW level %d: frontier=%d\n", level_bw, queue_size);
+        fflush(stdout);
+        level_bw++;
     }
+
+    // Read final SCC / BW counts
+    int h_scc;
+    int h_bw;
+    CUDA_CHECK(cudaMemcpy(&h_scc, d_bfs_scc_count, sizeof(int), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(&h_bw, d_bfs_bw_count, sizeof(int), cudaMemcpyDeviceToHost));
+    printf("[CUDA BFS DEBUG] BW done: scc_found=%d (excluding pivot) bw_found=%d\n", h_scc, h_bw);
 
     // Read final SCC / BW counts via pinned memory (async, then single sync)
     CUDA_CHECK(cudaMemcpyAsync(h_pinned_scc_count, d_bfs_scc_count, sizeof(int),
