@@ -1,5 +1,6 @@
 #include "scc_cuda.h"
 #include <omp.h>
+#include <algorithm>
 
 // ======================================================================
 // fw_trim_dfs — Forward DFS (sequential in OpenMP)
