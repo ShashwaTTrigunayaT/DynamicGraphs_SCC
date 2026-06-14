@@ -869,12 +869,24 @@ static void host_fw_bw_partition(
 {
     if (node_set.empty()) return;
 
+    // DEBUG 1: entry trace for sets > 2
+    if (node_set.size() > 2) {
+        printf("[FB-ENTRY] setSize=%d base_color=%d first3=[", (int)node_set.size(), base_color);
+        for (int i = 0; i < min(3,(int)node_set.size()); i++)
+            printf("%d:c%d ", node_set[i], h_Color[node_set[i]]);
+        printf("]\n");
+    }
+
     // Pick pivot = first node still with base_color
     int pivot = -1;
     for (int n : node_set) {
         if (h_Color[n] == base_color) { pivot = n; break; }
     }
-    if (pivot == -1) return;
+    if (pivot == -1) {
+        if (node_set.size() > 2)
+            printf("[FB-ENTRY] *** pivot NOT FOUND, base_color=%d ***\n", base_color);
+        return;
+    }
 
     if (node_set.size() == 1) {
         h_Color[pivot] = SCC_FOUND;
@@ -1000,6 +1012,14 @@ void start_workers_fw_bw_dfs_host(GPUState& st, const GPUGraph& g, int N)
             for (int i = 0; i < num_nodes; i++) {
                 if (h_Color[i] == w->color) node_set.push_back(i);
             }
+        }
+
+        // DEBUG 2: WCC item before partition (print BEFORE delete w)
+        if (node_set.size() > 2) {
+            printf("[WCC-ITEM] color=%d count=%d node_set.size=%d first3=[", w->color, w->count, (int)node_set.size());
+            for (int i = 0; i < min(3,(int)node_set.size()); i++)
+                printf("%d:c%d ", node_set[i], h_Color[node_set[i]]);
+            printf("]\n");
         }
 
         delete w;
