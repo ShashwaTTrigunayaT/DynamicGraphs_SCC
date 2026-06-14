@@ -559,10 +559,27 @@ int main(int argc, char** argv)
                                cudaMemcpyDeviceToHost));
 
         int scc_count = 0;
+        // Count SCC sizes for histogram
+        std::vector<int> scc_size(N, 0);
         for (int i = 0; i < N; i++) {
             if (h_SCC[i] == i) scc_count++;
+            if (h_SCC[i] >= 0) scc_size[h_SCC[i]]++;
         }
         printf("Total # SCCs = %d\n", scc_count);
+
+        if (analyze) {
+            std::map<int, int> hist;
+            for (int i = 0; i < N; i++) {
+                if (h_SCC[i] == i) {
+                    int sz = scc_size[i];
+                    hist[sz]++;
+                }
+            }
+            for (auto& p : hist) {
+                printf("%d => %d\n", p.first, p.second);
+            }
+            printf("\n");
+        }
 
         if (print) {
             FILE* fp = fopen("scc_output_cuda.txt", "w");
