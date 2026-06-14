@@ -5,7 +5,32 @@ GM_DIR = ../gm_graph
 GM_INC = $(GM_DIR)/inc
 GM_LIB = $(GM_DIR)/lib
 
-NVCCFLAGS = -O3 -I. -I$(GM_INC) -std=c++11 -arch=sm_70
+# Auto-detect GPU architecture from nvidia-smi
+GPU_NAME := $(shell nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1)
+ifeq ($(GPU_NAME),)
+  ARCH = sm_70
+else ifneq (,$(findstring A100,$(GPU_NAME)))
+  ARCH = sm_80
+else ifneq (,$(findstring V100,$(GPU_NAME)))
+  ARCH = sm_70
+else ifneq (,$(findstring T4,$(GPU_NAME)))
+  ARCH = sm_75
+else ifneq (,$(findstring RTX 40,$(GPU_NAME)))
+  ARCH = sm_89
+else ifneq (,$(findstring RTX 30,$(GPU_NAME)))
+  ARCH = sm_86
+else ifneq (,$(findstring RTX 20,$(GPU_NAME)))
+  ARCH = sm_75
+else ifneq (,$(findstring P100,$(GPU_NAME)))
+  ARCH = sm_60
+else ifneq (,$(findstring K80,$(GPU_NAME)))
+  ARCH = sm_37
+else
+  # Default to sm_89 for newer GPUs (Ada/RTX 40 series)
+  ARCH = sm_89
+endif
+
+NVCCFLAGS = -O3 -I. -I$(GM_INC) -std=c++11 -arch=$(ARCH)
 CXXFLAGS  = -O3 -I. -I$(GM_INC) -I$(CUDA_HOME)/include -std=c++11 -fopenmp
 LFLAGS    = -L$(CUDA_HOME)/lib64 -lcudart -L$(GM_LIB) -lgmgraph -lgomp
 
