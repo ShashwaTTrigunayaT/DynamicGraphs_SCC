@@ -465,7 +465,7 @@ int main(int argc, char** argv)
                 met_algo, flag11, da, d_count_trim_spec, 0);
             int trim_total = do_global_trim2_new(st, gpuG, d_count);
             trim_total += repeat_global_trim1_compact(st, gpuG, d_count,
-                met_algo, flag11, da, d_count_trim_spec, 0);
+                met_algo, flag11, da, d_count_trim_spec, 100);
             trimmed += trim_total;
             gettimeofday(&t_trim12, NULL);
 
