@@ -932,6 +932,8 @@ static void host_fw_bw_partition(
 void start_workers_fw_bw_dfs_host(GPUState& st, const GPUGraph& g, int N)
 {
     int num_nodes = g.num_nodes;
+    struct timeval t0, t1, t2, t3, t4;
+    gettimeofday(&t0, NULL);
 
     // ---------------------------------------------------------------
     // Phase 1: Download d_Color only (BFS needs colors).
@@ -942,6 +944,7 @@ void start_workers_fw_bw_dfs_host(GPUState& st, const GPUGraph& g, int N)
     CUDA_CHECK(cudaMemcpy(h_Color.data(), st.d_Color,
                            num_nodes * sizeof(int), cudaMemcpyDeviceToHost));
     std::vector<int> h_SCC(num_nodes, -1);  // don't download, will upload changes via scatter
+    gettimeofday(&t1, NULL);
 
     // ---------------------------------------------------------------
     // Phase 2: Drain work queue and pre-download node sets
@@ -979,6 +982,7 @@ void start_workers_fw_bw_dfs_host(GPUState& st, const GPUGraph& g, int N)
             items.push_back(std::move(item));
         }
     }
+    gettimeofday(&t2, NULL);
 
     // ---------------------------------------------------------------
     // Phase 3: Process each WCC component in parallel (OpenMP)
@@ -997,6 +1001,7 @@ void start_workers_fw_bw_dfs_host(GPUState& st, const GPUGraph& g, int N)
             host_fw_bw_partition(h_Color, h_SCC, task.first, task.second, pending);
         }
     }
+    gettimeofday(&t3, NULL);
 
     // ---------------------------------------------------------------
     // Phase 4: Upload changed SCC values only (compact H2D via scatter kernel).
@@ -1043,4 +1048,12 @@ void start_workers_fw_bw_dfs_host(GPUState& st, const GPUGraph& g, int N)
         CUDA_CHECK(cudaFree(d_node_ids));
         CUDA_CHECK(cudaFree(d_scc_values));
     }
+    gettimeofday(&t4, NULL);
+
+    double d_color_d2h = (t1.tv_sec - t0.tv_sec) * 1000.0 + (t1.tv_usec - t0.tv_usec) * 0.001;
+    double node_sets_d2h = (t2.tv_sec - t1.tv_sec) * 1000.0 + (t2.tv_usec - t1.tv_usec) * 0.001;
+    double cpu_fb = (t3.tv_sec - t2.tv_sec) * 1000.0 + (t3.tv_usec - t2.tv_usec) * 0.001;
+    double scatter_h2d = (t4.tv_sec - t3.tv_sec) * 1000.0 + (t4.tv_usec - t3.tv_usec) * 0.001;
+    printf("[FB_XFER] D2H_Color=%.3fms  D2H_Sets=%.3fms(%d)  CPU_OMP=%.3fms  H2D_Scatter=%.3fms(%d)\n",
+           d_color_d2h, node_sets_d2h, (int)items.size(), cpu_fb, scatter_h2d, num_changed);
 }
