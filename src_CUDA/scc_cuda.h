@@ -441,6 +441,14 @@ void start_workers_fw_bw(GPUState& st, const GPUGraph& g, int N);
 
 // ---- scc_cuda_fb_seq2.cu (mirrors scc_fb_seq2.cc) ----
 
+// Kernel: scatter (node_id, scc_value) pairs into d_SCC
+// Used by start_workers_fw_bw_dfs_host for compact H2D upload
+__global__ void scatter_scc_kernel(
+    int* d_SCC,
+    const int* d_node_ids,
+    const int* d_scc_values,
+    int num_pairs);
+
 // Host-side CSR arrays (populated by main, used by host-side FB processing)
 extern const edge_t* g_h_begin;
 extern const node_t* g_h_node_idx;

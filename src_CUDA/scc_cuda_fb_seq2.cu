@@ -933,14 +933,14 @@ void start_workers_fw_bw_dfs_host(GPUState& st, const GPUGraph& g, int N)
     int num_nodes = g.num_nodes;
 
     // ---------------------------------------------------------------
-    // Phase 1: Download entire d_Color and d_SCC to host
+    // Phase 1: Download d_Color only (BFS needs colors).
+    //          d_SCC is NOT downloaded — we only WRITE to SCC, never read it.
+    //          h_SCC is initialized fresh and only changed nodes are uploaded.
     // ---------------------------------------------------------------
     std::vector<int> h_Color(num_nodes);
-    std::vector<int> h_SCC(num_nodes);
     CUDA_CHECK(cudaMemcpy(h_Color.data(), st.d_Color,
                            num_nodes * sizeof(int), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(h_SCC.data(), st.d_SCC,
-                           num_nodes * sizeof(int), cudaMemcpyDeviceToHost));
+    std::vector<int> h_SCC(num_nodes, -1);  // don't download, will upload changes via scatter
 
     // ---------------------------------------------------------------
     // Phase 2: Drain work queue and pre-download node sets
@@ -948,7 +948,7 @@ void start_workers_fw_bw_dfs_host(GPUState& st, const GPUGraph& g, int N)
     std::vector<CUDAMyWork*> all_works;
     work_q_fetch_N(0, 999999, all_works);  // drain entire queue
 
-    // Extract: (node_set_copy, color) — no CUDA calls inside parallel region
+    // Collect all node IDs to track which SCCs changed (for compact upload)
     struct HostWorkItem {
         std::vector<int> node_set;
         int color;
@@ -998,10 +998,48 @@ void start_workers_fw_bw_dfs_host(GPUState& st, const GPUGraph& g, int N)
     }
 
     // ---------------------------------------------------------------
-    // Phase 4: Upload modified d_Color and d_SCC back to GPU
+    // Phase 4: Upload changed SCC values only (compact H2D via scatter kernel).
+    //          d_Color is NOT uploaded — it's not used after FB.
+    //          Only ~8,980 nodes changed, not the full 1.6M.
     // ---------------------------------------------------------------
-    CUDA_CHECK(cudaMemcpy(st.d_Color, h_Color.data(),
-                           num_nodes * sizeof(int), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(st.d_SCC, h_SCC.data(),
-                           num_nodes * sizeof(int), cudaMemcpyHostToDevice));
+    // Collect all unique node IDs that had their SCC changed
+    std::vector<int> changed_nodes;
+    for (const auto& item : items) {
+        for (int n : item.node_set) {
+            if (h_SCC[n] >= 0) changed_nodes.push_back(n);
+        }
+    }
+    // Deduplicate (sorted compact sets may overlap — unlikely but safe)
+    std::sort(changed_nodes.begin(), changed_nodes.end());
+    changed_nodes.erase(
+        std::unique(changed_nodes.begin(), changed_nodes.end()),
+        changed_nodes.end());
+
+    int num_changed = (int)changed_nodes.size();
+    if (num_changed > 0) {
+        // Pack changed SCC values
+        std::vector<int> h_packed_scc(num_changed);
+        for (int i = 0; i < num_changed; i++) {
+            h_packed_scc[i] = h_SCC[changed_nodes[i]];
+        }
+
+        // Upload packed data to GPU
+        int* d_node_ids = NULL;
+        int* d_scc_values = NULL;
+        CUDA_CHECK(cudaMalloc(&d_node_ids, num_changed * sizeof(int)));
+        CUDA_CHECK(cudaMalloc(&d_scc_values, num_changed * sizeof(int)));
+        CUDA_CHECK(cudaMemcpy(d_node_ids, changed_nodes.data(),
+                               num_changed * sizeof(int), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_scc_values, h_packed_scc.data(),
+                               num_changed * sizeof(int), cudaMemcpyHostToDevice));
+
+        // Scatter kernel: d_SCC[node_id] = scc_value
+        int bs = 256;
+        int gs = (num_changed + bs - 1) / bs;
+        scatter_scc_kernel<<<gs, bs>>>(st.d_SCC, d_node_ids, d_scc_values, num_changed);
+        CUDA_CHECK(cudaDeviceSynchronize());
+
+        CUDA_CHECK(cudaFree(d_node_ids));
+        CUDA_CHECK(cudaFree(d_scc_values));
+    }
 }

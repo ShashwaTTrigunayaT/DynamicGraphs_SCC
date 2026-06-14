@@ -486,6 +486,24 @@ __global__ void scatter_single_color_all_nodes_kernel(
 }
 
 // ======================================================================
+// scatter_scc_kernel() — scatter (node_id, scc_value) pairs into d_SCC
+// Used by start_workers_fw_bw_dfs_host for compact H2D upload
+// (only uploads changed SCC values instead of full 6.4MB array)
+// ======================================================================
+__global__ void scatter_scc_kernel(
+    int* d_SCC,
+    const int* d_node_ids,
+    const int* d_scc_values,
+    int num_pairs)
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = gridDim.x * blockDim.x;
+    for (int i = tid; i < num_pairs; i += stride) {
+        d_SCC[d_node_ids[i]] = d_scc_values[i];
+    }
+}
+
+// ======================================================================
 // count_by_wcc_root_kernel() — count members per WCC root
 // ======================================================================
 __global__ void count_by_wcc_root_kernel(
