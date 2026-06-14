@@ -525,16 +525,11 @@ int do_global_fw_bw_main(GPUState& st, const GPUGraph& g,
 
     int total_fw = 1;  // pivot counted
 
-    int level = 0;
     while (queue_size > 0) {
         CUDA_CHECK(cudaMemsetAsync(d_bfs_next_count, 0, sizeof(int), bfs_stream));
 
         int grid = (queue_size + block_size - 1) / block_size;
         grid = min(grid, 1024);
-        if (grid * block_size < queue_size) {
-            printf("[CUDA BFS DEBUG] FW level %d: WARNING grid=%d x %d = %d threads < queue_size=%d! Nodes will be DROPPED!\n",
-                   level, grid, block_size, grid * block_size, queue_size);
-        }
 
         fw_bfs_level_kernel<<<grid, block_size, 0, bfs_stream>>>(
             g.d_begin, g.d_node_idx,
@@ -555,13 +550,8 @@ int do_global_fw_bw_main(GPUState& st, const GPUGraph& g,
         d_bfs_next_queue = tmp;
 
         queue_size = *h_pinned_next_count;
-        printf("[CUDA BFS DEBUG] FW level %d: frontier=%d\n", level, queue_size);
-        fflush(stdout);
         total_fw += queue_size;
-        level++;
     }
-
-    printf("[CUDA BFS DEBUG] FW total (including pivot) = %d\n", total_fw);
 
     // OpenMP: int fw_count = FW_BFS.get_fw_count();
     int fw_count = total_fw;
@@ -592,16 +582,11 @@ int do_global_fw_bw_main(GPUState& st, const GPUGraph& g,
     queue_size = 1;
     int scc_count = 1;
 
-    int level_bw = 0;
     while (queue_size > 0) {
         CUDA_CHECK(cudaMemsetAsync(d_bfs_next_count, 0, sizeof(int), bfs_stream));
 
         int grid = (queue_size + block_size - 1) / block_size;
         grid = min(grid, 1024);
-        if (grid * block_size < queue_size) {
-            printf("[CUDA BFS DEBUG] BW level %d: WARNING grid=%d x %d = %d threads < queue_size=%d! Nodes will be DROPPED!\n",
-                   level_bw, grid, block_size, grid * block_size, queue_size);
-        }
 
         bw_bfs_level_kernel<<<grid, block_size, 0, bfs_stream>>>(
             g.d_r_begin, g.d_r_node_idx,
@@ -622,9 +607,6 @@ int do_global_fw_bw_main(GPUState& st, const GPUGraph& g,
         d_bfs_next_queue = tmp;
 
         queue_size = *h_pinned_next_count;
-        printf("[CUDA BFS DEBUG] BW level %d: frontier=%d\n", level_bw, queue_size);
-        fflush(stdout);
-        level_bw++;
     }
 
     // Read final SCC / BW counts
@@ -634,7 +616,6 @@ int do_global_fw_bw_main(GPUState& st, const GPUGraph& g,
     CUDA_CHECK(cudaMemcpy(&h_bw, d_bfs_bw_count, sizeof(int), cudaMemcpyDeviceToHost));
     scc_count += h_scc;
     int bw_count = h_bw;
-    printf("[CUDA BFS DEBUG] BW done: scc_found=%d (excluding pivot) bw_found=%d\n", h_scc, h_bw);
 
     // OpenMP: compute counts for each partition
     //   int bw_count = BW_BFS.get_bw_count();
