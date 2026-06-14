@@ -399,6 +399,7 @@ int main(int argc, char** argv)
 
         // Per-phase timing using gettimeofday (host-side, works on any server)
         struct timeval t_start, t_trim1, t_compact, t_bfs, t_trim12, t_wcc, t_end;
+        gettimeofday(&R1, NULL);
         gettimeofday(&t_start, NULL);
 
         // ---------- Phase 1: TRIM1 ----------
