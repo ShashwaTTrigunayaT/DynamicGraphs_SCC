@@ -92,7 +92,7 @@ static inline int count_lines(const char* buf, size_t size) {
 //
 // 1:1 functional mirror of main_t::read_file() in common_main.h
 // ======================================================================
-int read_file(string filename, vector<pair<int, int>>& edges_list)
+int read_file(const string& filename, vector<pair<int, int>>& edges_list)
 {
     // Open file
     FILE* fp = fopen(filename.c_str(), "rb");
@@ -151,7 +151,7 @@ int read_file(string filename, vector<pair<int, int>>& edges_list)
 //
 // 1:1 mirror of main_t::read_file1() in common_main.h
 // ======================================================================
-int read_file1(string filename, vector<int>& scc_list_out, int num_vertices)
+int read_file1(const string& filename, vector<int>& scc_list_out, int num_vertices)
 {
     ifstream inputFile(filename);
     string line;
