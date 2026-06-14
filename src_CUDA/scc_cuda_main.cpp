@@ -11,6 +11,13 @@
 
 using namespace std;
 
+// Host-side CSR arrays (shared with scc_cuda_fb_seq2.cu for host-side FB processing)
+const edge_t* g_h_begin = NULL;
+const node_t* g_h_node_idx = NULL;
+const edge_t* g_h_r_begin = NULL;
+const node_t* g_h_r_node_idx = NULL;
+int g_h_N = 0;
+
 int main(int argc, char** argv)
 {
     // ---------------------------------------------------------------
@@ -257,6 +264,13 @@ int main(int argc, char** argv)
     GPUGraph gpuG;
     graph_upload(gpuG, h_begin, h_node_idx, h_r_begin, h_r_node_idx, N, M);
 
+    // Set global host CSR arrays (for host-side FB processing)
+    g_h_begin     = h_begin.data();
+    g_h_node_idx  = h_node_idx.data();
+    g_h_r_begin   = h_r_begin.data();
+    g_h_r_node_idx = h_r_node_idx.data();
+    g_h_N         = N;
+
     GPUState st;
     state_allocate(st, N);
     state_init(st);
@@ -476,8 +490,8 @@ int main(int argc, char** argv)
                 create_work_items_from_wcc(st, gpuG);
                 gettimeofday(&t_wcc, NULL);
 
-                // ---------- Phase 5: FB (DFS) ----------
-                start_workers_fw_bw_dfs(st, gpuG, 40);
+                // ---------- Phase 5: FB (DFS) — processed on host to avoid kernel launch overhead ----------
+                start_workers_fw_bw_dfs_host(st, gpuG, 40);
             } else {
                 gettimeofday(&t_wcc, NULL);
             }

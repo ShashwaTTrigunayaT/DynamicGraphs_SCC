@@ -770,3 +770,327 @@ void start_workers_fw_bw_dfs(GPUState& st, const GPUGraph& g, int N)
         }
     }
 }
+
+// ======================================================================
+// start_workers_fw_bw_dfs_host()
+//
+// Host-side processing of WCC work items. Avoids ALL GPU kernel launches
+// by downloading d_Color/d_SCC, processing on CPU, and uploading results.
+//
+// The CSR arrays are accessed via global pointers g_h_begin, etc.
+// (set in scc_cuda_main.cpp).
+// ======================================================================
+
+// Host-side DFS traversal: marks all nodes reachable from 'start' within 'nodes' set
+static void host_fw_dfs(
+    int start,
+    std::vector<int>& h_Color,
+    const std::vector<int>& node_set,     // which nodes are in scope
+    std::vector<bool>& in_set,             // fast lookup: is n in node_set?
+    int base_color, int fw_color,
+    std::vector<int>& fw_result)           // output: nodes marked fw_color
+{
+    std::vector<int> stack;
+    stack.push_back(start);
+    while (!stack.empty()) {
+        int n = stack.back();
+        stack.pop_back();
+        if (h_Color[n] != base_color) continue;
+        h_Color[n] = fw_color;
+        fw_result.push_back(n);
+        for (edge_t e = g_h_begin[n]; e < g_h_begin[n + 1]; e++) {
+            node_t k = g_h_node_idx[e];
+            if (h_Color[k] == base_color && in_set[k]) {
+                stack.push_back(k);
+            }
+        }
+    }
+}
+
+// Host-side BW DFS: traverses reverse edges, marks intersection as SCC
+static void host_bw_dfs(
+    int start, int pivot,
+    std::vector<int>& h_Color, std::vector<int>& h_SCC,
+    const std::vector<int>& node_set,
+    std::vector<bool>& in_set,
+    int fw_color, int bw_color, int base_color,
+    std::vector<int>& bw_result, int& scc_count)
+{
+    std::vector<int> stack;
+    stack.push_back(start);
+    while (!stack.empty()) {
+        int n = stack.back();
+        stack.pop_back();
+        int c = h_Color[n];
+        if (c == fw_color) {
+            h_Color[n] = SCC_FOUND;
+            h_SCC[n] = pivot;
+            scc_count++;
+            for (edge_t e = g_h_r_begin[n]; e < g_h_r_begin[n + 1]; e++) {
+                node_t k = g_h_r_node_idx[e];
+                int kc = h_Color[k];
+                if ((kc == fw_color || kc == base_color) && in_set[k]) {
+                    stack.push_back(k);
+                }
+            }
+        } else if (c == base_color) {
+            h_Color[n] = bw_color;
+            bw_result.push_back(n);
+            for (edge_t e = g_h_r_begin[n]; e < g_h_r_begin[n + 1]; e++) {
+                node_t k = g_h_r_node_idx[e];
+                int kc = h_Color[k];
+                if ((kc == fw_color || kc == base_color) && in_set[k]) {
+                    stack.push_back(k);
+                }
+            }
+        }
+    }
+}
+
+// Recursive host-side FW-BW processing for a set of nodes
+static void host_fw_bw_partition(
+    std::vector<int>& h_Color, std::vector<int>& h_SCC,
+    int N, int num_nodes_total,
+    std::vector<int>& node_set,   // nodes to process (sorted base_color)
+    std::vector<bool>& in_set,    // fast membership check
+    int base_color,
+    std::vector<std::pair<std::vector<int>, int>>& pending_tasks)
+{
+    if (node_set.empty()) return;
+
+    // Pick pivot = first node still with base_color
+    int pivot = -1;
+    for (int n : node_set) {
+        if (h_Color[n] == base_color) { pivot = n; break; }
+    }
+    if (pivot == -1) return;
+
+    if (node_set.size() == 1) {
+        h_Color[pivot] = SCC_FOUND;
+        h_SCC[pivot] = pivot;
+        return;
+    }
+
+    // Assign new colors using shared color counter
+    int fw_color = cuda_get_new_color();
+    int bw_color = cuda_get_new_color();
+
+    // FW DFS from pivot (pivot is included in fw_set)
+    std::vector<int> fw_set;
+    host_fw_dfs(pivot, h_Color, node_set, in_set, base_color, fw_color, fw_set);
+    int fw_count = (int)fw_set.size();  // includes pivot
+
+    // BW DFS from pivot
+    std::vector<int> bw_set;
+    int scc_count = 0;
+    host_bw_dfs(pivot, pivot, h_Color, h_SCC, node_set, in_set,
+                fw_color, bw_color, base_color, bw_set, scc_count);
+
+    // Compute partition sizes (both fw_count and scc_count include pivot)
+    int fw_only = fw_count - scc_count;
+    int bw_count = (int)bw_set.size();
+    int base_count = (int)node_set.size() - fw_count - bw_count;
+
+    // Build fw partition (nodes still with fw_color, not in SCC)
+    if (fw_only > 0) {
+        std::vector<int> fw_partition;
+        for (int n : fw_set) {
+            if (h_Color[n] == fw_color) fw_partition.push_back(n);
+        }
+        if (!fw_partition.empty()) {
+            pending_tasks.push_back({fw_partition, fw_color});
+        }
+    }
+
+    // Build bw partition
+    if (bw_count > 0) {
+        std::vector<int> bw_partition;
+        for (int n : node_set) {
+            if (h_Color[n] == bw_color) bw_partition.push_back(n);
+        }
+        if (!bw_partition.empty()) {
+            pending_tasks.push_back({bw_partition, bw_color});
+        }
+    }
+
+    // Build base partition
+    if (base_count > 0) {
+        std::vector<int> base_partition;
+        for (int n : node_set) {
+            if (h_Color[n] == base_color) base_partition.push_back(n);
+        }
+        if (!base_partition.empty()) {
+            pending_tasks.push_back({base_partition, base_color});
+        }
+    }
+}
+
+void start_workers_fw_bw_dfs_host(GPUState& st, const GPUGraph& g, int N)
+{
+    int num_nodes = g.num_nodes;
+
+    // ---------------------------------------------------------------
+    // Phase 1: Download entire d_Color and d_SCC to host
+    // ---------------------------------------------------------------
+    std::vector<int> h_Color(num_nodes);
+    std::vector<int> h_SCC(num_nodes);
+    CUDA_CHECK(cudaMemcpy(h_Color.data(), st.d_Color,
+                           num_nodes * sizeof(int), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(h_SCC.data(), st.d_SCC,
+                           num_nodes * sizeof(int), cudaMemcpyDeviceToHost));
+
+    // ---------------------------------------------------------------
+    // Phase 2: Drain the work queue and process each work item on host
+    // ---------------------------------------------------------------
+    std::vector<CUDAMyWork*> all_works;
+    work_q_fetch_N(0, 999999, all_works);  // drain entire queue
+
+    // Process each work item's set
+    for (CUDAMyWork* w : all_works) {
+        if (w->count == 0) { delete w; continue; }
+
+        // d_set_nodes may be NULL — if so, find nodes of w->color in h_Color
+        std::vector<int> node_set;
+        if (w->d_set_nodes != NULL) {
+            node_set.resize(w->count);
+            CUDA_CHECK(cudaMemcpy(node_set.data(), w->d_set_nodes,
+                                   w->count * sizeof(int), cudaMemcpyDeviceToHost));
+            if (w->owns_set) {
+                CUDA_CHECK(cudaFree(w->d_set_nodes));
+                w->d_set_nodes = NULL;
+            }
+        } else {
+            // Scan all nodes for w->color
+            for (int i = 0; i < num_nodes; i++) {
+                if (h_Color[i] == w->color) node_set.push_back(i);
+            }
+        }
+
+        delete w;
+
+        if (node_set.empty()) continue;
+
+        // Build fast membership lookup
+        std::vector<bool> in_set(num_nodes, false);
+        for (int n : node_set) in_set[n] = true;
+
+        // Process this WCC component recursively
+        std::vector<std::pair<std::vector<int>, int>> pending;
+        pending.push_back({node_set, w->color});
+
+        while (!pending.empty()) {
+            auto task = pending.back();
+            pending.pop_back();
+            host_fw_bw_partition(h_Color, h_SCC, num_nodes, num_nodes,
+                                 task.first, in_set, task.second, 0, pending);
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Phase 3: Upload modified d_Color and d_SCC back to GPU
+    // ---------------------------------------------------------------
+    CUDA_CHECK(cudaMemcpy(st.d_Color, h_Color.data(),
+                           num_nodes * sizeof(int), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(st.d_SCC, h_SCC.data(),
+                           num_nodes * sizeof(int), cudaMemcpyHostToDevice));
+}
+
+{
+    // CUDA: Single-threaded host loop (mirrors OpenMP parallel body)
+    //       Each "iteration" simulates one thread's work loop.
+    std::vector<CUDAMyWork*> new_works;
+    std::vector<CUDAMyWork*> my_works;
+    my_works.reserve(4096);  // OpenMP: my_works.reserve(4096);
+
+    // OpenMP: while (true) { ... }
+    while (true) {
+        // OpenMP: if (my_works.size() == 0) work_q_fetch_N(tid, std::max(N/2,1), my_works);
+        if (my_works.size() == 0) {
+            work_q_fetch_N(0, std::max(N/2,1), my_works);
+        }
+
+        // OpenMP: if (my_works.size() == 0) break;
+        if (my_works.size() == 0) break;
+
+        // OpenMP: while (my_works.size() > 0) { ... }
+        while (my_works.size() > 0) {
+            CUDAMyWork* w = my_works.back();
+            my_works.pop_back();
+
+            // OpenMP: lazy compact set generation
+            //   if ((w->count < G.num_nodes() * 1) && (w->color_set == NULL))
+            //       w->color_set = generate_compact_set(G, w->color);
+            //
+            // Note: CPU uses threshold * 1 (i.e., count < N always true),
+            // so this branch ALWAYS fires on CPU. CUDA mirrors this behavior.
+            if ((w->count < g.num_nodes * 1) && (w->d_set_nodes == NULL)) {
+                // OpenMP: w->color_set = generate_compact_set(G, w->color);
+                //         generate_compact_set:
+                //           if (get_compact_trim_targets().size() == 0)
+                //               for(node_t i=0;i<G.num_nodes(); i++) if (G_Color[i]==color) ...
+                //           else
+                //               for each node in compact_trim_targets ...
+                int* d_new_set = NULL;
+                int* d_pos = NULL;
+                CUDA_CHECK(cudaMalloc(&d_pos, sizeof(int)));
+                CUDA_CHECK(cudaMemset(d_pos, 0, sizeof(int)));
+                CUDA_CHECK(cudaMalloc(&d_new_set, w->count * sizeof(int)));
+
+                int bs = 256;
+                if (d_trim_targets_count > 0) {
+                    int gs = (d_trim_targets_count + bs - 1) / bs;
+                    scatter_single_color_kernel<<<gs, bs>>>(
+                        st.d_Color,
+                        d_trim_targets, d_trim_targets_count,
+                        w->color,
+                        d_new_set, d_pos);
+                    CUDA_CHECK(cudaDeviceSynchronize());
+                } else {
+                    // OpenMP: for(node_t i=0;i<G.num_nodes(); i++) ...
+                    int gs = (g.num_nodes + bs - 1) / bs;
+                    scatter_single_color_all_nodes_kernel<<<gs, bs>>>(
+                        st.d_Color, g.num_nodes,
+                        w->color,
+                        d_new_set, d_pos);
+                    CUDA_CHECK(cudaDeviceSynchronize());
+                }
+
+                CUDA_CHECK(cudaFree(d_pos));
+                w->d_set_nodes = d_new_set;
+                w->set_capacity = w->count;
+                w->owns_set = 1;
+            }
+
+            // OpenMP: do_fw_bw_dfs(G, w, new_works);
+            do_fw_bw_dfs(st, g, w, new_works);
+
+            // OpenMP: delete w;
+            if (w->d_set_nodes != NULL && w->owns_set) {
+                CUDA_CHECK(cudaFree(w->d_set_nodes));
+            }
+            delete w;
+            w = NULL;
+
+            // OpenMP: keep some new items locally
+            //   while ((my_works.size() < N) && (new_works.size() > 0)) {
+            //       my_work* w = new_works.back();
+            //       new_works.pop_back();
+            //       my_works.push_back(w);
+            //   }
+            while ((my_works.size() < (size_t)N) && (new_works.size() > 0)) {
+                CUDAMyWork* w = new_works.back();
+                new_works.pop_back();
+                my_works.push_back(w);
+            }
+
+            // OpenMP: push rest to global queue
+            //   if (new_works.size() > 0) {
+            //       work_q_put_all(tid, new_works); new_works.clear();
+            //   }
+            if (new_works.size() > 0) {
+                work_q_put_all(0, new_works);
+                new_works.clear();
+            }
+        }
+    }
+}

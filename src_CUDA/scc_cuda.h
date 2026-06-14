@@ -441,11 +441,21 @@ void start_workers_fw_bw(GPUState& st, const GPUGraph& g, int N);
 
 // ---- scc_cuda_fb_seq2.cu (mirrors scc_fb_seq2.cc) ----
 
+// Host-side CSR arrays (populated by main, used by host-side FB processing)
+extern const edge_t* g_h_begin;
+extern const node_t* g_h_node_idx;
+extern const edge_t* g_h_r_begin;
+extern const node_t* g_h_r_node_idx;
+extern int g_h_N;
+
 // Host functions — exact mirrors of OpenMP functions
 // Per-subgraph FW-BW (DFS-based): consumes CUDAMyWork items from the work queue
 int do_fw_bw_dfs(GPUState& st, const GPUGraph& g,
     CUDAMyWork* w, std::vector<CUDAMyWork*>& new_works);
 
 void start_workers_fw_bw_dfs(GPUState& st, const GPUGraph& g, int N);
+
+// Host-side FB processing (avoids all GPU kernel launches for the per-component phase)
+void start_workers_fw_bw_dfs_host(GPUState& st, const GPUGraph& g, int N);
 
 #endif
