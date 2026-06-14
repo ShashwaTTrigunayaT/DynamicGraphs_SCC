@@ -982,6 +982,11 @@ void start_workers_fw_bw_dfs_host(GPUState& st, const GPUGraph& g, int N)
             items.push_back(std::move(item));
         }
     }
+    // Save all node IDs BEFORE Phase 3 (std::move in parallel loop empties the vectors)
+    std::vector<int> all_node_ids;
+    for (const auto& item : items) {
+        all_node_ids.insert(all_node_ids.end(), item.node_set.begin(), item.node_set.end());
+    }
     gettimeofday(&t2, NULL);
 
     // ---------------------------------------------------------------
@@ -1008,14 +1013,12 @@ void start_workers_fw_bw_dfs_host(GPUState& st, const GPUGraph& g, int N)
     //          d_Color is NOT uploaded — it's not used after FB.
     //          Only ~8,980 nodes changed, not the full 1.6M.
     // ---------------------------------------------------------------
-    // Collect all unique node IDs that had their SCC changed
+    // Collect changed node IDs from the saved list (node_sets were moved in Phase 3)
     std::vector<int> changed_nodes;
-    for (const auto& item : items) {
-        for (int n : item.node_set) {
-            if (h_SCC[n] >= 0) changed_nodes.push_back(n);
-        }
+    for (int n : all_node_ids) {
+        if (h_SCC[n] >= 0) changed_nodes.push_back(n);
     }
-    // Deduplicate (sorted compact sets may overlap — unlikely but safe)
+    // Deduplicate
     std::sort(changed_nodes.begin(), changed_nodes.end());
     changed_nodes.erase(
         std::unique(changed_nodes.begin(), changed_nodes.end()),
