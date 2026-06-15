@@ -204,9 +204,11 @@ void finalize_global_fb()
 
 // Device function: check_navigator for forward BFS
 // OpenMP: return (G_Color[k9] == base_color);
-__device__ bool fw_check_navigator_device(int* d_Color, node_t k9, int base_color)
+// Uses __ldg() to read through read-only data cache (separate from L1,
+// not invalidated by writes to d_Color).
+__device__ __forceinline__ bool fw_check_navigator_device(const int* d_Color, node_t k9, int base_color)
 {
-    return (d_Color[k9] == base_color);
+    return (__ldg(&d_Color[k9]) == base_color);
 }
 
 // ======================================================================
@@ -324,10 +326,12 @@ __global__ void fw_bfs_level_kernel(
 
 // Device function: check_navigator for backward BFS
 // OpenMP: return (color == fw_color) || (color == base_color);
-__device__ bool bw_check_navigator_device(int* d_Color, node_t k10,
+// Uses __ldg() to read through read-only data cache (separate from L1,
+// not invalidated by writes to d_Color).
+__device__ __forceinline__ bool bw_check_navigator_device(const int* d_Color, node_t k10,
     int fw_color, int base_color)
 {
-    int color = d_Color[k10];
+    int color = __ldg(&d_Color[k10]);
     return (color == fw_color) || (color == base_color);
 }
 
@@ -376,8 +380,8 @@ __global__ void bw_bfs_level_kernel(
         node_t t = d_queue[i];
         for (edge_t nx = d_r_begin[t]; nx < d_r_begin[t + 1]; nx++) {
             node_t k = d_r_node_idx[nx];
-            // Single read of d_Color[k] for TOCTOU safety
-            int k_color = d_Color[k];
+            // Single read of d_Color[k] for TOCTOU safety (via read-only cache)
+            int k_color = __ldg(&d_Color[k]);
 
             // Navigate: check if node is fw_color (intersection) or base_color (bw-set)
             if (k_color == fw_color || k_color == base_color) {
