@@ -491,8 +491,8 @@ int main(int argc, char** argv)
                 create_work_items_from_wcc(st, gpuG);
                 gettimeofday(&t_wcc, NULL);
 
-                // ---------- Phase 5: FB (DFS) — processed on host to avoid kernel launch overhead ----------
-                start_workers_fw_bw_dfs_host(st, gpuG, 40);
+                // ---------- Phase 5: FB (DFS) — processed on GPU via BFS kernels (instead of host CPU) ----------
+                start_workers_fw_bw_dfs(st, gpuG, num_threads);
             } else {
                 gettimeofday(&t_wcc, NULL);
             }
