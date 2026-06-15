@@ -354,6 +354,15 @@ int do_fw_bw_dfs(GPUState& st, const GPUGraph& g,
     // OpenMP: int fw_count = FW_BFS.get_fw_count();
     int fw_count = total_fw;
 
+    // ---- Reset visited bitmap between FW and BW BFS ----
+    // FW BFS set bits for all forward-reachable nodes; BW BFS needs a clean bitmap
+    // for claiming SCC/bw-set nodes. Without this reset, BW BFS cannot claim nodes
+    // claimed by FW BFS (visited bit already set), causing missed intersection SCCs.
+    CUDA_CHECK(cudaMemsetAsync(d_bfs_visited_bits, 0,
+                                d_bfs_visited_words * sizeof(uint32_t),
+                                bfs_stream));
+    CUDA_CHECK(cudaStreamSynchronize(bfs_stream));
+
     // ---------------------------------------------------------------
     // Backward traversal from pivot
     // OpenMP:
