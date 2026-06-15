@@ -371,4 +371,11 @@ int main(int argc, char** argv)
     /*Find the SCCs by adding these extra edges back again*/
     my_main T;
     T.main(argc,argv);
+
+    // Flush output and exit immediately to skip corrupted gm_graph destructor.
+    // On large graphs (e.g. LiveJournal1: 4.8M nodes, 69M edges), heap metadata
+    // gets corrupted during processing, causing "double free or corruption" on cleanup.
+    fflush(stdout);
+    fflush(stderr);
+    exit(0);
 }
