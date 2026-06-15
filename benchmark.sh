@@ -26,6 +26,9 @@ fi
 DATASET="$1"
 THREADS="${2:-72}"
 
+# Resolve dataset to absolute path
+DATASET="$(cd "$(dirname "$DATASET")" 2>/dev/null && pwd)/$(basename "$DATASET")"
+
 # Resolve dataset name for display
 DS_NAME=$(basename "$(dirname "$DATASET")")
 [ "$DS_NAME" = "." ] && DS_NAME="$DATASET"
