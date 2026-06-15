@@ -484,8 +484,8 @@ int main(int argc, char** argv)
             trimmed += trim_total;
             gettimeofday(&t_trim12, NULL);
 
-            curr_count = d_trim_targets_count;
             double fb_algo_time = 0;
+            curr_count = d_trim_targets_count;
             if (curr_count > 0) {
                 // ---------- Phase 4: WCC ----------
                 do_global_wcc(st, gpuG);
