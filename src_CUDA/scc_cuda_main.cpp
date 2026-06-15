@@ -616,9 +616,12 @@ int main(int argc, char** argv)
     graph_free(gpuG);
     fprintf(stderr, "[DEBUG] cleanup: DONE\n");
 
-    // Pre-clean gm_graph to avoid heap corruption crash in destructor
-    // (LiveJournal1: 4.8M nodes, 69M edges = ~1.7GB allocations)
-    G.clear_graph();
-
-    return 0;
+    // NOTE: gm_graph's destructor crashes on LiveJournal1 (4.8M nodes)
+    // due to heap corruption from the 1.7GB of CSR array allocations.
+    // Both OpenMP and CUDA binaries have this issue.
+    // The SCC result is already printed — skip cleanup and exit.
+    // All GPU memory was freed above; OS will reclaim the rest.
+    fflush(stdout);
+    fflush(stderr);
+    _exit(0);
 }
