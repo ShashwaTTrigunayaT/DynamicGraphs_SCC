@@ -1,39 +1,21 @@
 #!/usr/bin/env python3
 """
-Convert WebGraph BV .graph files (from law.di.unimi.it) to plain edge list format.
+Convert WebGraph BV .graph files (from law.di.unimi.it) to edge list format.
 
 Usage:
     python3 tools/convert_graph.py <graph_basename> <output_path>
 
 Examples:
-    python3 tools/convert_graph.py ~/it-2004 datasets/it-2004/refined_edges.txt
     python3 tools/convert_graph.py ~/indochina-2004 datasets/indochina-2004/refined_edges.txt
+    python3 tools/convert_graph.py ~/it-2004 datasets/it-2004/refined_edges.txt
 
-The <graph_basename> should point to the .graph file WITHOUT extension.
-The script auto-downloads missing .properties and .offsets files from LAW.
+<graph_basename> = path WITHOUT .graph extension.
+The .graph file and any .properties/.offsets must be alongside it.
 """
-import os, sys, struct, urllib.request, subprocess
+import os, sys, subprocess
 
 
-def download_missing_files(basename):
-    """Download .properties and .offsets files if missing."""
-    base_name = os.path.basename(basename)
-    ok = True
-    for ext in ['.properties', '.offsets']:
-        path = basename + ext
-        if not os.path.exists(path):
-            url = f"http://data.law.di.unimi.it/webdata/{base_name}/{base_name}{ext}"
-            print(f"[DL] {url}", file=sys.stderr)
-            try:
-                urllib.request.urlretrieve(url, path)
-            except Exception as e:
-                print(f"[ERR] {e}", file=sys.stderr)
-                ok = False
-    return ok
-
-
-def convert_with_webgraph(basename, output_path):
-    """Convert using the webgraph Python library (pip install webgraph)."""
+def convert(basename, output_path):
     print("[INFO] Installing webgraph package...", file=sys.stderr)
     r = subprocess.run([sys.executable, '-m', 'pip', 'install', 'webgraph', '-q'],
                        capture_output=True, text=True)
@@ -43,53 +25,28 @@ def convert_with_webgraph(basename, output_path):
 
     import webgraph
     print(f"[INFO] Reading {basename}.graph ...", file=sys.stderr)
-    g = webgraph.Graph(basename)
-    n = g.num_nodes()
-
-    print(f"[INFO] Nodes: {n}, writing edges...", file=sys.stderr)
-    with open(output_path, 'w') as f:
-        for src in range(n):
-            for dst in g.successors(src):
-                f.write(f"{src} {dst}\n")
-    print(f"[OK] Wrote to {output_path}", file=sys.stderr)
-    return True
-
-
-def convert_java(basename, output_path):
-    """Convert using the Java WebGraph tool (if Java is available)."""
-    # Check if java is available
-    r = subprocess.run(['which', 'java'], capture_output=True)
-    if r.returncode != 0:
+    try:
+        g = webgraph.BvGraph(basename)
+    except Exception as e:
+        print(f"[ERR] BvGraph failed: {e}", file=sys.stderr)
+        print("Try: pip install webgraph --upgrade", file=sys.stderr)
         return False
 
-    base = os.path.basename(basename)
-    # Try to download the WebGraph jar
-    jar_url = "https://repo1.maven.org/maven2/it/unimi/dsi/webgraph/webgraph/3.6.9/webgraph-3.6.9.jar"
-    deps = [
-        "https://repo1.maven.org/maven2/it/unimi/dsi/fastutil/8.5.15/fastutil-8.5.15.jar",
-        "https://repo1.maven.org/maven2/com/martinkl/colt/1.2.0/colt-1.2.0.jar",
-        "https://repo1.maven.org/maven2/org/slf4j/slf4j-api/2.0.16/slf4j-api-2.0.16.jar",
-        "https://repo1.maven.org/maven2/org/slf4j/slf4j-simple/2.0.16/slf4j-simple-2.0.16.jar",
-    ]
+    n, e = g.num_nodes(), g.num_edges()
+    print(f"[INFO] Nodes: {n}, Edges: {e:,}", file=sys.stderr)
+    print(f"[INFO] Writing edges...", file=sys.stderr)
 
-    lib_dir = os.path.join(os.path.dirname(__file__) or '.', 'lib')
-    os.makedirs(lib_dir, exist_ok=True)
-    jars = []
-    for url in [jar_url] + deps:
-        jar = os.path.join(lib_dir, os.path.basename(url))
-        if not os.path.exists(jar):
-            print(f"[DL] {os.path.basename(url)}", file=sys.stderr)
-            urllib.request.urlretrieve(url, jar)
-        jars.append(jar)
+    written = 0
+    with open(output_path, 'w') as f:
+        for src in range(n):
+            if src % 500000 == 0 and src > 0:
+                print(f"[INFO] Node {src}/{n} — {written:,} edges written", file=sys.stderr)
+            for dst in g.successors(src):
+                f.write(f"{src} {dst}\n")
+                written += 1
 
-    cp = ':'.join(jars)
-    cmd = ['java', '-cp', cp,
-           'it.unimi.dsi.webgraph.BVGraph',
-           '-g', base, output_path]
-    print(f"[JAVA] {' '.join(cmd)}", file=sys.stderr)
-    # Note: BVGraph -g outputs in WebGraph ASCII format, not edge list
-    # We'd need additional parsing — this is complex
-    return False
+    print(f"[OK] Done — {written:,} edges → {output_path}", file=sys.stderr)
+    return True
 
 
 def main():
@@ -100,21 +57,17 @@ def main():
     basename = sys.argv[1]
     if basename.endswith('.graph'):
         basename = basename[:-6]
-    
-    if sys.argv[2] == '-':
-        output_path = '/dev/stdout'
-    else:
-        output_path = sys.argv[2]
-        os.makedirs(os.path.dirname(output_path) or '.', exist_ok=True)
 
-    download_missing_files(basename)
+    output_path = sys.argv[2]
+    os.makedirs(os.path.dirname(output_path) or '.', exist_ok=True)
 
-    if convert_with_webgraph(basename, output_path):
+    if convert(basename, output_path):
         return
 
-    print("[ERR] Could not convert. Try installing webgraph manually:", file=sys.stderr)
-    print(f"  pip install webgraph", file=sys.stderr)
-    print(f"  python3 tools/convert_graph.py {basename} {output_path}", file=sys.stderr)
+    print("[ERR] Conversion failed.", file=sys.stderr)
+    print("  Ensure the .graph file exists and try:", file=sys.stderr)
+    print(f"  pip install webgraph --upgrade", file=sys.stderr)
+    print(f"  python3 {sys.argv[0]} {basename} {output_path}", file=sys.stderr)
     sys.exit(1)
 
 
