@@ -246,12 +246,11 @@ __device__ int find_node_for_edge(int e, const int* d_prefix, int queue_size)
 }
 
 // ======================================================================
-// Kernel: build edge prefix-sum for edge-centric BFS
-// Computes: d_prefix[0] = 0
-//           d_prefix[i+1] = d_prefix[i] + degree(d_queue[i])
-// Total frontier edges = d_prefix[queue_size]
-// Simple incremental kernel: each thread processes one node at a time.
-// Frontier sizes are typically small-medium per BFS level.
+// Kernel: build edge raw degrees (Phase 1)
+// Writes raw degree of each frontier node to d_prefix[i+1].
+// Then finalize_edge_prefix_kernel computes cumulative sum.
+// Phase 1: d_prefix[i+1] = degree(d_queue[i]), d_prefix[0] = 0
+// Phase 2: d_prefix[i+1] = sum_{j=0..i} degree(d_queue[j])
 // ======================================================================
 __global__ void build_edge_prefix_kernel(
     const edge_t* d_begin,
@@ -261,13 +260,30 @@ __global__ void build_edge_prefix_kernel(
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     int stride = blockDim.x * gridDim.x;
 
-    // Each thread writes its prefix sum element
     for (int i = tid; i < queue_size; i += stride) {
         node_t t = d_queue[i];
         int deg = d_begin[t + 1] - d_begin[t];
         d_prefix[i + 1] = deg;
     }
     if (tid == 0) d_prefix[0] = 0;
+}
+
+// ======================================================================
+// Kernel: finalize edge prefix-sum (Phase 2)
+// Converts raw degrees into cumulative prefix sum.
+// Single-thread sequential scan: fast for reasonable queue sizes.
+// Before: d_prefix = [0, deg0, deg1, deg2, ...]
+// After:  d_prefix = [0, deg0, deg0+deg1, deg0+deg1+deg2, ...]
+// ======================================================================
+__global__ void finalize_edge_prefix_kernel(int* d_prefix, int queue_size)
+{
+    if (threadIdx.x == 0 && blockIdx.x == 0) {
+        int sum = 0;
+        for (int i = 0; i < queue_size; i++) {
+            sum += d_prefix[i + 1];
+            d_prefix[i + 1] = sum;
+        }
+    }
 }
 
 // ======================================================================
@@ -823,17 +839,18 @@ int do_global_fw_bw_main(GPUState& st, const GPUGraph& g,
         const int EDGE_THRESHOLD = 256;
         if (queue_size >= EDGE_THRESHOLD) {
             // Edge-centric BFS: better load balancing for power-law degree distributions
-            // Build edge prefix-sum: d_edge_prefix[i+1] = degree(d_queue[i])
+            // Build edge prefix-sum: raw degrees → cumulative sum
             int prefix_grid = max(1, (queue_size + 256) / 256);
-            // Only memset up to queue_size+1 (not full N-sized buffer)
             CUDA_CHECK(cudaMemsetAsync(d_edge_prefix, 0,
                                        (queue_size + 1) * sizeof(int), bfs_stream));
             build_edge_prefix_kernel<<<prefix_grid, 256, 0, bfs_stream>>>(
                 g.d_begin, d_bfs_queue, queue_size, d_edge_prefix);
+            // Phase 2: convert raw degrees to cumulative prefix sum
+            finalize_edge_prefix_kernel<<<1, 32, 0, bfs_stream>>>(
+                d_edge_prefix, queue_size);
 
             // Read total_edges = d_edge_prefix[queue_size]
             int h_total_edges;
-            // Wait for prefix kernel before reading result
             CUDA_CHECK(cudaStreamSynchronize(bfs_stream));
             CUDA_CHECK(cudaMemcpy(&h_total_edges, d_edge_prefix + queue_size,
                                    sizeof(int), cudaMemcpyDeviceToHost));
@@ -928,6 +945,9 @@ int do_global_fw_bw_main(GPUState& st, const GPUGraph& g,
                                        (queue_size + 1) * sizeof(int), bfs_stream));
             build_edge_prefix_kernel<<<prefix_grid, 256, 0, bfs_stream>>>(
                 g.d_r_begin, d_bfs_queue, queue_size, d_edge_prefix);
+            // Phase 2: convert raw degrees to cumulative prefix sum
+            finalize_edge_prefix_kernel<<<1, 32, 0, bfs_stream>>>(
+                d_edge_prefix, queue_size);
 
             int h_total_edges;
             CUDA_CHECK(cudaStreamSynchronize(bfs_stream));
