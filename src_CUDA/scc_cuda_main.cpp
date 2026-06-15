@@ -424,6 +424,7 @@ int main(int argc, char** argv)
         printf("[CUDA] Trimmed = %d\n", trimmed);
 
         int curr_count = N - trimmed;
+        double fb_algo_time = 0;
         if (curr_count == 0) {
             printf("[CUDA] No remaining nodes after trim\n");
             gettimeofday(&t_compact, NULL);
@@ -484,7 +485,6 @@ int main(int argc, char** argv)
             trimmed += trim_total;
             gettimeofday(&t_trim12, NULL);
 
-            double fb_algo_time = 0;
             curr_count = d_trim_targets_count;
             if (curr_count > 0) {
                 // ---------- Phase 4: WCC ----------
