@@ -54,8 +54,10 @@ echo ""
 # ==============================================================================
 # Warmup: run CUDA once to stabilize GPU clocks
 # ==============================================================================
-echo "--- Warmup: GPU clock stabilization ---"
+echo "--- Warmup: GPU clock stabilization + CPU cooldown ---"
 (cd "$SCRIPT_DIR/src_CUDA" && "$CUDA_BIN" "$DATASET" "$THREADS" 2 >/dev/null 2>&1) || true
+# Warmup's FB phase uses 72 OpenMP threads — let CPU cool before timed run
+sleep 1
 echo "  Done."
 echo ""
 
