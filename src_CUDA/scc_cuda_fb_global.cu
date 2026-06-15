@@ -37,14 +37,6 @@ int* d_bfs_bw_count     = NULL;  // [1] atomic counter for bw-colored nodes
 uint32_t* d_bfs_visited_bits = NULL;
 int d_bfs_visited_words = 0;
 
-// Edge prefix-sum buffer for edge-centric BFS load balancing
-// At each BFS level, holds prefix sum of frontier node degrees:
-//   d_edge_prefix[i+1] = d_edge_prefix[i] + degree(d_queue[i])
-// Total edges at this level = d_edge_prefix[queue_size]
-// Used for binary search: edge at position e belongs to frontier node
-// at index find_node_for_edge(e, d_edge_prefix, queue_size)
-static int* d_edge_prefix = NULL;
-
 // Persistent scratch buffers to avoid cudaMalloc/cudaFree in hot BFS path
 int* d_pivot_scratch    = NULL;  // [1] temp for pivot selection
 int* d_remain_scratch   = NULL;  // [1] temp for remaining count
@@ -130,11 +122,6 @@ void initialize_global_fb(int num_nodes)
     CUDA_CHECK(cudaMalloc(&d_bfs_visited_bits, d_bfs_visited_words * sizeof(uint32_t)));
     CUDA_CHECK(cudaMemset(d_bfs_visited_bits, 0, d_bfs_visited_words * sizeof(uint32_t)));
 
-    // Allocate edge prefix-sum buffer for edge-centric BFS (size = N+1 ints)
-    // Persistent across all do_global_fw_bw_main calls
-    if (d_edge_prefix) cudaFree(d_edge_prefix);
-    CUDA_CHECK(cudaMalloc(&d_edge_prefix, (num_nodes + 1) * sizeof(int)));
-
     // Allocate persistent scratch buffers (allocated once, reused across multiple
     // do_global_fw_bw_main calls, avoiding per-call cudaMalloc/cudaFree overhead)
     if (!d_pivot_scratch)  CUDA_CHECK(cudaMalloc(&d_pivot_scratch,  sizeof(int)));
@@ -169,9 +156,6 @@ void finalize_global_fb()
     // Free visited bitmap (200KB)
     if (d_bfs_visited_bits) { cudaFree(d_bfs_visited_bits); d_bfs_visited_bits = NULL; }
     d_bfs_visited_words = 0;
-
-    // Free edge prefix-sum buffer
-    if (d_edge_prefix)  { cudaFree(d_edge_prefix);  d_edge_prefix = NULL; }
 
     // Free persistent scratch buffers
     if (d_pivot_scratch)  { cudaFree(d_pivot_scratch);  d_pivot_scratch = NULL; }
@@ -226,125 +210,7 @@ __device__ bool fw_check_navigator_device(int* d_Color, node_t k9, int base_colo
 }
 
 // ======================================================================
-// Binary search: find the frontier node index that owns edge position e
-// d_prefix[i+1] = cumulative degree sum for frontier[0..i]
-// Returns the smallest i such that d_prefix[i+1] > e
-// For edge-centric BFS: each thread gets a position in the edge range
-// and maps it back to a (node, local_edge_offset) pair.
-// ======================================================================
-__device__ int find_node_for_edge(int e, const int* d_prefix, int queue_size)
-{
-    int lo = 0, hi = queue_size - 1;
-    while (lo < hi) {
-        int mid = (lo + hi) >> 1;
-        if (d_prefix[mid + 1] <= e)
-            lo = mid + 1;
-        else
-            hi = mid;
-    }
-    return lo;
-}
-
-// ======================================================================
-// Kernel: build edge prefix-sum for edge-centric BFS
-// Computes: d_prefix[0] = 0
-//           d_prefix[i+1] = d_prefix[i] + degree(d_queue[i])
-// Total frontier edges = d_prefix[queue_size]
-// Simple incremental kernel: each thread processes one node at a time.
-// Frontier sizes are typically small-medium per BFS level.
-// ======================================================================
-__global__ void build_edge_prefix_kernel(
-    const edge_t* d_begin,
-    const int* d_queue, int queue_size,
-    int* d_prefix)
-{
-    int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    int stride = blockDim.x * gridDim.x;
-
-    // Each thread writes its prefix sum element
-    for (int i = tid; i < queue_size; i += stride) {
-        node_t t = d_queue[i];
-        int deg = d_begin[t + 1] - d_begin[t];
-        d_prefix[i + 1] = deg;
-    }
-    if (tid == 0) d_prefix[0] = 0;
-}
-
-// ======================================================================
-// Kernel: one level of forward BFS (edge-centric version)
-//
-// Instead of one-node-per-thread (which causes severe warp divergence
-// on power-law degree distributions), assigns each thread a fixed range
-// of EDGES from the frontier. Uses binary search on the edge prefix-sum
-// to map each edge position back to its (node, local_offset) pair.
-//
-// This eliminates the divergent inner loop: all threads in a warp
-// execute the same binary search path together, then process one edge
-// each — no thread sits idle while its neighbor processes 5000 edges.
-//
-// The binary search reads log(frontier_size) elements of d_prefix,
-// which fits in L2 cache (2MB for 500K nodes). All threads in a warp
-// read the SAME locations, so the binary search is perfectly coalesced.
-//
-// Fallback: for small frontiers (< 256 nodes), use node-centric approach
-// (binary search overhead > warp divergence gain).
-// ======================================================================
-__global__ void fw_bfs_level_kernel_edge(
-    const edge_t* d_begin, const node_t* d_node_idx,
-    int* d_Color,
-    const int* d_queue, int queue_size,
-    const int* d_prefix, int total_edges,
-    int* d_next_queue, int* d_next_count,
-    int fw_color, int base_color,
-    uint32_t* d_visited_bits)
-{
-    int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    int stride = blockDim.x * gridDim.x;
-
-    // Per-thread staging buffer (STAGE_SIZE=4 fits in registers)
-    const int STAGE_SIZE = 4;
-    int staged[STAGE_SIZE];
-    int staged_cnt = 0;
-
-#define FW_FLUSH() do {                                                 \
-    if (staged_cnt > 0) {                                               \
-        int base = atomicAdd(d_next_count, staged_cnt);                 \
-        for (int _j = 0; _j < staged_cnt; _j++)                         \
-            d_next_queue[base + _j] = staged[_j];                       \
-        staged_cnt = 0;                                                  \
-    }                                                                    \
-} while(0)
-
-    // Edge-centric iteration: each thread processes a range of edges
-    for (int e = tid; e < total_edges; e += stride) {
-        // Binary search: find which frontier node owns this edge
-        int node_idx = find_node_for_edge(e, d_prefix, queue_size);
-        node_t t = d_queue[node_idx];
-        int local_edge = e - d_prefix[node_idx];
-        edge_t nx = d_begin[t] + local_edge;
-        node_t k = d_node_idx[nx];
-
-        // Process edge (same logic as node-centric version)
-        if (fw_check_navigator_device(d_Color, k, base_color)) {
-            int word = k >> 5;
-            uint32_t bit = 1u << (k & 31);
-            uint32_t old = atomicOr(&d_visited_bits[word], bit);
-            if ((old & bit) == 0) {
-                d_Color[k] = fw_color;
-                staged[staged_cnt++] = k;
-                if (staged_cnt == STAGE_SIZE) {
-                    FW_FLUSH();
-                }
-            }
-        }
-    }
-
-    FW_FLUSH();
-#undef FW_FLUSH
-}
-
-// ======================================================================
-// Kernel: one level of forward BFS (node-centric, original)
+// Kernel: one level of forward BFS
 //
 // Optimization: Visited bitmap (atomicOr) + per-thread staging.
 // Instead of atomicCAS on d_Color (which invalidates L2 cache lines
@@ -549,82 +415,6 @@ __global__ void bw_bfs_level_kernel(
 }
 
 // ======================================================================
-// Kernel: one level of backward BFS (edge-centric version)
-//
-// Same edge-centric approach as fw_bfs_level_kernel_edge.
-// Each thread processes a fixed range of EDGES instead of nodes,
-// using binary search on the prefix sum for (node, local_offset) mapping.
-// ======================================================================
-__global__ void bw_bfs_level_kernel_edge(
-    const edge_t* d_r_begin, const node_t* d_r_node_idx,
-    int* d_Color, int* d_SCC,
-    const int* d_queue, int queue_size,
-    const int* d_prefix, int total_edges,
-    int* d_next_queue, int* d_next_count,
-    int fw_color, int bw_color, int base_color, node_t pivot,
-    int* d_scc_count, int* d_bw_count,
-    uint32_t* d_visited_bits)
-{
-    int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    int stride = blockDim.x * gridDim.x;
-
-    // Per-thread staging buffer (STAGE_SIZE=4 fits in registers)
-    const int STAGE_SIZE = 4;
-    int staged[STAGE_SIZE];
-    int staged_cnt = 0;
-    int local_scc = 0;
-    int local_bw = 0;
-
-#define BW_FLUSH() do {                                                 \
-    if (staged_cnt > 0) {                                               \
-        int base = atomicAdd(d_next_count, staged_cnt);                 \
-        for (int _j = 0; _j < staged_cnt; _j++)                         \
-            d_next_queue[base + _j] = staged[_j];                       \
-        staged_cnt = 0;                                                  \
-    }                                                                    \
-} while(0)
-
-    // Edge-centric iteration: each thread processes a range of edges
-    for (int e = tid; e < total_edges; e += stride) {
-        // Binary search: find which frontier node owns this edge
-        int node_idx = find_node_for_edge(e, d_prefix, queue_size);
-        node_t t = d_queue[node_idx];
-        int local_edge = e - d_prefix[node_idx];
-        edge_t nx = d_r_begin[t] + local_edge;
-        node_t k = d_r_node_idx[nx];
-
-        // Single read of d_Color[k] for TOCTOU safety
-        int k_color = d_Color[k];
-
-        if (k_color == fw_color || k_color == base_color) {
-            int word = k >> 5;
-            uint32_t bit = 1u << (k & 31);
-            uint32_t old = atomicOr(&d_visited_bits[word], bit);
-            if ((old & bit) == 0) {
-                if (k_color == fw_color) {
-                    d_Color[k] = SCC_FOUND;
-                    d_SCC[k] = pivot;
-                    local_scc++;
-                } else {
-                    d_Color[k] = bw_color;
-                    local_bw++;
-                }
-                staged[staged_cnt++] = k;
-                if (staged_cnt == STAGE_SIZE) {
-                    BW_FLUSH();
-                }
-            }
-        }
-    }
-
-    BW_FLUSH();
-#undef BW_FLUSH
-
-    if (local_scc > 0) atomicAdd(d_scc_count, local_scc);
-    if (local_bw > 0) atomicAdd(d_bw_count, local_bw);
-}
-
-// ======================================================================
 // pick_pivot_kernel()
 // OpenMP: pivot = choose_pivot_from_color(G, base_color);
 // Parallel: each thread checks one target, uses atomicMin for race-safe write
@@ -820,48 +610,15 @@ int do_global_fw_bw_main(GPUState& st, const GPUGraph& g,
     while (queue_size > 0) {
         CUDA_CHECK(cudaMemsetAsync(d_bfs_next_count, 0, sizeof(int), bfs_stream));
 
-        const int EDGE_THRESHOLD = 256;
-        if (queue_size >= EDGE_THRESHOLD) {
-            // Edge-centric BFS: better load balancing for power-law degree distributions
-            // Build edge prefix-sum: d_edge_prefix[i+1] = degree(d_queue[i])
-            int prefix_grid = max(1, (queue_size + 256) / 256);
-            // Only memset up to queue_size+1 (not full N-sized buffer)
-            CUDA_CHECK(cudaMemsetAsync(d_edge_prefix, 0,
-                                       (queue_size + 1) * sizeof(int), bfs_stream));
-            build_edge_prefix_kernel<<<prefix_grid, 256, 0, bfs_stream>>>(
-                g.d_begin, d_bfs_queue, queue_size, d_edge_prefix);
+        int grid = (queue_size + block_size - 1) / block_size;
 
-            // Read total_edges = d_edge_prefix[queue_size]
-            int h_total_edges;
-            // Wait for prefix kernel before reading result
-            CUDA_CHECK(cudaStreamSynchronize(bfs_stream));
-            CUDA_CHECK(cudaMemcpy(&h_total_edges, d_edge_prefix + queue_size,
-                                   sizeof(int), cudaMemcpyDeviceToHost));
-
-            if (h_total_edges > 0) {
-                int edge_grid = (h_total_edges + block_size - 1) / block_size;
-
-                fw_bfs_level_kernel_edge<<<edge_grid, block_size, 0, bfs_stream>>>(
-                    g.d_begin, g.d_node_idx,
-                    st.d_Color,
-                    d_bfs_queue, queue_size,
-                    d_edge_prefix, h_total_edges,
-                    d_bfs_next_queue, d_bfs_next_count,
-                    fw_color, base_color,
-                    d_bfs_visited_bits);
-            }
-        } else {
-            // Node-centric BFS: simpler for small frontiers (avoids binary search overhead)
-            int grid = (queue_size + block_size - 1) / block_size;
-
-            fw_bfs_level_kernel<<<grid, block_size, 0, bfs_stream>>>(
-                g.d_begin, g.d_node_idx,
-                st.d_Color,
-                d_bfs_queue, queue_size,
-                d_bfs_next_queue, d_bfs_next_count,
-                fw_color, base_color,
-                d_bfs_visited_bits);
-        }
+        fw_bfs_level_kernel<<<grid, block_size, 0, bfs_stream>>>(
+            g.d_begin, g.d_node_idx,
+            st.d_Color,
+            d_bfs_queue, queue_size,
+            d_bfs_next_queue, d_bfs_next_count,
+            fw_color, base_color,
+            d_bfs_visited_bits);
 
         // Async D2H copy — starts as soon as kernel completes on stream
         CUDA_CHECK(cudaMemcpyAsync(h_pinned_next_count, d_bfs_next_count,
@@ -920,45 +677,16 @@ int do_global_fw_bw_main(GPUState& st, const GPUGraph& g,
     while (queue_size > 0) {
         CUDA_CHECK(cudaMemsetAsync(d_bfs_next_count, 0, sizeof(int), bfs_stream));
 
-        const int EDGE_THRESHOLD = 256;
-        if (queue_size >= EDGE_THRESHOLD) {
-            // Edge-centric BW BFS: build prefix sum
-            int prefix_grid = max(1, (queue_size + 256) / 256);
-            CUDA_CHECK(cudaMemsetAsync(d_edge_prefix, 0,
-                                       (queue_size + 1) * sizeof(int), bfs_stream));
-            build_edge_prefix_kernel<<<prefix_grid, 256, 0, bfs_stream>>>(
-                g.d_r_begin, d_bfs_queue, queue_size, d_edge_prefix);
+        int grid = (queue_size + block_size - 1) / block_size;
 
-            int h_total_edges;
-            CUDA_CHECK(cudaStreamSynchronize(bfs_stream));
-            CUDA_CHECK(cudaMemcpy(&h_total_edges, d_edge_prefix + queue_size,
-                                   sizeof(int), cudaMemcpyDeviceToHost));
-
-            if (h_total_edges > 0) {
-                int edge_grid = (h_total_edges + block_size - 1) / block_size;
-
-                bw_bfs_level_kernel_edge<<<edge_grid, block_size, 0, bfs_stream>>>(
-                    g.d_r_begin, g.d_r_node_idx,
-                    st.d_Color, st.d_SCC,
-                    d_bfs_queue, queue_size,
-                    d_edge_prefix, h_total_edges,
-                    d_bfs_next_queue, d_bfs_next_count,
-                    fw_color, bw_color, base_color, h_pivot,
-                    d_bfs_scc_count, d_bfs_bw_count,
-                    d_bfs_visited_bits);
-            }
-        } else {
-            int grid = (queue_size + block_size - 1) / block_size;
-
-            bw_bfs_level_kernel<<<grid, block_size, 0, bfs_stream>>>(
-                g.d_r_begin, g.d_r_node_idx,
-                st.d_Color, st.d_SCC,
-                d_bfs_queue, queue_size,
-                d_bfs_next_queue, d_bfs_next_count,
-                fw_color, bw_color, base_color, h_pivot,
-                d_bfs_scc_count, d_bfs_bw_count,
-                d_bfs_visited_bits);
-        }
+        bw_bfs_level_kernel<<<grid, block_size, 0, bfs_stream>>>(
+            g.d_r_begin, g.d_r_node_idx,
+            st.d_Color, st.d_SCC,
+            d_bfs_queue, queue_size,
+            d_bfs_next_queue, d_bfs_next_count,
+            fw_color, bw_color, base_color, h_pivot,
+            d_bfs_scc_count, d_bfs_bw_count,
+            d_bfs_visited_bits);
 
         // Async D2H — starts after kernel on stream
         CUDA_CHECK(cudaMemcpyAsync(h_pinned_next_count, d_bfs_next_count,
