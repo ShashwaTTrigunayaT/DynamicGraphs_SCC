@@ -378,14 +378,14 @@ int main(int argc, char** argv)
             // Ensure d_trim_targets_count is up-to-date for do_global_fw_bw_main
             create_trim1_compact(st, gpuG);
 
-            // ---------- Phase 2: GLOBAL BFS (CPU offload) ----------
+            // ---------- Phase 2: GLOBAL BFS ----------
             initialize_global_fb(N);
-            int scc_size = do_global_fw_bw_main_host(
+            int scc_size = do_global_fw_bw_main(
                 st, gpuG,
                 COLOR_UNASSIGNED,
                 curr_count,
                 -1,
-                num_threads);
+                false);
             printf("[CUDA] First SCC size = %d\n", scc_size);
 
             // ---------- Phase 3: TRIM1 (compact) ----------
@@ -436,17 +436,15 @@ int main(int argc, char** argv)
             create_trim1_compact(st, gpuG);
             gettimeofday(&t_compact, NULL);
 
-            // ---------- Phase 2: GLOBAL BFS (CPU offload) ----------
+            // ---------- Phase 2: GLOBAL BFS ----------
             // OpenMP: do_fw_bw_global_main(G, curr_color, curr_count, false)
-            // CPU host path: downloads d_Color to host, runs FW+BW BFS with
-            // OpenMP, uploads results back. d_Color fits in CPU L3 cache.
             initialize_global_fb(N);
-            int scc_size = do_global_fw_bw_main_host(
+            int scc_size = do_global_fw_bw_main(
                 st, gpuG,
                 COLOR_UNASSIGNED,   // base_color = curr_color = -1
                 curr_count,          // base_count from trim_targets
                 -1,                  // good_init_pivot (-1 = not met_algo 6/11)
-                num_threads);
+                false);              // create_work_items = false
             gettimeofday(&t_bfs, NULL);
             printf("[CUDA] First SCC size = %d\n", scc_size);
 
