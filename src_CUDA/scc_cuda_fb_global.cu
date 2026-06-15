@@ -230,49 +230,41 @@ __global__ void fw_bfs_level_kernel(
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     int stride = blockDim.x * gridDim.x;
 
-    // Per-thread staging buffer for claimed nodes
-    const int STAGE_SIZE = 32;
-    int staged[STAGE_SIZE];
-    int staged_cnt = 0;
-
-    // Helper: flush local buffer to global queue (single atomicAdd)
-#define FW_FLUSH() do {                                                 \
-    if (staged_cnt > 0) {                                               \
-        int base = atomicAdd(d_next_count, staged_cnt);                 \
-        for (int _j = 0; _j < staged_cnt; _j++)                         \
-            d_next_queue[base + _j] = staged[_j];                       \
-        staged_cnt = 0;                                                  \
-    }                                                                    \
-} while(0)
-
     for (int i = tid; i < queue_size; i += stride) {
         node_t t = d_queue[i];
         for (edge_t nx = d_begin[t]; nx < d_begin[t + 1]; nx++) {
             node_t k = d_node_idx[nx];
             // Navigate: check if node has base_color (d_Color stays in L2 because
             // we don't CAS it — only write with simple store after claiming)
+            bool claimed = false;
             if (fw_check_navigator_device(d_Color, k, base_color)) {
                 // Claim via visited bitmap: atomicOr on 200KB bitmask (L2-resident)
-                // atomicOr is faster than atomicCAS and doesn't pollute d_Color L2
                 int word = k >> 5;  // k / 32
                 uint32_t bit = 1u << (k & 31);
                 uint32_t old = atomicOr(&d_visited_bits[word], bit);
                 if ((old & bit) == 0) {
-                    // Claimed! Write color with simple store (no CAS — visited bitmap
-                    // guarantees exclusive access)
+                    // Claimed! Write color with simple store
                     d_Color[k] = fw_color;
-                    staged[staged_cnt++] = k;
-                    if (staged_cnt == STAGE_SIZE) {
-                        FW_FLUSH();
-                    }
+                    claimed = true;
+                }
+            }
+
+            // Warp-aggregated atomicAdd: one atomic per warp instead of per-thread staging
+            unsigned mask = __ballot_sync(0xFFFFFFFF, claimed);
+            int n_claimed = __popc(mask);
+            if (n_claimed > 0) {
+                int lane = threadIdx.x & 31;
+                int leader = __ffs(mask) - 1;
+                int base = 0;
+                if (lane == leader) base = atomicAdd(d_next_count, n_claimed);
+                base = __shfl_sync(0xFFFFFFFF, base, leader);
+                if (claimed) {
+                    int rank = __popc(mask & ((1u << lane) - 1));
+                    d_next_queue[base + rank] = k;
                 }
             }
         }
     }
-
-    // Flush remaining
-    FW_FLUSH();
-#undef FW_FLUSH
 }
 
 // ======================================================================
@@ -357,65 +349,70 @@ __global__ void bw_bfs_level_kernel(
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     int stride = blockDim.x * gridDim.x;
 
-    // Per-thread staging buffer for claimed nodes + local counters
-    const int STAGE_SIZE = 32;
-    int staged[STAGE_SIZE];
-    int staged_cnt = 0;
-    int local_scc = 0;
-    int local_bw = 0;
-
-    // Helper: flush local buffer to global queue (single atomicAdd)
-#define BW_FLUSH() do {                                                 \
-    if (staged_cnt > 0) {                                               \
-        int base = atomicAdd(d_next_count, staged_cnt);                 \
-        for (int _j = 0; _j < staged_cnt; _j++)                         \
-            d_next_queue[base + _j] = staged[_j];                       \
-        staged_cnt = 0;                                                  \
-    }                                                                    \
-} while(0)
-
     for (int i = tid; i < queue_size; i += stride) {
         node_t t = d_queue[i];
         for (edge_t nx = d_r_begin[t]; nx < d_r_begin[t + 1]; nx++) {
             node_t k = d_r_node_idx[nx];
-            // Single read of d_Color[k] for TOCTOU safety (unchanged from original)
+            // Single read of d_Color[k] for TOCTOU safety
             int k_color = d_Color[k];
-            // Navigate: check if node is fw_color (intersection candidate) or
-            // base_color (bw-set candidate). d_Color reads stay L2-cached because
-            // we don't CAS on d_Color anymore.
+
+            bool claimed = false;
+            bool is_scc  = false;
+            bool is_bw   = false;
+
+            // Navigate: check if node is fw_color (intersection) or base_color (bw-set)
             if (k_color == fw_color || k_color == base_color) {
-                // Claim via visited bitmap (200KB L2-resident, atomicOr << atomicCAS)
+                // Claim via visited bitmap
                 int word = k >> 5;
                 uint32_t bit = 1u << (k & 31);
                 uint32_t old = atomicOr(&d_visited_bits[word], bit);
                 if ((old & bit) == 0) {
-                    // Claimed! Dispatch based on the color snapshot from our single read
+                    claimed = true;
                     if (k_color == fw_color) {
                         // Intersection: mark as SCC
                         d_Color[k] = SCC_FOUND;
                         d_SCC[k] = pivot;
-                        local_scc++;
+                        is_scc = true;
                     } else {
                         // BW-set
                         d_Color[k] = bw_color;
-                        local_bw++;
-                    }
-                    staged[staged_cnt++] = k;
-                    if (staged_cnt == STAGE_SIZE) {
-                        BW_FLUSH();
+                        is_bw = true;
                     }
                 }
             }
+
+            // Warp-aggregated: one atomicAdd per warp for next_queue (frontier compaction)
+            unsigned mask_claim = __ballot_sync(0xFFFFFFFF, claimed);
+            int n_claim = __popc(mask_claim);
+            if (n_claim > 0) {
+                int lane = threadIdx.x & 31;
+                int leader = __ffs(mask_claim) - 1;
+                int base = 0;
+                if (lane == leader) base = atomicAdd(d_next_count, n_claim);
+                base = __shfl_sync(0xFFFFFFFF, base, leader);
+                if (claimed) {
+                    int rank = __popc(mask_claim & ((1u << lane) - 1));
+                    d_next_queue[base + rank] = k;
+                }
+            }
+
+            // Warp-aggregated: one atomicAdd per warp for scc_count
+            unsigned mask_scc = __ballot_sync(0xFFFFFFFF, is_scc);
+            int n_scc = __popc(mask_scc);
+            if (n_scc > 0) {
+                if ((threadIdx.x & 31) == __ffs(mask_scc) - 1)
+                    atomicAdd(d_scc_count, n_scc);
+            }
+
+            // Warp-aggregated: one atomicAdd per warp for bw_count
+            unsigned mask_bw = __ballot_sync(0xFFFFFFFF, is_bw);
+            int n_bw = __popc(mask_bw);
+            if (n_bw > 0) {
+                if ((threadIdx.x & 31) == __ffs(mask_bw) - 1)
+                    atomicAdd(d_bw_count, n_bw);
+            }
         }
     }
-
-    // Flush remaining queue entries
-    BW_FLUSH();
-#undef BW_FLUSH
-
-    // Flush local SCC / BW counters (one atomicAdd per thread per counter)
-    if (local_scc > 0) atomicAdd(d_scc_count, local_scc);
-    if (local_bw > 0) atomicAdd(d_bw_count, local_bw);
 }
 
 // ======================================================================
