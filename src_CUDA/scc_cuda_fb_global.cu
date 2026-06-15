@@ -249,15 +249,16 @@ __global__ void fw_bfs_level_kernel(
                 }
             }
 
-            // Warp-aggregated atomicAdd: one atomic per warp instead of per-thread staging
-            unsigned mask = __ballot_sync(0xFFFFFFFF, claimed);
+            // Warp-aggregated atomicAdd: one atomic per warp (__activemask() handles
+            // divergent loop lengths where some lanes have already exited)
+            unsigned mask = __ballot_sync(__activemask(), claimed);
             int n_claimed = __popc(mask);
             if (n_claimed > 0) {
                 int lane = threadIdx.x & 31;
                 int leader = __ffs(mask) - 1;
                 int base = 0;
                 if (lane == leader) base = atomicAdd(d_next_count, n_claimed);
-                base = __shfl_sync(0xFFFFFFFF, base, leader);
+                base = __shfl_sync(mask, base, leader);
                 if (claimed) {
                     int rank = __popc(mask & ((1u << lane) - 1));
                     d_next_queue[base + rank] = k;
@@ -381,15 +382,16 @@ __global__ void bw_bfs_level_kernel(
                 }
             }
 
-            // Warp-aggregated: one atomicAdd per warp for next_queue (frontier compaction)
-            unsigned mask_claim = __ballot_sync(0xFFFFFFFF, claimed);
+            // Warp-aggregated: one atomicAdd per warp (__activemask() handles
+            // divergent loop lengths where some lanes have already exited)
+            unsigned mask_claim = __ballot_sync(__activemask(), claimed);
             int n_claim = __popc(mask_claim);
             if (n_claim > 0) {
                 int lane = threadIdx.x & 31;
                 int leader = __ffs(mask_claim) - 1;
                 int base = 0;
                 if (lane == leader) base = atomicAdd(d_next_count, n_claim);
-                base = __shfl_sync(0xFFFFFFFF, base, leader);
+                base = __shfl_sync(mask_claim, base, leader);
                 if (claimed) {
                     int rank = __popc(mask_claim & ((1u << lane) - 1));
                     d_next_queue[base + rank] = k;
@@ -397,7 +399,7 @@ __global__ void bw_bfs_level_kernel(
             }
 
             // Warp-aggregated: one atomicAdd per warp for scc_count
-            unsigned mask_scc = __ballot_sync(0xFFFFFFFF, is_scc);
+            unsigned mask_scc = __ballot_sync(__activemask(), is_scc);
             int n_scc = __popc(mask_scc);
             if (n_scc > 0) {
                 if ((threadIdx.x & 31) == __ffs(mask_scc) - 1)
@@ -405,7 +407,7 @@ __global__ void bw_bfs_level_kernel(
             }
 
             // Warp-aggregated: one atomicAdd per warp for bw_count
-            unsigned mask_bw = __ballot_sync(0xFFFFFFFF, is_bw);
+            unsigned mask_bw = __ballot_sync(__activemask(), is_bw);
             int n_bw = __popc(mask_bw);
             if (n_bw > 0) {
                 if ((threadIdx.x & 31) == __ffs(mask_bw) - 1)
