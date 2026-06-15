@@ -156,6 +156,7 @@ else
 fi
 
 echo "  CUDA done. Total: ${CUDA_TOTAL}ms  SCCs: ${CUDA_SCC}  Status: ${CUDA_CRASH}"
+echo "  [DEBUG] Raw profile line: ${CUDA_PROFILE_LINE}"
 echo ""
 
 # ==============================================================================
