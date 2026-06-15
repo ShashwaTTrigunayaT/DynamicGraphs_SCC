@@ -488,6 +488,7 @@ int do_fw_bw_dfs(GPUState& st, const GPUGraph& g,
 void start_workers_fw_bw_dfs(GPUState& st, const GPUGraph& g, int N);
 
 // Host-side FB processing (avoids all GPU kernel launches for the per-component phase)
-void start_workers_fw_bw_dfs_host(GPUState& st, const GPUGraph& g, int N);
+// Returns: CPU processing time in ms (excludes D2H/H2D transfer overhead)
+double start_workers_fw_bw_dfs_host(GPUState& st, const GPUGraph& g, int N);
 
 #endif

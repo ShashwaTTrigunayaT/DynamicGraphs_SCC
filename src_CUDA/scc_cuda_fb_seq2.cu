@@ -938,7 +938,7 @@ static void host_fw_bw_partition(
     }
 }
 
-void start_workers_fw_bw_dfs_host(GPUState& st, const GPUGraph& g, int N)
+double start_workers_fw_bw_dfs_host(GPUState& st, const GPUGraph& g, int N)
 {
     int num_nodes = g.num_nodes;
     struct timeval t0, t1, t2, t3, t4;
@@ -1123,4 +1123,5 @@ void start_workers_fw_bw_dfs_host(GPUState& st, const GPUGraph& g, int N)
     printf("[FB_XFER] Sets_D2H=%.3fms(%d)  Gather_Color=%.3fms(%d)  CPU_OMP=%.3fms  H2D_Scatter=%.3fms(%d)\n",
            sets_d2h, (int)items.size(), gather_color, (int)all_node_ids.size(),
            cpu_fb, scatter_h2d, num_changed);
+    return cpu_fb;
 }

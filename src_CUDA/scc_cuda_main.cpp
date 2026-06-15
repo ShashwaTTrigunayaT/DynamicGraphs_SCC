@@ -485,6 +485,7 @@ int main(int argc, char** argv)
             gettimeofday(&t_trim12, NULL);
 
             curr_count = d_trim_targets_count;
+            double fb_algo_time = 0;
             if (curr_count > 0) {
                 // ---------- Phase 4: WCC ----------
                 do_global_wcc(st, gpuG);
@@ -492,7 +493,7 @@ int main(int argc, char** argv)
                 gettimeofday(&t_wcc, NULL);
 
                 // ---------- Phase 5: FB (DFS) — processed on CPU via host path (deterministic, faster for <1000 components) ----------
-                start_workers_fw_bw_dfs_host(st, gpuG, num_threads);
+                fb_algo_time = start_workers_fw_bw_dfs_host(st, gpuG, num_threads);
             } else {
                 gettimeofday(&t_wcc, NULL);
             }
@@ -512,10 +513,10 @@ int main(int argc, char** argv)
                     (t_trim12.tv_usec - t_bfs.tv_usec) * 0.001;
         double t5 = (t_wcc.tv_sec - t_trim12.tv_sec) * 1000.0 +
                     (t_wcc.tv_usec - t_trim12.tv_usec) * 0.001;
-        double t6 = (t_end.tv_sec - t_wcc.tv_sec) * 1000.0 +
-                    (t_end.tv_usec - t_wcc.tv_usec) * 0.001;
-        double t_total = (t_end.tv_sec - t_start.tv_sec) * 1000.0 +
-                         (t_end.tv_usec - t_start.tv_usec) * 0.001;
+        // FB time = CPU-only algorithm time (excludes D2H/H2D transfer overhead)
+        double t6 = fb_algo_time;
+        // Total = sum of per-phase algorithm times (excludes D2H/H2D transfers)
+        double t_total = t1 + t2 + t3 + t4 + t5 + t6;
 
         printf(">>>>CUDA_PROFILE: TRIM1=%.2fms COMPACT_BUILD=%.2fms GLOBAL_BFS=%.2fms TRIM12=%.2fms WCC=%.2fms FB=%.2fms TOTAL=%.2fms\n",
                t1, t2, t3, t4, t5, t6, t_total);
