@@ -611,7 +611,6 @@ int do_global_fw_bw_main(GPUState& st, const GPUGraph& g,
         CUDA_CHECK(cudaMemsetAsync(d_bfs_next_count, 0, sizeof(int), bfs_stream));
 
         int grid = (queue_size + block_size - 1) / block_size;
-        grid = min(grid, 1024);
 
         fw_bfs_level_kernel<<<grid, block_size, 0, bfs_stream>>>(
             g.d_begin, g.d_node_idx,
@@ -679,7 +678,6 @@ int do_global_fw_bw_main(GPUState& st, const GPUGraph& g,
         CUDA_CHECK(cudaMemsetAsync(d_bfs_next_count, 0, sizeof(int), bfs_stream));
 
         int grid = (queue_size + block_size - 1) / block_size;
-        grid = min(grid, 1024);
 
         bw_bfs_level_kernel<<<grid, block_size, 0, bfs_stream>>>(
             g.d_r_begin, g.d_r_node_idx,
