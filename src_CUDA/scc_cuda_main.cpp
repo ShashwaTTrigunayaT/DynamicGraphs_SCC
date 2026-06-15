@@ -616,5 +616,9 @@ int main(int argc, char** argv)
     graph_free(gpuG);
     fprintf(stderr, "[DEBUG] cleanup: DONE\n");
 
+    // Pre-clean gm_graph to avoid heap corruption crash in destructor
+    // (LiveJournal1: 4.8M nodes, 69M edges = ~1.7GB allocations)
+    G.clear_graph();
+
     return 0;
 }
