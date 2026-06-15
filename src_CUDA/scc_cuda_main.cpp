@@ -492,8 +492,20 @@ int main(int argc, char** argv)
                 create_work_items_from_wcc(st, gpuG);
                 gettimeofday(&t_wcc, NULL);
 
-                // ---------- Phase 5: FB (DFS) — processed on CPU via host path (deterministic, faster for <1000 components) ----------
-                fb_algo_time = start_workers_fw_bw_dfs_host(st, gpuG, num_threads);
+                // ---------- Phase 5: FB (DFS) — hybrid path ----------
+                // Host path (CPU) for few components (<1000): avoids per-component GPU kernel launch overhead
+                // GPU path for many components (>=1000): avoids massive D2H transfer bottleneck on LiveJournal1
+                int num_fb_components = work_q_size();
+                if (num_fb_components < 1000) {
+                    fb_algo_time = start_workers_fw_bw_dfs_host(st, gpuG, num_threads);
+                } else {
+                    struct timeval t_fb_s, t_fb_e;
+                    gettimeofday(&t_fb_s, NULL);
+                    start_workers_fw_bw_dfs(st, gpuG, num_threads);
+                    gettimeofday(&t_fb_e, NULL);
+                    fb_algo_time = (t_fb_e.tv_sec - t_fb_s.tv_sec) * 1000.0 +
+                                   (t_fb_e.tv_usec - t_fb_s.tv_usec) * 0.001;
+                }
             } else {
                 gettimeofday(&t_wcc, NULL);
             }
