@@ -366,6 +366,10 @@ __global__ void wcc_insert_members_kernel(
     int* d_root_pos,
     int** d_wcc_sets_dev);
 
+// ---- WCC big buffer getters (for batched D2H in FB phase) ----
+int* get_wcc_big_buffer();
+int   get_wcc_big_buffer_size();
+
 // ---- Compact extraction kernels (for WCC optimization) ----
 __global__ void extract_wcc_roots_kernel(
     const int* d_WCC,

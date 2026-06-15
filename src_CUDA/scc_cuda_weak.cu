@@ -42,6 +42,10 @@ static int   node_set_pool_size = 0;
 // consumed by create_work_items_from_wcc() to avoid re-downloading d_Color
 static std::vector<std::pair<int,int>> g_wcc_root_colors;
 
+// ---- WCC big buffer getters (for batched D2H in FB phase) ----
+int* get_wcc_big_buffer() { return d_wcc_big_buffer; }
+int   get_wcc_big_buffer_size() { return d_wcc_big_buffer_size; }
+
 // ======================================================================
 // check_WCC()
 // OpenMP:
