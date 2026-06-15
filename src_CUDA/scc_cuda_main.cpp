@@ -496,6 +496,7 @@ int main(int argc, char** argv)
                 // Host path (CPU) for few components (<1000): avoids per-component GPU kernel launch overhead
                 // GPU path for many components (>=1000): avoids massive D2H transfer bottleneck on LiveJournal1
                 int num_fb_components = work_q_size();
+                printf("[CUDA FB] num_components=%d (threshold=1000, using %s)\n", num_fb_components, num_fb_components < 1000 ? "HOST" : "GPU");
                 if (num_fb_components < 1000) {
                     fb_algo_time = start_workers_fw_bw_dfs_host(st, gpuG, num_threads);
                 } else {
