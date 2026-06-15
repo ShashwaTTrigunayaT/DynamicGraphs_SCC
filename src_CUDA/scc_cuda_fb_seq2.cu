@@ -938,6 +938,242 @@ static void host_fw_bw_partition(
     }
 }
 
+// ======================================================================
+// do_global_fw_bw_main_host()
+//
+// CPU-hosted GLOBAL BFS (FW + BW) — replaces the GPU do_global_fw_bw_main.
+//
+// Why: The GLOBAL_BFS phase on GPU is memory-latency bound from random
+// d_Color lookups during navigator checks. On CPU, the entire d_Color
+// array fits in L3 cache (19MB for LiveJournal1 on a 30MB+ L3), turning
+// 300-cycle VRAM reads into ~40-cycle L3 hits.
+//
+// Expected saving: ~7-10ms on LiveJournal1, ~3-4ms on Pokec.
+// ======================================================================
+int do_global_fw_bw_main_host(GPUState& st, const GPUGraph& g,
+    int base_color, int base_count, int good_init_pivot,
+    int num_threads)
+{
+    int N = st.num_nodes;
+
+    // ---------------------------------------------------------------
+    // Phase 1: Download d_Color and d_SCC to host
+    // ---------------------------------------------------------------
+    std::vector<int> h_Color(N);
+    std::vector<int> h_SCC(N);
+    CUDA_CHECK(cudaMemcpy(h_Color.data(), st.d_Color, N * sizeof(int),
+                           cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(h_SCC.data(), st.d_SCC, N * sizeof(int),
+                           cudaMemcpyDeviceToHost));
+    // CRITICAL: Download existing d_SCC to preserve TRIM1 SCC assignments.
+    // d_SCC has SCC_FOUND (-2) for all TRIM1-trimmed nodes.
+    // Without this download, uploading our host copy would overwrite
+    // and lose all TRIM1 results, corrupting the final SCC count.
+
+    // ---------------------------------------------------------------
+    // Phase 2: Pick pivot
+    // OpenMP: pivot = choose_pivot_from_color(G, base_color);
+    //         if (good_init_pivot >= 0) use it instead
+    // ---------------------------------------------------------------
+    int h_pivot = -1;
+    if (good_init_pivot >= 0 && h_Color[good_init_pivot] != SCC_FOUND) {
+        h_pivot = good_init_pivot;
+    } else {
+        // Scan d_trim_targets (compact set) for a node with base_color
+        int* h_targets = NULL;
+        int num_targets = d_trim_targets_count;
+        if (num_targets > 0) {
+            h_targets = new int[num_targets];
+            CUDA_CHECK(cudaMemcpy(h_targets, d_trim_targets,
+                                   num_targets * sizeof(int),
+                                   cudaMemcpyDeviceToHost));
+            int best = 0x7FFFFFFF;
+            for (int i = 0; i < num_targets; i++) {
+                if (h_Color[h_targets[i]] == base_color && h_targets[i] < best)
+                    best = h_targets[i];
+            }
+            if (best != 0x7FFFFFFF) h_pivot = best;
+            delete[] h_targets;
+        }
+    }
+    if (h_pivot == -1) return 0;
+
+    // ---------------------------------------------------------------
+    // Phase 3: Single-node SCC (trivial case)
+    // ---------------------------------------------------------------
+    if (base_count <= 1) {
+        if (base_count == 1) {
+            h_Color[h_pivot] = SCC_FOUND;
+            h_SCC[h_pivot] = h_pivot;
+        }
+        CUDA_CHECK(cudaMemcpy(st.d_Color, h_Color.data(), N * sizeof(int),
+                               cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(st.d_SCC, h_SCC.data(), N * sizeof(int),
+                               cudaMemcpyHostToDevice));
+        return base_count;
+    }
+
+    // ---------------------------------------------------------------
+    // Phase 4: Assign colors (shared counter with GPU, thread-safe)
+    // ---------------------------------------------------------------
+    int fw_color = cuda_get_new_color();
+    int bw_color = cuda_get_new_color();
+
+    // ---------------------------------------------------------------
+    // Phase 5: Forward BFS (level-by-level, OpenMP parallel)
+    //
+    // OpenMP: fw_trim_global FW_BFS(G, base_color, fw_color);
+    //         FW_BFS.prepare(pivot, NTH); FW_BFS.do_bfs_forward();
+    //         int fw_count = FW_BFS.get_fw_count();
+    //
+    // Mirror: check_navigator: return (G_Color[k9] == base_color);
+    //         visit_fw: G_Color[k] = fw_color
+    // ---------------------------------------------------------------
+    omp_set_num_threads(num_threads);
+
+    std::vector<int> queue;
+    std::vector<int> next_queue;
+    std::vector<int> h_visited(N, 0);
+
+    queue.push_back(h_pivot);
+    h_Color[h_pivot] = fw_color;
+    h_visited[h_pivot] = 1;
+    int fw_count = 1;
+
+    while (!queue.empty()) {
+        int qsize = (int)queue.size();
+        next_queue.clear();
+
+        // Per-thread staging buffers (one vector per OpenMP thread)
+        int num_actual_threads = omp_get_max_threads();
+        std::vector<std::vector<int>> local_bufs(num_actual_threads);
+
+        #pragma omp parallel
+        {
+            int tid = omp_get_thread_num();
+            local_bufs[tid].clear();
+
+            #pragma omp for nowait
+            for (int i = 0; i < qsize; i++) {
+                node_t t = queue[i];
+                for (edge_t nx = g_h_begin[t]; nx < g_h_begin[t + 1]; nx++) {
+                    node_t k = g_h_node_idx[nx];
+                    // OpenMP: check_navigator: return (G_Color[k9] == base_color)
+                    if (h_Color[k] == base_color) {
+                        // Atomic CAS on visited to prevent duplicate claims
+                        if (__sync_bool_compare_and_swap(&h_visited[k], 0, 1)) {
+                            // OpenMP: visit_fw: G_Color[k] = fw_color
+                            h_Color[k] = fw_color;
+                            local_bufs[tid].push_back(k);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Merge per-thread buffers (serial, fast — total size = next frontier)
+        for (int t = 0; t < num_actual_threads; t++) {
+            next_queue.insert(next_queue.end(),
+                              local_bufs[t].begin(), local_bufs[t].end());
+        }
+
+        fw_count += (int)next_queue.size();
+        queue.swap(next_queue);
+    }
+
+    // ---------------------------------------------------------------
+    // Phase 6: Reset visited array for BW BFS
+    // ---------------------------------------------------------------
+    std::fill(h_visited.begin(), h_visited.end(), 0);
+
+    // ---------------------------------------------------------------
+    // Phase 7: Backward BFS (level-by-level, OpenMP parallel)
+    //
+    // OpenMP: bw_trim_global BW_BFS(G, base_color, fw_color, bw_color, pivot);
+    //         BW_BFS.prepare(pivot, NTH); BW_BFS.do_bfs_forward();
+    //         int bw_count = BW_BFS.get_bw_count();
+    //         int scc_count = BW_BFS.get_scc_count();
+    //
+    // Mirror: check_navigator: return (color == fw_color) || (color == base_color);
+    //         visit_fw: if (G_Color[k] == fw_color) { // intersection
+    //                       G_SCC[k] = pivot; G_Color[k] = -2; scc_count++;
+    //                   } else { G_Color[k] = bw_color; bw_count++; }
+    // ---------------------------------------------------------------
+    queue.clear();
+    queue.push_back(h_pivot);
+    h_Color[h_pivot] = SCC_FOUND;
+    h_SCC[h_pivot] = h_pivot;
+    h_visited[h_pivot] = 1;
+    int scc_count = 1;
+    int bw_count = 0;
+
+    while (!queue.empty()) {
+        int qsize = (int)queue.size();
+        next_queue.clear();
+
+        int num_actual_threads = omp_get_max_threads();
+        std::vector<std::vector<int>> local_bufs(num_actual_threads);
+        std::vector<int> local_scc(num_actual_threads, 0);
+        std::vector<int> local_bw(num_actual_threads, 0);
+
+        #pragma omp parallel
+        {
+            int tid = omp_get_thread_num();
+            local_bufs[tid].clear();
+            local_scc[tid] = 0;
+            local_bw[tid] = 0;
+
+            #pragma omp for nowait
+            for (int i = 0; i < qsize; i++) {
+                node_t t = queue[i];
+                for (edge_t nx = g_h_r_begin[t]; nx < g_h_r_begin[t + 1]; nx++) {
+                    node_t k = g_h_r_node_idx[nx];
+                    // Single read for TOCTOU safety (same pattern as GPU kernel)
+                    int k_color = h_Color[k];
+
+                    // OpenMP: check_navigator: return (color == fw_color) || (color == base_color)
+                    if (k_color == fw_color || k_color == base_color) {
+                        // Atomic CAS on visited to prevent duplicate claims
+                        if (__sync_bool_compare_and_swap(&h_visited[k], 0, 1)) {
+                            if (k_color == fw_color) {
+                                // OpenMP: intersection: G_SCC[k] = pivot; G_Color[k] = -2;
+                                h_Color[k] = SCC_FOUND;
+                                h_SCC[k] = h_pivot;
+                                local_scc[tid]++;
+                            } else {
+                                // OpenMP: bw-set: G_Color[k] = bw_color;
+                                h_Color[k] = bw_color;
+                                local_bw[tid]++;
+                            }
+                            local_bufs[tid].push_back(k);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Merge per-thread buffers and counts
+        for (int t = 0; t < num_actual_threads; t++) {
+            next_queue.insert(next_queue.end(),
+                              local_bufs[t].begin(), local_bufs[t].end());
+            scc_count += local_scc[t];
+            bw_count += local_bw[t];
+        }
+
+        queue.swap(next_queue);
+    }
+
+    // ---------------------------------------------------------------
+    // Phase 8: Upload modified arrays back to GPU
+    // ---------------------------------------------------------------
+    CUDA_CHECK(cudaMemcpy(st.d_Color, h_Color.data(), N * sizeof(int),
+                           cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(st.d_SCC, h_SCC.data(), N * sizeof(int),
+                           cudaMemcpyHostToDevice));
+
+    return scc_count;
+}
+
 double start_workers_fw_bw_dfs_host(GPUState& st, const GPUGraph& g, int N)
 {
     int num_nodes = g.num_nodes;

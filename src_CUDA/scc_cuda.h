@@ -491,6 +491,13 @@ int do_fw_bw_dfs(GPUState& st, const GPUGraph& g,
 
 void start_workers_fw_bw_dfs(GPUState& st, const GPUGraph& g, int N);
 
+// Host-side GLOBAL BFS (replaces GPU do_global_fw_bw_main)
+// Runs FW + BW BFS on CPU with OpenMP, uploads results to GPU.
+// Faster than GPU version when d_Color fits in CPU L3 cache.
+int do_global_fw_bw_main_host(GPUState& st, const GPUGraph& g,
+    int base_color, int base_count, int good_init_pivot,
+    int num_threads);
+
 // Host-side FB processing (avoids all GPU kernel launches for the per-component phase)
 // Returns: CPU processing time in ms (excludes D2H/H2D transfer overhead)
 double start_workers_fw_bw_dfs_host(GPUState& st, const GPUGraph& g, int N);
