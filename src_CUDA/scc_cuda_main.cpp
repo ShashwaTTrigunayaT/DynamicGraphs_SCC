@@ -621,7 +621,7 @@ int main(int argc, char** argv)
     // Both OpenMP and CUDA binaries have this issue.
     // The SCC result is already printed — skip cleanup and exit.
     // All GPU memory was freed above; OS will reclaim the rest.
-    fflush(stdout);
-    fflush(stderr);
-    _exit(0);
+    // exit() avoids running destructors (which crash on corrupted heap)
+    // while still properly flushing stdio buffers.
+    exit(0);
 }
