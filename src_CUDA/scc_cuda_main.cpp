@@ -278,6 +278,7 @@ int main(int argc, char** argv)
 
     initialize_trim1_full(N);
     initialize_trim2(N);
+    initialize_trim2_bitmaps(N);
     initialize_WCC(N);
     work_q_init(num_threads);
 
@@ -606,6 +607,8 @@ int main(int argc, char** argv)
     dynamic_arrays_free(da);
     fprintf(stderr, "[DEBUG] cleanup: finalize_WCC\n");
     finalize_WCC();
+    fprintf(stderr, "[DEBUG] cleanup: finalize_trim2_bitmaps\n");
+    finalize_trim2_bitmaps();
     fprintf(stderr, "[DEBUG] cleanup: finalize_trim2\n");
     finalize_trim2();
     fprintf(stderr, "[DEBUG] cleanup: finalize_trim1\n");

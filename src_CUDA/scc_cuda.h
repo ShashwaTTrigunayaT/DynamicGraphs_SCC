@@ -467,6 +467,12 @@ int do_fw_bw_single_thread(GPUState& st, const GPUGraph& g,
 
 void start_workers_fw_bw(GPUState& st, const GPUGraph& g, int N);
 
+// ---- Degree-one bitmaps (used by trim2_new for pre-filtering) ----
+extern int8_t* d_out_deg_one;
+extern int8_t* d_in_deg_one;
+void initialize_trim2_bitmaps(int num_nodes);
+void finalize_trim2_bitmaps();
+
 // ---- scc_cuda_fb_seq2.cu (mirrors scc_fb_seq2.cc) ----
 
 // Kernel: scatter (node_id, scc_value) pairs into d_SCC
