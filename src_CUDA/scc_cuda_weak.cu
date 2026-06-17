@@ -242,117 +242,6 @@ __global__ void wcc_init_kernel(
 }
 
 // ======================================================================
-// propagate_color() — Phase 1: scan neighbors, find minimum WCC root
-//
-// OpenMP (propagate_color, Phase 1):
-//   #pragma omp parallel for schedule(dynamic, 32)
-//   for (int index = 0; index < wcc_candidate.size(); index++)
-//   {
-//       node_t n = wcc_candidate[index];
-//       node_t min_val = G_WCC[n];
-//       if (G_Color[n] == -2) continue;
-//       for (edge_t k_idx = G.begin[n]; k_idx < G.begin[n+1]; k_idx++)
-//       {
-//           node_t k = G.node_idx[k_idx];
-//           if (G_Color[k] != G_Color[n]) continue;
-//           if (G_WCC[k] < min_val) {
-//               min_val = G_WCC[k];
-//               if (finished) finished = false;
-//           }
-//       }
-//       if (min_val != G_WCC[n]) G_WCC[n] = min_val;
-//   }
-// ======================================================================
-__global__ void wcc_propagate_phase1_kernel(
-    int* d_WCC, int* d_changed,
-    const int* d_Color,
-    const edge_t* d_begin, const node_t* d_node_idx,
-    const int* d_targets, int num_targets)
-{
-    int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    int stride = gridDim.x * blockDim.x;
-
-    for (int idx = tid; idx < num_targets; idx += stride) {
-        node_t n = d_targets[idx];
-        int color_n = d_Color[n];
-        if (color_n == SCC_FOUND) continue;  // OpenMP: if (G_Color[n] == -2) continue;
-
-        // OpenMP: node_t min_val = G_WCC[n];
-        int min_val = d_WCC[n];
-
-        // OpenMP: for each forward neighbor
-        for (edge_t k_idx = d_begin[n]; k_idx < d_begin[n + 1]; k_idx++) {
-            node_t k = d_node_idx[k_idx];
-            // OpenMP: if (G_Color[k] != G_Color[n]) continue;
-            if (d_Color[k] != color_n) continue;
-            // OpenMP: if (G_WCC[k] < min_val) { min_val = G_WCC[k]; finished = false; }
-            int wcc_k = d_WCC[k];
-            if (wcc_k < min_val) {
-                min_val = wcc_k;
-            }
-        }
-
-        // OpenMP: if (min_val != G_WCC[n]) G_WCC[n] = min_val;
-        if (min_val != d_WCC[n]) {
-            d_WCC[n] = min_val;
-            *d_changed = 1;  // OpenMP: finished = false
-        }
-    }
-}
-
-// ======================================================================
-// propagate_color() — Phase 2: path compression
-//
-// OpenMP (propagate_color, Phase 2):
-//   #pragma omp parallel for
-//   for (int index = 0; index < wcc_candidate.size(); index++)
-//   {
-//       node_t n = wcc_candidate[index];
-//       if (G_Color[n] == -2) continue;
-//       if (GET_WCC_ROOT(n) != n)
-//       {
-//           node_t root = GET_WCC_ROOT(n);
-//           if (GET_WCC_ROOT(root) != root) {
-//               G_WCC[n] = G_WCC[root];
-//               finished = false;
-//           }
-//       }
-//   }
-// ======================================================================
-__global__ void wcc_propagate_phase2_kernel(
-    int* d_WCC, int* d_changed,
-    const int* d_Color,
-    const int* d_targets, int num_targets)
-{
-    int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    int stride = gridDim.x * blockDim.x;
-
-    for (int idx = tid; idx < num_targets; idx += stride) {
-        node_t n = d_targets[idx];
-        int color_n = d_Color[n];
-        if (color_n == SCC_FOUND) continue;  // OpenMP: if (G_Color[n] == -2) continue;
-
-        // OpenMP: GET_WCC_ROOT(n) — mask off the large-degree flag bit
-        int wcc_n    = d_WCC[n];
-        int root_n   = CUDA_GET_WCC_ROOT(wcc_n);
-
-        // OpenMP: if (GET_WCC_ROOT(n) != n)
-        if (root_n != n) {
-            // OpenMP: node_t root = GET_WCC_ROOT(n);
-            node_t root = root_n;
-            // OpenMP: if (GET_WCC_ROOT(root) != root)
-            int wcc_root  = d_WCC[root];
-            int root_root = CUDA_GET_WCC_ROOT(wcc_root);
-            if (root_root != root) {
-                // OpenMP: G_WCC[n] = G_WCC[root]; (unmasked value)
-                d_WCC[n] = wcc_root;
-                *d_changed = 1;  // OpenMP: finished = false
-            }
-        }
-    }
-}
-
-// ======================================================================
 // do_global_wcc() — Phase: assign colors to WCC roots
 //
 // OpenMP (do_global_wcc):
@@ -459,6 +348,61 @@ __global__ void wcc_insert_members_kernel(
 }
 
 // ======================================================================
+// Fused WCC propagate kernel: Phase 1 (find min root) + Phase 2 (path compression)
+// in a single kernel pass per iteration.
+//
+// Fusing eliminates 1 kernel launch + 1 cudaMemset + 1 cudaMemcpy per iteration.
+// Safe because Phase 2 for node n only reads d_WCC[n] which was just updated
+// by Phase 1 on the SAME thread — no cross-node dependency within an iteration.
+// ======================================================================
+__global__ void wcc_propagate_fused_kernel(
+    int* d_WCC, int* d_changed,
+    const int* d_Color,
+    const edge_t* d_begin, const node_t* d_node_idx,
+    const int* d_targets, int num_targets)
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = gridDim.x * blockDim.x;
+
+    for (int idx = tid; idx < num_targets; idx += stride) {
+        node_t n = d_targets[idx];
+        int color_n = d_Color[n];
+        if (color_n == SCC_FOUND) continue;
+
+        // === Phase 1: scan neighbors, find min root ===
+        int min_val = d_WCC[n];
+
+        for (edge_t k_idx = d_begin[n]; k_idx < d_begin[n + 1]; k_idx++) {
+            node_t k = d_node_idx[k_idx];
+            if (d_Color[k] != color_n) continue;
+            int wcc_k = d_WCC[k];
+            if (wcc_k < min_val) {
+                min_val = wcc_k;
+            }
+        }
+
+        if (min_val != d_WCC[n]) {
+            d_WCC[n] = min_val;
+            *d_changed = 1;
+        }
+
+        // === Phase 2: path compression ===
+        int wcc_n    = d_WCC[n];
+        int root_n   = CUDA_GET_WCC_ROOT(wcc_n);
+
+        if (root_n != n) {
+            node_t root = root_n;
+            int wcc_root  = d_WCC[root];
+            int root_root = CUDA_GET_WCC_ROOT(wcc_root);
+            if (root_root != root) {
+                d_WCC[n] = wcc_root;
+                *d_changed = 1;
+            }
+        }
+    }
+}
+
+// ======================================================================
 // propagate_color()
 // OpenMP:
 //   void propagate_color(gm_graph& G, std::vector<node_t>& wcc_candidate)
@@ -495,12 +439,14 @@ void propagate_color(GPUState& st, const GPUGraph& g, int num_targets,
     int h_changed = 1;
 
     // OpenMP: do { ... } while (!finished);
+    // CUDA: fused Phase 1 + Phase 2 in a single kernel, eliminating 1 kernel launch
+    //       + 1 cudaMemset + 1 cudaMemcpy per iteration.
     while (h_changed && iter < max_iterations) {
         iter++;
         CUDA_CHECK(cudaMemset(d_changed, 0, sizeof(int)));
 
-        // OpenMP: Phase 1 — scan neighbors, find min root
-        wcc_propagate_phase1_kernel<<<grid_size, block_size>>>(
+        // Fused Phase 1 + Phase 2 kernel
+        wcc_propagate_fused_kernel<<<grid_size, block_size>>>(
             d_WCC, d_changed,
             st.d_Color,
             g.d_begin, g.d_node_idx,
@@ -509,20 +455,6 @@ void propagate_color(GPUState& st, const GPUGraph& g, int num_targets,
 
         CUDA_CHECK(cudaMemcpy(&h_changed, d_changed, sizeof(int),
                                cudaMemcpyDeviceToHost));
-
-        if (h_changed) {
-            CUDA_CHECK(cudaMemset(d_changed, 0, sizeof(int)));
-
-            // OpenMP: Phase 2 — path compression
-            wcc_propagate_phase2_kernel<<<grid_size, block_size>>>(
-                d_WCC, d_changed,
-                st.d_Color,
-                d_trim_targets, num_targets);
-            CUDA_CHECK(cudaDeviceSynchronize());
-
-            CUDA_CHECK(cudaMemcpy(&h_changed, d_changed, sizeof(int),
-                                   cudaMemcpyDeviceToHost));
-        }
     }
     cuda_iters = iter;
     CUDA_CHECK(cudaFree(d_changed));
