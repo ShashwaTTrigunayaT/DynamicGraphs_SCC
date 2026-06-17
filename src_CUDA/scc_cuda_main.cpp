@@ -278,7 +278,6 @@ int main(int argc, char** argv)
 
     initialize_trim1_full(N);
     initialize_trim2(N);
-    initialize_trim2_bitmaps(N);
     initialize_WCC(N);
     work_q_init(num_threads);
 
@@ -477,10 +476,9 @@ int main(int argc, char** argv)
                 }
             }
 
-            // ---------- Phase 3: TRIM1/2 (compact) ----------
-            trimmed = repeat_global_trim1_compact(st, gpuG, d_count,
+            // ---------- Phase 3: TRIM1/2 (compact) — fused kernel ----------
+            int trim_total = repeat_global_trim12_fused(st, gpuG, d_count,
                 met_algo, flag11, da, d_count_trim_spec, 0);
-            int trim_total = do_global_trim2_new(st, gpuG, d_count);
             trim_total += repeat_global_trim1_compact(st, gpuG, d_count,
                 met_algo, flag11, da, d_count_trim_spec, 100);
             trimmed += trim_total;
@@ -607,8 +605,6 @@ int main(int argc, char** argv)
     dynamic_arrays_free(da);
     fprintf(stderr, "[DEBUG] cleanup: finalize_WCC\n");
     finalize_WCC();
-    fprintf(stderr, "[DEBUG] cleanup: finalize_trim2_bitmaps\n");
-    finalize_trim2_bitmaps();
     fprintf(stderr, "[DEBUG] cleanup: finalize_trim2\n");
     finalize_trim2();
     fprintf(stderr, "[DEBUG] cleanup: finalize_trim1\n");

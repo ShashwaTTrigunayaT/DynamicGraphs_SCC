@@ -213,6 +213,117 @@ __global__ void trim_once_node_compact_kernel(
         atomicAdd(d_count, s_count);
 }
 
+// ======================================================================
+// Fused kernel: TRIM1 + TRIM2 in a single kernel pass
+// For each target, tries TRIM1 (0-degree removal) first.
+// If TRIM1 fails, tries TRIM2 (2-node SCC detection).
+// Each block accumulates trim1 counts in shared memory to reduce atomic
+// contention. trim2 writes directly to d_count via atomicAdd internally.
+// Eliminates one full kernel launch + sync (previously: trim1 → sync → trim2).
+// ======================================================================
+__global__ void trim12_fused_compact_kernel(
+    const edge_t* d_begin, const node_t* d_node_idx,
+    const edge_t* d_r_begin, const node_t* d_r_node_idx,
+    int* d_Color, int* d_SCC,
+    int* d_count,
+    const int* d_targets, int num_targets,
+    int met_algo, int flag11,
+    const int* d_scc_list, const int* d_vec_scc_count,
+    const int* d_level_ver, const int* d_affect_level,
+    int* d_count_trim_spec)
+{
+    __shared__ int s_count;
+    if (threadIdx.x == 0) s_count = 0;
+    __syncthreads();
+
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = gridDim.x * blockDim.x;
+    int local_count = 0;
+
+    for (int idx = tid; idx < num_targets; idx += stride) {
+        node_t n = d_targets[idx];
+        int old_color = d_Color[n];
+        if (old_color == SCC_FOUND) continue;
+
+        // Step 1: TRIM1 (0-degree removal)
+        int trimmed = trim_once_node_device(
+            d_begin, d_node_idx, d_r_begin, d_r_node_idx,
+            d_Color, d_SCC, n,
+            met_algo, flag11,
+            d_scc_list, d_vec_scc_count,
+            d_level_ver, d_affect_level,
+            d_count_trim_spec);
+
+        if (trimmed) {
+            local_count++;
+            continue;
+        }
+
+        // Step 2: TRIM2 (2-node SCC detection) — only if node still has original color
+        if (d_Color[n] == old_color) {
+            trim_2nd_new_main_device(
+                d_begin, d_node_idx, d_r_begin, d_r_node_idx,
+                d_Color, d_SCC,
+                d_count, n);
+        }
+    }
+
+    if (local_count > 0) atomicAdd(&s_count, local_count);
+    __syncthreads();
+    if (threadIdx.x == 0 && s_count > 0)
+        atomicAdd(d_count, s_count);
+}
+
+// ======================================================================
+// do_global_trim12_fused() — host function for fused TRIM1 + TRIM2
+// ======================================================================
+int do_global_trim12_fused(GPUState& st, const GPUGraph& g, int* d_count,
+    int met_algo, int flag11,
+    const DynamicArrays& da, int* d_count_trim_spec)
+{
+    if (d_trim_targets_count == 0) return 0;
+
+    CUDA_CHECK(cudaMemset(d_count, 0, sizeof(int)));
+    if (d_count_trim_spec)
+        CUDA_CHECK(cudaMemset(d_count_trim_spec, 0, sizeof(int)));
+
+    int block_size = 256;
+    int grid_size = (d_trim_targets_count + block_size - 1) / block_size;
+
+    trim12_fused_compact_kernel<<<grid_size, block_size>>>(
+        g.d_begin, g.d_node_idx,
+        g.d_r_begin, g.d_r_node_idx,
+        st.d_Color, st.d_SCC, d_count,
+        d_trim_targets, d_trim_targets_count,
+        met_algo, flag11,
+        da.d_scc_list, da.d_vec_scc_count,
+        da.d_level_ver, da.d_affect_level,
+        d_count_trim_spec);
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    int count;
+    CUDA_CHECK(cudaMemcpy(&count, d_count, sizeof(int), cudaMemcpyDeviceToHost));
+    return count;
+}
+
+// ======================================================================
+// repeat_global_trim12_fused() — repeat fused TRIM1 + TRIM2 until exit_count
+// ======================================================================
+int repeat_global_trim12_fused(GPUState& st, const GPUGraph& g, int* d_count,
+    int met_algo, int flag11,
+    const DynamicArrays& da, int* d_count_trim_spec,
+    int exit_count)
+{
+    create_trim1_compact(st, g);
+    int total = 0;
+    int count;
+    do {
+        count = do_global_trim12_fused(st, g, d_count, met_algo, flag11, da, d_count_trim_spec);
+        total += count;
+    } while (count > exit_count);
+    return total;
+}
+
 //Kernel 3: do_local_trim1 — iterates over a work item's set
 
 __global__ void trim_once_node_local_set_kernel(

@@ -66,6 +66,8 @@ public:
 
         while (getline(inputFile, line))
         {
+            if (line.empty() || line[0] == '%') continue;
+
             vector<string> tokens;
             string token;
             stringstream ss(line);
