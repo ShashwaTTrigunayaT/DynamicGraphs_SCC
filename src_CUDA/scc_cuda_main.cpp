@@ -476,9 +476,10 @@ int main(int argc, char** argv)
                 }
             }
 
-            // ---------- Phase 3: TRIM1/2 (compact) — fused kernel ----------
-            int trim_total = repeat_global_trim12_fused(st, gpuG, d_count,
+            // ---------- Phase 3: TRIM1/2 (compact) — separate passes ----------
+            trimmed = repeat_global_trim1_compact(st, gpuG, d_count,
                 met_algo, flag11, da, d_count_trim_spec, 0);
+            int trim_total = do_global_trim2_new(st, gpuG, d_count);
             trim_total += repeat_global_trim1_compact(st, gpuG, d_count,
                 met_algo, flag11, da, d_count_trim_spec, 100);
             trimmed += trim_total;

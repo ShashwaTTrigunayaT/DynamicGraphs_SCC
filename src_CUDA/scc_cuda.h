@@ -467,27 +467,6 @@ int do_fw_bw_single_thread(GPUState& st, const GPUGraph& g,
 
 void start_workers_fw_bw(GPUState& st, const GPUGraph& g, int N);
 
-// ---- Fused TRIM12 kernel (defined in scc_cuda_trim1.cu) ----
-__global__ void trim12_fused_compact_kernel(
-    const edge_t* d_begin, const node_t* d_node_idx,
-    const edge_t* d_r_begin, const node_t* d_r_node_idx,
-    int* d_Color, int* d_SCC,
-    int* d_count,
-    const int* d_targets, int num_targets,
-    int met_algo, int flag11,
-    const int* d_scc_list, const int* d_vec_scc_count,
-    const int* d_level_ver, const int* d_affect_level,
-    int* d_count_trim_spec);
-
-int do_global_trim12_fused(GPUState& st, const GPUGraph& g, int* d_count,
-    int met_algo, int flag11,
-    const DynamicArrays& da, int* d_count_trim_spec);
-
-int repeat_global_trim12_fused(GPUState& st, const GPUGraph& g, int* d_count,
-    int met_algo, int flag11,
-    const DynamicArrays& da, int* d_count_trim_spec,
-    int exit_count);
-
 // ---- scc_cuda_fb_seq2.cu (mirrors scc_fb_seq2.cc) ----
 
 // Kernel: scatter (node_id, scc_value) pairs into d_SCC
