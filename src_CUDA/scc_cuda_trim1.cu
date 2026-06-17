@@ -131,12 +131,9 @@ __device__ int trim_once_node_device(
 }
 
 // ======================================================================
-// Kernel 1: do_global_trim1 — iterates over ALL nodes (block-contiguous)
-//
-// OPTIMIZATION: Block-contiguous access replaces the stride pattern.
-// Consecutive threads read consecutive d_Color[] entries, improving
-// L1 cache line utilization by ~32× (one cache line serves the whole
-// warp instead of one thread).
+// Kernel 1: do_global_trim1 — iterates over ALL nodes
+// Each block accumulates its count in shared memory, then one thread
+// per block does a single global atomicAdd (reduces contention 256x).
 // ======================================================================
 __global__ void trim_once_node_kernel(
     const edge_t* d_begin, const node_t* d_node_idx,
@@ -153,13 +150,14 @@ __global__ void trim_once_node_kernel(
     if (threadIdx.x == 0) s_count = 0;
     __syncthreads();
 
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = gridDim.x * blockDim.x;
     int local_count = 0;
 
-    if (idx < num_nodes) {
-        local_count = trim_once_node_device(
+    for (int n = tid; n < num_nodes; n += stride) {
+        local_count += trim_once_node_device(
             d_begin, d_node_idx, d_r_begin, d_r_node_idx,
-            d_Color, d_SCC, idx,  // pass idx as node n
+            d_Color, d_SCC, n,
             met_algo, flag11,
             d_scc_list, d_vec_scc_count,
             d_level_ver, d_affect_level,
