@@ -1,5 +1,4 @@
 #include "scc_cuda.h"
-#include <cub/cub.cuh>
 
 // ======================================================================
 // Device-side global state: analogs of OpenMP static globals
@@ -48,10 +47,6 @@ cudaStream_t bfs_stream        = NULL;
 int*         h_pinned_next_count = NULL;  // pinned: next frontier size
 int*         h_pinned_scc_count  = NULL;  // pinned: SCC count
 int*         h_pinned_bw_count   = NULL;  // pinned: BW count
-
-// Frontier queue sort temp storage (CUB radix sort)
-void*  d_sort_temp      = NULL;
-size_t sort_temp_bytes  = 0;
 
 static int init_fw_color;
 static int init_bw_color;
@@ -137,13 +132,6 @@ void initialize_global_fb(int num_nodes)
     if (!h_pinned_scc_count)  CUDA_CHECK(cudaMallocHost(&h_pinned_scc_count,  sizeof(int)));
     if (!h_pinned_bw_count)   CUDA_CHECK(cudaMallocHost(&h_pinned_bw_count,  sizeof(int)));
 
-    // Allocate CUB radix sort temp storage (for frontier queue reordering)
-    // Safe upper bound: CUB DeviceRadixSort::SortKeys of N int32 keys needs
-    // at most ~2*N*sizeof(int) + overhead. We allocate 4*N*sizeof(int) for safety.
-    if (d_sort_temp) { cudaFree(d_sort_temp); d_sort_temp = NULL; sort_temp_bytes = 0; }
-    sort_temp_bytes = (size_t)num_nodes * sizeof(int) * 4;
-    CUDA_CHECK(cudaMalloc(&d_sort_temp, sort_temp_bytes));
-
     // Create stream for async kernel launches + memcpy
     if (!bfs_stream) CUDA_CHECK(cudaStreamCreate(&bfs_stream));
 
@@ -172,9 +160,6 @@ void finalize_global_fb()
     // Free persistent scratch buffers
     if (d_pivot_scratch)  { cudaFree(d_pivot_scratch);  d_pivot_scratch = NULL; }
     if (d_remain_scratch) { cudaFree(d_remain_scratch); d_remain_scratch = NULL; }
-
-    // Free CUB sort temp storage
-    if (d_sort_temp)  { cudaFree(d_sort_temp);  d_sort_temp = NULL; sort_temp_bytes = 0; }
 
     // Free pinned memory and destroy stream
     if (h_pinned_next_count) { cudaFreeHost(h_pinned_next_count); h_pinned_next_count = NULL; }
@@ -647,19 +632,6 @@ int do_global_fw_bw_main(GPUState& st, const GPUGraph& g,
         d_bfs_next_queue = tmp;
 
         queue_size = *h_pinned_next_count;
-
-        // Sort frontier queue by node ID for better memory coalescing
-        // Threads in a warp access contiguous d_begin[] entries when
-        // processing sorted frontier nodes (improves L2 hit rate)
-        if (queue_size > 1) {
-            cub::DeviceRadixSort::SortKeys(
-                d_sort_temp, sort_temp_bytes,
-                d_bfs_queue, d_bfs_queue,
-                queue_size, 0, sizeof(int) * 8,
-                bfs_stream);
-            CUDA_CHECK(cudaStreamSynchronize(bfs_stream));
-        }
-
         total_fw += queue_size;
     }
 
@@ -727,16 +699,6 @@ int do_global_fw_bw_main(GPUState& st, const GPUGraph& g,
         d_bfs_next_queue = tmp;
 
         queue_size = *h_pinned_next_count;
-
-        // Sort frontier queue by node ID (same benefit as FW: coalesced d_begin[] reads)
-        if (queue_size > 1) {
-            cub::DeviceRadixSort::SortKeys(
-                d_sort_temp, sort_temp_bytes,
-                d_bfs_queue, d_bfs_queue,
-                queue_size, 0, sizeof(int) * 8,
-                bfs_stream);
-            CUDA_CHECK(cudaStreamSynchronize(bfs_stream));
-        }
     }
 
     // Read final SCC / BW counts
