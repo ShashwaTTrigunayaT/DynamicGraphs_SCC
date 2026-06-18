@@ -488,7 +488,6 @@ int main(int argc, char** argv)
         // ---------------------------------------------------------------
         // Timing: record start for each phase (also used for method 22)
         // ---------------------------------------------------------------
-        double global_bfs_ms = 0.0;
         gettimeofday(&t_bfs, NULL);  // GLOBAL_BFS end time (will be same as start if skipped)
 
 
@@ -533,7 +532,13 @@ int main(int argc, char** argv)
                     (t_trim1.tv_usec - t_start.tv_usec) * 0.001;
         double t2 = (t_compact.tv_sec - t_trim1.tv_sec) * 1000.0 +
                     (t_compact.tv_usec - t_trim1.tv_usec) * 0.001;
-        double t3 = global_bfs_ms;  // 0 for method 22, actual for method 2
+        double t3;
+        if (met_algo == 2) {
+            t3 = (t_bfs.tv_sec - t_compact.tv_sec) * 1000.0 +
+                 (t_bfs.tv_usec - t_compact.tv_usec) * 0.001;
+        } else {
+            t3 = 0.0;  // method 22: skipped GLOBAL_BFS
+        }
         double t4 = (t_trim12.tv_sec - t_bfs.tv_sec) * 1000.0 +
                     (t_trim12.tv_usec - t_bfs.tv_usec) * 0.001;
         double t5 = (t_wcc.tv_sec - t_trim12.tv_sec) * 1000.0 +
