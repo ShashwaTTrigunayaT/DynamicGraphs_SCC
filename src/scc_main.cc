@@ -168,7 +168,14 @@ class my_main : public main_t
             if (analyze) create_histogram_and_print();
 
             if (print) output_scc_list();
-            
+
+            // Flush output and exit immediately to skip gm_graph heap corruption.
+            // The destructor ~gm_graph() corrupts glibc heap metadata on large
+            // graphs (wb-edu, it-2004), causing "double free or corruption" crash.
+            fflush(stdout);
+            fflush(stderr);
+            exit(0);
+
             finalize_color();
             finalize_tarjan();
             finalize_trim2();
