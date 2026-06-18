@@ -225,140 +225,52 @@ __global__ void fw_bfs_level_kernel(
     const int* d_queue, int queue_size,
     int* d_next_queue, int* d_next_count,
     int fw_color, int base_color,
-    uint32_t* d_visited_bits,
-    int* d_fw_count)
+    uint32_t* d_visited_bits)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     int stride = blockDim.x * gridDim.x;
 
-    // --- Shared memory: Ping-Pong Block-Local Queue ---
-    // Two 512-entry queues that swap at each BFS level.
-    // This allows the block to walk arbitrarily deep paths (500+ levels)
-    // without returning to the host, as long as each level's frontier
-    // stays below 512 nodes.
-    //
-    // FIX (monotonic queue bug): The original single-queue design had
-    // s_q_tail growing monotonically — once it hit 1024, the queue was
-    // permanently "full" and all subsequent levels spilled to global.
-    // Ping-pong eliminates this by reclaiming space after each hop.
-    const int LOCAL_Q_SIZE = 512;
-    __shared__ int s_q1[LOCAL_Q_SIZE];
-    __shared__ int s_q2[LOCAL_Q_SIZE];
-    __shared__ int s_count1;
-    __shared__ int s_count2;
-    __shared__ int s_fw;
-
-    if (threadIdx.x == 0) {
-        s_count1 = 0; s_count2 = 0; s_fw = 0;
-    }
-    __syncthreads();
-
     // Per-thread staging buffer (STAGE_SIZE=4 fits in registers, no local memory spill)
     const int STAGE_SIZE = 4;
-    int global_staged[STAGE_SIZE];
-    int global_staged_cnt = 0;
-    int local_fw_reg = 0;
+    int staged[STAGE_SIZE];
+    int staged_cnt = 0;
 
     // Helper: flush local buffer to global queue (single atomicAdd per flush)
-#define FW_FLUSH_GLOBAL() do {                                           \
-    if (global_staged_cnt > 0) {                                         \
-        int base = atomicAdd(d_next_count, global_staged_cnt);           \
-        for (int _j = 0; _j < global_staged_cnt; _j++)                   \
-            d_next_queue[base + _j] = global_staged[_j];                 \
-        global_staged_cnt = 0;                                            \
-    }                                                                     \
+#define FW_FLUSH() do {                                                 \
+    if (staged_cnt > 0) {                                               \
+        int base = atomicAdd(d_next_count, staged_cnt);                 \
+        for (int _j = 0; _j < staged_cnt; _j++)                         \
+            d_next_queue[base + _j] = staged[_j];                       \
+        staged_cnt = 0;                                                  \
+    }                                                                    \
 } while(0)
 
-    // --- PHASE 1: Pull from global queue, push to s_q1 ---
     for (int i = tid; i < queue_size; i += stride) {
         node_t t = d_queue[i];
         for (edge_t nx = d_begin[t]; nx < d_begin[t + 1]; nx++) {
             node_t k = d_node_idx[nx];
+            // Navigate: check if node has base_color (d_Color stays in L2 because
+            // we don't CAS it — only write with simple store after claiming)
             if (fw_check_navigator_device(d_Color, k, base_color)) {
-                int word = k >> 5;
+                // Claim via visited bitmap: atomicOr on 200KB bitmask (L2-resident)
+                int word = k >> 5;  // k / 32
                 uint32_t bit = 1u << (k & 31);
                 uint32_t old = atomicOr(&d_visited_bits[word], bit);
                 if ((old & bit) == 0) {
+                    // Claimed! Write color with simple store
                     d_Color[k] = fw_color;
-                    local_fw_reg++;
-
-                    int pos = atomicAdd(&s_count1, 1);
-                    if (pos < LOCAL_Q_SIZE) {
-                        s_q1[pos] = k;
-                    } else {
-                        // SMEM full: spill to global queue
-                        global_staged[global_staged_cnt++] = k;
-                        if (global_staged_cnt == STAGE_SIZE)
-                            FW_FLUSH_GLOBAL();
+                    staged[staged_cnt++] = k;
+                    if (staged_cnt == STAGE_SIZE) {
+                        FW_FLUSH();
                     }
                 }
             }
         }
     }
 
-    // Ensure all Phase 1 enqueues are visible before entering Phase 2
-    __syncthreads();
-
-    // --- PHASE 2: Ping-Pong Loop ---
-    // Read from curr_q, write neighbors to next_q, then swap.
-    // This allows arbitrarily deep path walking without host round-trips.
-    int* curr_q = s_q1;
-    int* next_q = s_q2;
-    int* curr_count = &s_count1;
-    int* next_count = &s_count2;
-
-    while (true) {
-        int work_count = min(*curr_count, LOCAL_Q_SIZE);
-        if (work_count == 0) break;  // Path exhausted locally
-
-        if (threadIdx.x == 0) {
-            *next_count = 0;  // Reset the receiving queue for this hop
-        }
-        __syncthreads();
-
-        for (int i = threadIdx.x; i < work_count; i += blockDim.x) {
-            int my_node = curr_q[i];
-            for (edge_t nx = d_begin[my_node]; nx < d_begin[my_node + 1]; nx++) {
-                node_t k = d_node_idx[nx];
-                if (fw_check_navigator_device(d_Color, k, base_color)) {
-                    int word = k >> 5;
-                    uint32_t bit = 1u << (k & 31);
-                    uint32_t old = atomicOr(&d_visited_bits[word], bit);
-                    if ((old & bit) == 0) {
-                        d_Color[k] = fw_color;
-                        local_fw_reg++;
-
-                        int pos = atomicAdd(next_count, 1);
-                        if (pos < LOCAL_Q_SIZE) {
-                            next_q[pos] = k;
-                        } else {
-                            global_staged[global_staged_cnt++] = k;
-                            if (global_staged_cnt == STAGE_SIZE)
-                                FW_FLUSH_GLOBAL();
-                        }
-                    }
-                }
-            }
-        }
-
-        // Ensure all threads are done processing before we swap pointers
-        __syncthreads();
-
-        // Swap queues for the next level deep
-        int* tmp_q = curr_q; curr_q = next_q; next_q = tmp_q;
-        int* tmp_c = curr_count; curr_count = next_count; next_count = tmp_c;
-    }
-
-    // Flush remaining global queue entries
-    FW_FLUSH_GLOBAL();
-#undef FW_FLUSH_GLOBAL
-
-    // Flush FW node counter to global
-    if (local_fw_reg > 0) atomicAdd(&s_fw, local_fw_reg);
-    __syncthreads();
-    if (threadIdx.x == 0 && s_fw > 0) {
-        atomicAdd(d_fw_count, s_fw);
-    }
+    // Flush remaining
+    FW_FLUSH();
+#undef FW_FLUSH
 }
 
 // ======================================================================
@@ -443,39 +355,23 @@ __global__ void bw_bfs_level_kernel(
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     int stride = blockDim.x * gridDim.x;
 
-    // --- Shared memory: Ping-Pong Block-Local Queue ---
-    // Two 512-entry queues that swap at each BFS level (same approach as FW kernel).
-    const int LOCAL_Q_SIZE = 512;
-    __shared__ int s_q1[LOCAL_Q_SIZE];
-    __shared__ int s_q2[LOCAL_Q_SIZE];
-    __shared__ int s_count1;
-    __shared__ int s_count2;
-    __shared__ int s_scc;
-    __shared__ int s_bw;
-
-    if (threadIdx.x == 0) {
-        s_count1 = 0; s_count2 = 0; s_scc = 0; s_bw = 0;
-    }
-    __syncthreads();
-
     // Per-thread staging buffer (STAGE_SIZE=4 fits in registers)
     const int STAGE_SIZE = 4;
-    int global_staged[STAGE_SIZE];
-    int global_staged_cnt = 0;
-    int local_scc_reg = 0;
-    int local_bw_reg = 0;
+    int staged[STAGE_SIZE];
+    int staged_cnt = 0;
+    int local_scc = 0;
+    int local_bw = 0;
 
     // Helper: flush local buffer to global queue (single atomicAdd per flush)
-#define BW_FLUSH_GLOBAL() do {                                           \
-    if (global_staged_cnt > 0) {                                         \
-        int base = atomicAdd(d_next_count, global_staged_cnt);           \
-        for (int _j = 0; _j < global_staged_cnt; _j++)                   \
-            d_next_queue[base + _j] = global_staged[_j];                 \
-        global_staged_cnt = 0;                                            \
-    }                                                                     \
+#define BW_FLUSH() do {                                                 \
+    if (staged_cnt > 0) {                                               \
+        int base = atomicAdd(d_next_count, staged_cnt);                 \
+        for (int _j = 0; _j < staged_cnt; _j++)                         \
+            d_next_queue[base + _j] = staged[_j];                       \
+        staged_cnt = 0;                                                  \
+    }                                                                    \
 } while(0)
 
-    // --- PHASE 1: Pull from global queue, push to s_q1 ---
     for (int i = tid; i < queue_size; i += stride) {
         node_t t = d_queue[i];
         for (edge_t nx = d_r_begin[t]; nx < d_r_begin[t + 1]; nx++) {
@@ -485,6 +381,7 @@ __global__ void bw_bfs_level_kernel(
 
             // Navigate: check if node is fw_color (intersection) or base_color (bw-set)
             if (k_color == fw_color || k_color == base_color) {
+                // Claim via visited bitmap
                 int word = k >> 5;
                 uint32_t bit = 1u << (k & 31);
                 uint32_t old = atomicOr(&d_visited_bits[word], bit);
@@ -493,96 +390,28 @@ __global__ void bw_bfs_level_kernel(
                         // Intersection: mark as SCC
                         d_Color[k] = SCC_FOUND;
                         d_SCC[k] = pivot;
-                        local_scc_reg++;
+                        local_scc++;
                     } else {
                         // BW-set
                         d_Color[k] = bw_color;
-                        local_bw_reg++;
+                        local_bw++;
                     }
-
-                    int pos = atomicAdd(&s_count1, 1);
-                    if (pos < LOCAL_Q_SIZE) {
-                        s_q1[pos] = k;
-                    } else {
-                        global_staged[global_staged_cnt++] = k;
-                        if (global_staged_cnt == STAGE_SIZE)
-                            BW_FLUSH_GLOBAL();
+                    staged[staged_cnt++] = k;
+                    if (staged_cnt == STAGE_SIZE) {
+                        BW_FLUSH();
                     }
                 }
             }
         }
     }
 
-    // Ensure all Phase 1 enqueues are visible before entering Phase 2
-    __syncthreads();
-
-    // --- PHASE 2: Ping-Pong Loop ---
-    int* curr_q = s_q1;
-    int* next_q = s_q2;
-    int* curr_count = &s_count1;
-    int* next_count = &s_count2;
-
-    while (true) {
-        int work_count = min(*curr_count, LOCAL_Q_SIZE);
-        if (work_count == 0) break;  // Path exhausted locally
-
-        if (threadIdx.x == 0) {
-            *next_count = 0;  // Reset the receiving queue for this hop
-        }
-        __syncthreads();
-
-        for (int i = threadIdx.x; i < work_count; i += blockDim.x) {
-            int my_node = curr_q[i];
-            for (edge_t nx = d_r_begin[my_node]; nx < d_r_begin[my_node + 1]; nx++) {
-                node_t k = d_r_node_idx[nx];
-                int k_color = d_Color[k];
-
-                if (k_color == fw_color || k_color == base_color) {
-                    int word = k >> 5;
-                    uint32_t bit = 1u << (k & 31);
-                    uint32_t old = atomicOr(&d_visited_bits[word], bit);
-                    if ((old & bit) == 0) {
-                        if (k_color == fw_color) {
-                            d_Color[k] = SCC_FOUND;
-                            d_SCC[k] = pivot;
-                            local_scc_reg++;
-                        } else {
-                            d_Color[k] = bw_color;
-                            local_bw_reg++;
-                        }
-
-                        int pos = atomicAdd(next_count, 1);
-                        if (pos < LOCAL_Q_SIZE) {
-                            next_q[pos] = k;
-                        } else {
-                            global_staged[global_staged_cnt++] = k;
-                            if (global_staged_cnt == STAGE_SIZE)
-                                BW_FLUSH_GLOBAL();
-                        }
-                    }
-                }
-            }
-        }
-
-        __syncthreads();
-
-        // Swap queues for the next level deep
-        int* tmp_q = curr_q; curr_q = next_q; next_q = tmp_q;
-        int* tmp_c = curr_count; curr_count = next_count; next_count = tmp_c;
-    }
-
-    // Flush remaining global queue entries
-    BW_FLUSH_GLOBAL();
-#undef BW_FLUSH_GLOBAL
+    // Flush remaining queue entries
+    BW_FLUSH();
+#undef BW_FLUSH
 
     // Flush local SCC / BW counters
-    if (local_scc_reg > 0) atomicAdd(&s_scc, local_scc_reg);
-    if (local_bw_reg > 0) atomicAdd(&s_bw, local_bw_reg);
-    __syncthreads();
-    if (threadIdx.x == 0) {
-        if (s_scc > 0) atomicAdd(d_scc_count, s_scc);
-        if (s_bw > 0) atomicAdd(d_bw_count, s_bw);
-    }
+    if (local_scc > 0) atomicAdd(d_scc_count, local_scc);
+    if (local_bw > 0) atomicAdd(d_bw_count, local_bw);
 }
 
 // ======================================================================
@@ -769,14 +598,6 @@ int do_global_fw_bw_main(GPUState& st, const GPUGraph& g,
     //   FW_BFS.do_bfs_forward();
     //   int fw_count = FW_BFS.get_fw_count();
     // ---------------------------------------------------------------
-    // FIX: Clear visited bitmap before FW BFS to prevent dirty bits from
-    // previous subproblem's BW BFS from incorrectly blocking node claims.
-    // do_global_fw_bw_main is called multiple times for different subgraphs,
-    // and the visited bitmap is NOT reset between calls without this fix.
-    CUDA_CHECK(cudaMemsetAsync(d_bfs_visited_bits, 0,
-                                d_bfs_visited_words * sizeof(uint32_t),
-                                bfs_stream));
-
     int queue_size = 1;
     CUDA_CHECK(cudaMemcpyAsync(d_bfs_queue, &h_pivot, sizeof(int),
                                 cudaMemcpyHostToDevice, bfs_stream));
@@ -784,9 +605,7 @@ int do_global_fw_bw_main(GPUState& st, const GPUGraph& g,
                                 cudaMemcpyHostToDevice, bfs_stream));
     CUDA_CHECK(cudaStreamSynchronize(bfs_stream));
 
-    // Repurpose d_bfs_bw_count as FW discovered counter (unused during FW pass)
-    CUDA_CHECK(cudaMemsetAsync(d_bfs_bw_count, 0, sizeof(int), bfs_stream));
-    CUDA_CHECK(cudaStreamSynchronize(bfs_stream));
+    int total_fw = 1;  // pivot counted
 
     while (queue_size > 0) {
         CUDA_CHECK(cudaMemsetAsync(d_bfs_next_count, 0, sizeof(int), bfs_stream));
@@ -799,8 +618,7 @@ int do_global_fw_bw_main(GPUState& st, const GPUGraph& g,
             d_bfs_queue, queue_size,
             d_bfs_next_queue, d_bfs_next_count,
             fw_color, base_color,
-            d_bfs_visited_bits,
-            d_bfs_bw_count);  // passed as d_fw_count
+            d_bfs_visited_bits);
 
         // Async D2H copy — starts as soon as kernel completes on stream
         CUDA_CHECK(cudaMemcpyAsync(h_pinned_next_count, d_bfs_next_count,
@@ -814,12 +632,11 @@ int do_global_fw_bw_main(GPUState& st, const GPUGraph& g,
         d_bfs_next_queue = tmp;
 
         queue_size = *h_pinned_next_count;
+        total_fw += queue_size;
     }
 
     // OpenMP: int fw_count = FW_BFS.get_fw_count();
-    int h_fw_discovered = 0;
-    CUDA_CHECK(cudaMemcpy(&h_fw_discovered, d_bfs_bw_count, sizeof(int), cudaMemcpyDeviceToHost));
-    int fw_count = 1 + h_fw_discovered;  // pivot + discovered
+    int fw_count = total_fw;
 
     // ---------------------------------------------------------------
     // Reset visited bitmap between FW and BW BFS
