@@ -492,10 +492,18 @@ int main(int argc, char** argv)
                 create_work_items_from_wcc(st, gpuG);
                 gettimeofday(&t_wcc, NULL);
 
-                // ---------- Phase 5: FB (DFS) — processed on CPU via host path ----------
-                // Host path (CPU + OpenMP): fastest for all current datasets (Pokec 189 comps, LiveJournal1 6,521 comps).
-                // GPU path was ~746ms on LiveJournal1 vs ~48ms host path due to per-component cudaMalloc overhead.
-                fb_algo_time = start_workers_fw_bw_dfs_host(st, gpuG, num_threads);
+                // ---------- Phase 5: FB — try GPU batch first, fall back to host ----------
+                // GPU batch FB: processes all WCC components in parallel on GPU.
+                // For many-SCC graphs (it-2004: 30.5M, wb-edu: 4.3M), this is much faster
+                // than the host path which requires D2H/H2D transfers + CPU processing.
+                // Fallback to host path if any components were too large for SMEM
+                // (run_gpu_fb returns them to the work queue).
+                fb_algo_time = run_gpu_fb(st, gpuG, num_threads);
+                if (fb_algo_time < 0.0) fb_algo_time = 0.0;  // clamp signal value
+                if (!is_work_q_empty_from_seq_context()) {
+                    double host_time = start_workers_fw_bw_dfs_host(st, gpuG, num_threads);
+                    fb_algo_time += host_time;
+                }
             } else {
                 gettimeofday(&t_wcc, NULL);
             }
@@ -604,6 +612,8 @@ int main(int argc, char** argv)
     if (d_count_trim_spec) { fprintf(stderr, "[DEBUG] cleanup: cudaFree(d_count_trim_spec)\n"); cudaFree(d_count_trim_spec); }
     fprintf(stderr, "[DEBUG] cleanup: dynamic_arrays_free\n");
     dynamic_arrays_free(da);
+    fprintf(stderr, "[DEBUG] cleanup: finalize_fb_gpu\n");
+    finalize_fb_gpu();
     fprintf(stderr, "[DEBUG] cleanup: finalize_WCC\n");
     finalize_WCC();
     fprintf(stderr, "[DEBUG] cleanup: finalize_trim2\n");

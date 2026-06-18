@@ -495,4 +495,11 @@ void start_workers_fw_bw_dfs(GPUState& st, const GPUGraph& g, int N);
 // Returns: CPU processing time in ms (excludes D2H/H2D transfer overhead)
 double start_workers_fw_bw_dfs_host(GPUState& st, const GPUGraph& g, int N);
 
+// ---- scc_cuda_fb_gpu.cu (batch GPU FB for many-SCC graphs) ----
+// GPU-accelerated FB that processes all WCC components in parallel on GPU.
+// Replaces start_workers_fw_bw_dfs_host() for graphs with many components
+// (it-2004, wb-edu).
+double run_gpu_fb(GPUState& st, const GPUGraph& g, int num_threads);
+void   finalize_fb_gpu();
+
 #endif
