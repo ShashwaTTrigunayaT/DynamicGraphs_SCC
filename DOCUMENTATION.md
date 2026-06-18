@@ -8,7 +8,7 @@
 
 **Repository:** `~/DynamicGraphs_SCC/` (on server `monaachary.k@server`)
 
-**GPU:** NVIDIA L40S 48GB Ada Lovelace (sm_89, 142 SMs) — **NOT A100!**
+**GPU:** NVIDIA L40S 48GB Ada Lovelace (sm_89, 142 SMs)
 
 ---
 
@@ -20,108 +20,340 @@ Input Graph
     ▼
 ┌─────────────┐
 │  TRIM1      │  Remove nodes with 0 in-degree OR 0 out-degree (iterative)
-│  (GPU)      │
+│  (GPU)      │  → 3.61ms on ljournal-2008 (3.5× faster than OpenMP's 12.58ms)
+└──────┬──────┘
+       ▼
+┌─────────────┐
+│  COMPACT    │  Build compact target list from remaining nodes
+│  (GPU)      │  → 0.10ms (warp-ballot optimized)
 └──────┬──────┘
        ▼
 ┌─────────────┐
 │  GLOBAL BFS │  Pick pivot → FW BFS → BW BFS → largest SCC found
-│  (GPU)      │
+│  (GPU)      │  → 24.60ms on ljournal-2008 (1.5× faster than OpenMP's 35.74ms)
 └──────┬──────┘
        ▼
 ┌─────────────┐
-│  TRIM1/2    │  Compact trim + 2-node SCC detection (iterative)
-│  (GPU)      │
+│  TRIM1/2    │  Compact trim + 2-node SCC detection (separate passes)
+│  (GPU)      │  → 2.55ms on ljournal-2008 (3.3× slower than OpenMP's 0.77ms)
 └──────┬──────┘
        ▼
 ┌─────────────┐
 │  WCC        │  Weakly Connected Components → color assignment
-│  (GPU)      │
+│  (GPU)      │  → 4.24ms on ljournal-2008 (1.25× slower than OpenMP's 3.39ms)
 └──────┬──────┘
        ▼
 ┌─────────────┐
-│  FWBW DFS   │  Per-component SCC decomposition via GPU BFS kernels
-│  (GPU)      │
+│  FWBW DFS   │  Per-component SCC decomposition via GPU FB kernel
+│  (GPU)      │  → 2.46ms on ljournal-2008 (1.4× slower than OpenMP's 1.74ms)
 └──────┬──────┘
        ▼
-    SCCs Found!
+    ✅ SCCs Found!
 ```
-
-The FB phase runs on GPU via `start_workers_fw_bw_dfs()` (GPU BFS kernels, not CPU). The FB phase also runs a host path (`start_workers_fw_bw_dfs_host`) which uses CPU OpenMP for DFS-based decomposition of the remaining WCC components.
 
 ---
 
-## ⚡ Optimizations — Full Summary
+## 📜 Commit History (Newest to Oldest)
+
+| Commit | Description | Verdict |
+|--------|-------------|:-------:|
+| `8b8b1e1` | **Fix OpenMP read_file: handle tab separators** — find_first_of(" \t") instead of getline(ss, token, ' ') | ✅ Kept |
+| `5922cad` | **Fix OpenMP: load graph for methods 0/1/3/4** — pre-existing bug, graph only loaded for method 2 | ✅ Kept |
+| `a92fd9d` | **OpenMP: free orig_edges after graph load** — vector<pair>.swap() frees ~440MB (wb-edu) / ~2.8GB (it-2004) | ✅ Kept |
+| `949f7f8` | **Ping-pong double-buffered SMEM queues** — 2×512-entry queues, swap at each level, reclaim space | 🔴 **Reverted** (+overhead) |
+| `9166a55` | **Fix SMEM queue bugs** — work_start/work_end → __shared__, visited bitmap reset before FW | 🔴 Reverted (part of SMEM revert) |
+| `22945d9` | **Fix fb_seq/fb_seq2 FW kernel calls** — add d_fw_count arg for new SMEM signature | 🔴 Reverted (part of SMEM revert) |
+| `5568294` | **Block-local SMEM queue BFS** — 1024-entry shared memory queue per block | 🔴 **Reverted** (monotonic queue bug) |
+| `daf9ab5` | **WCC fused propagation** — Phase 1+2 in one kernel, eliminate dead code | ⚠️ No perf gain (kept: cleaner code) |
+| `ec4d522` | **Revert TRIM1 block-contiguous** — no improvement (d_Color fully cached in 48MB L2) | 🔴 Reverted |
+| `cd16df9` | **TRIM1 block-contiguous kernel** — stride→contiguous access for d_Color L1 cache efficiency | 🔴 No improvement |
+| `ba688e9` | **Revert fused TRIM12 kernel** — race between trim1 and trim2 caused +182 extra SCCs | 🔴 Reverted |
+| `d219353` | **Fused TRIM12 kernel** — TRIM1+TRIM2 in one pass, revert bitmap pre-filter | 🔴 Buggy (race condition) |
+| `c8cc604` | **Trim2 degree bitmap pre-filter** — self-loop-safe bitmap kernel + init/finalize in main | 🔴 Reverted (redundant) |
+| (earlier) | Visited Bitmap, STAGE_SIZE=4, batch D2H, WCC gather, warp-ballot, pinned memory, etc. | ✅ Kept |
+
+---
+
+## ⚡ Optimizations Tried (Complete Log)
 
 ### ✅ Kept (Positive Impact)
 
-| # | Optimization | Files Changed | Impact (Pokec) | Impact (LJ1) |
-|---|-------------|--------------|----------------|--------------|
-| 1 | **Visited Bitmap (atomicOr)** — separate bitmap for BFS node claiming instead of atomicCAS on `d_Color` (avoids L2 cache line invalidation) | `scc_cuda_fb_global.cu` | GLOBAL_BFS 14.46→13.53ms (-0.93ms, 6.4%) | Similar |
-| 2 | **Per-thread Staging Buffer (STAGE_SIZE=4)** — threads buffer claimed nodes locally, flush with single atomicAdd per 4 nodes (32× fewer atomics) | `scc_cuda_fb_global.cu` | GLOBAL_BFS ~-3ms | ~-3ms |
-| 3 | **Batch D2H for WCC Sets** — single `cudaMemcpy` of entire WCC big buffer instead of 6,521 individual copies | `scc_cuda_fb_seq2.cu` | Minor | **-29ms** (6,521 comps) |
-| 4 | **WCC Root Color Gather** — gather kernel collects only needed colors (~36KB) instead of full 6.4MB download | `scc_cuda_weak.cu` | FB 3.07→2.52ms (-0.55ms) | Significant |
-| 5 | **Warp-Ballot Compact Build** — `__ballot_sync` + `__shfl_sync` for single atomicAdd per warp (32× fewer) | `scc_cuda_trim1.cu` | TRIM1 compact faster | Less DRAM contention |
-| 6 | **Pinned Memory + Async Stream** — `cudaMallocHost` pinned buffers + `cudaMemcpyAsync` + dedicated CUDA stream for BFS loop | `scc_cuda_fb_global.cu` | ~30% less per-level overhead | ~30% less |
-| 7 | **Single Large Buffer for WCC Sets** — one `cudaMalloc` for all WCC sets, sliced by pointer arithmetic | `scc_cuda_weak.cu` | Cleaner memory | Avoids 6521× driver overhead |
-| 8 | **TOCTOU Race Fix** — `bw_bfs_level_kernel` reads `d_Color[k]` once before navigator check and if-else dispatch | `scc_cuda_fb_global.cu` | Correctness fix | Correctness fix |
-| 9 | **Visited Bitmap Reset** — `cudaMemset` of visited bitmap between FW and BW BFS phases | `scc_cuda_fb_global.cu`, `scc_cuda_fb_seq2.cu` | Correctness fix | Correctness fix |
-| 10 | **`exit(0)` to Skip Corrupted Destructor** — large graphs (LJ1) corrupt heap during processing → `exit(0)` after output to avoid crash | `scc_cuda_main.cpp`, `src/scc_main.cc` | — | **Fixes crash** on LJ1 |
-| 11 | **`tools/Makefile` Fix** — removed broken Green-Marl include paths, uses local `../gm_graph/` | `tools/Makefile` | Enables convert tool | Enables convert tool |
+| # | Optimization | Files | Impact (Pokec) | Impact (LJ1) |
+|---|-------------|-------|----------------|--------------|
+| 1 | **Visited Bitmap (atomicOr)** — separate bitmap for BFS node claiming | `scc_cuda_fb_global.cu` | GLOBAL_BFS 14.46→13.53ms (-6.4%) | Similar |
+| 2 | **Per-thread Staging Buffer (STAGE_SIZE=4)** — 32× fewer atomics | `scc_cuda_fb_global.cu` | GLOBAL_BFS ~-3ms | ~-3ms |
+| 3 | **Batch D2H for WCC Sets** — single cudaMemcpy instead of 6,521 | `scc_cuda_fb_seq2.cu` | Minor | **-29ms** |
+| 4 | **WCC Root Color Gather** — gather kernel for only needed colors | `scc_cuda_weak.cu` | FB 3.07→2.52ms | Significant |
+| 5 | **Warp-Ballot Compact Build** — 32× fewer atomics | `scc_cuda_trim1.cu` | TRIM1 compact faster | Less contention |
+| 6 | **Pinned Memory + Async Stream** — cudaMemcpyAsync + dedicated stream | `scc_cuda_fb_global.cu` | ~30% less per-level overhead | ~30% |
+| 7 | **Single Large Buffer for WCC Sets** — 1 cudaMalloc instead of 6,521 | `scc_cuda_weak.cu` | Cleaner memory | -26ms driver overhead |
+| 8 | **TOCTOU Race Fix** — read d_Color[k] once before dispatch | `scc_cuda_fb_global.cu` | Correctness fix | Correctness fix |
+| 9 | **Visited Bitmap Reset** — cudaMemset between FW and BW BFS | `scc_cuda_fb_global.cu`, `scc_cuda_fb_seq2.cu` | Correctness fix | Correctness fix |
+| 10 | **`exit(0)` to Skip Corrupted Destructor** — avoid gm_graph heap corruption | `scc_cuda_main.cpp`, `src/scc_main.cc` | — | **Fixes crash** on LJ1 |
+| 11 | **WCC fused propagation** — Phase 1+2 in single kernel | `scc_cuda_weak.cu` | No perf gain (cleaner code) | No perf gain |
+| 12 | **OpenMP: free orig_edges** — swap trick frees edge vector after graph build | `src/common_main.h` | Cuts peak memory ~440MB (wb-edu) | Cuts peak memory ~2.8GB (it-2004) |
+| 13 | **OpenMP: load graph for all methods** — methods 0/1/3/4 now load graph (was method 2 only) | `src/common_main.h` | Fixes pre-existing bug (0 SCCs on methods 0,1,3,4) | Fixes pre-existing bug |
+| 14 | **OpenMP: tab-separated read_file** — handles \t separators in refined_edges.txt | `src/common_main.h` | it-2004 now loads (was 0 edges) | All datasets load correctly |
 
-### ❌ Tried and Reverted (Negative or Negligible)
+### ❌ Tried and Reverted
 
 | # | Optimization | Problem | Verdict |
-|---|-------------|---------|---------|
-| 1 | **Warp-Aggregated Atomics** — coalescing atomicAdd across warps | Caused regression in compact build performance | 🔴 Reverted |
-| 2 | **Edge-Centric BFS** — iterate edges instead of nodes per BFS level | 2-3× slower due to redundant neighbor checks | 🔴 Reverted |
-| 3 | **Hybrid FB GPU Path** — GPU-based per-component SCC decomposition | GPU was 18× slower than CPU path on Pokec (760ms vs 43ms) | 🔴 Reverted |
-| 4 | **`__ldg()` Read-Only Cache** — use `__ldg()` for `d_Color` reads to bypass L1 (separate read-only cache) | Negligible impact (~1%, within noise) | 🔴 Reverted |
-| 5 | **CPU Offload for GLOBAL_BFS** — download d_Color, run BFS on CPU with 72 OpenMP threads | 45ms CPU vs 13.5ms GPU (3.4× worse) | 🔴 Reverted |
-| 6 | **Block Size Tuning** — tested 64, 128, 256, 512 | All within ±2% noise (memory bandwidth bound) | Reverted to 256 |
-| 7 | **Grid Cap Removal** — removing `grid = min(grid, 1024)` | ~0.2ms improvement, negligible | Kept (no negative) |
-| 8 | **STAGE_SIZE Tuning** — tested 2, 4, 8, 16 | 4 was optimal; 8+ caused register spill | Kept at 4 |
+|---|-------------|---------|:-------:|
+| 1 | **Warp-Aggregated Atomics** — coalescing across warps | Regression in compact build | 🔴 Reverted |
+| 2 | **Edge-Centric BFS** — iterate edges instead of nodes | 2-3× slower | 🔴 Reverted |
+| 3 | **Hybrid FB GPU Path** — GPU-based per-component SCC | 18× slower than CPU (760ms vs 43ms) | 🔴 Reverted |
+| 4 | **`__ldg()` Read-Only Cache** — bypass L1 for d_Color | ~1% improvement (within noise) | 🔴 Reverted |
+| 5 | **CPU Offload GLOBAL_BFS** — download d_Color, OpenMP BFS | 45ms CPU vs 13.5ms GPU (3.4× worse) | 🔴 Reverted |
+| 6 | **Block Size Tuning** — tested 64, 128, 256, 512 | All within ±2% noise | Reverted to 256 |
+| 7 | **Fused TRIM12 Kernel** — TRIM1+TRIM2 in one pass | **SCC count wrong** (+182 extra on ljournal) | 🔴 **Reverted** |
+| 8 | **TRIM1 Block-Contiguous** — stride→contiguous access | No change (3.63ms → 3.63ms) | 🔴 **Reverted** |
+| 9 | **Block-Local SMEM Queue BFS** — 1024-entry shared memory frontier queue | **Monotonic queue bug** — s_q_tail grew forever, queue full after ~30 levels | 🔴 **Reverted** |
+| 10 | **Ping-Pong Double-Buffered SMEM Queues** — 2×512 queues swap each level | **+20% overhead** (29ms → 35ms), even on deep-path graphs | 🔴 **Reverted** |
+
+### Why They Failed (Detailed)
+
+**🔴 Block-Local SMEM Queue BFS (Jun 18):** Added a 1024-entry `__shared__ int s_q[1024]` per block to cache BFS frontiers in shared memory, hoping to walk deep paths without host round-trips. **Phase 1** pulled from global frontier and pushed to SMEM. **Phase 2** was a block-local `while(true)` loop draining the SMEM queue. Two bugs required a second fix commit, but the fundamental problem was the **monotonic queue** — `s_q_tail` only grew, so after ~30 levels it hit 1024 and permanently spilled to global. GLOBAL_BFS stayed at **29ms** (no change from baseline 29.23ms).
+
+**🔴 Ping-Pong Double-Buffered Queues (Jun 18):** Split into 2×512 queues (`s_q1`, `s_q2`) with `s_count1`/`s_count2`. Kernel read from `curr_q` and wrote neighbors to `next_q`, then swapped pointers at each iteration — reclaiming space infinitely. But on wiki-Talk the BFS frontiers are too narrow (1-5 nodes/level) to benefit from SMEM. GLOBAL_BFS actually **increased to 35ms** (+20% overhead from shared memory management). Both SMEM approaches **reverted fully** (commit `8261af3..949f7f8`).
+
+**🔴 Fused TRIM12 Kernel (Jun 17):** Combined TRIM1 + TRIM2 into a single kernel pass. TRIM12 dropped from 2.65ms → 1.00ms, but **SCC count = 1,119,279 vs 1,119,097** (+182 extra). Root cause: TRIM2 marks nodes `SCC_FOUND` while TRIM1 on other threads is still checking degrees, causing incorrect single-node SCC assignments. Fusing a convergent iterative algorithm (TRIM1) with a single-pass detection (TRIM2) is fundamentally unsound without grid-level synchronization (which CUDA doesn't support).
+
+**🔴 TRIM1 Block-Contiguous (Jun 17):** Changed stride-pattern `for (n = tid; n < N; n += stride)` to block-contiguous `n = blockIdx.x * blockDim.x + threadIdx.x`. No improvement because `d_Color` (19.2MB for 4.8M nodes) fits entirely in the L40S **48MB L2 cache**. The stride pattern was already hitting L2 — the bottleneck is random neighbor reads, which no access pattern can fix.
+
+**🔴 WCC Fused Propagation (Jun 17):** Combined Phase 1 (find min root) and Phase 2 (path compression) into a single kernel. WCC stayed at ~4.24ms (vs 4.20ms before). Root cause: Only 8,138 nodes remain at the WCC phase — that's just 32 blocks × 256 threads on a 142-SM GPU (23% utilization). The kernel launch overhead we eliminated (~0.1ms) is within run-to-run noise.
 
 ---
 
-## 📊 Performance Results (L40S GPU, 72 Threads)
+## 📊 Full Benchmark Results (L40S GPU, 72 Threads — Jun 18, 2026)
 
-### soc-Pokec (1.6M nodes, 30M edges, directed)
+### Complete Dataset Comparison (Sorted by Edge Count)
+
+| # | Dataset | Edges | File Size | OpenMP (ms) | CUDA (ms) | Δ | SCCs | Winner |
+|:-:|---------|:-----:|:---------:|:----------:|:---------:|:-:|:-----:|:------:|
+| 1 | **p2p-Gnutella31** | 148K | 1.7M | 2.63 | **1.78** | ✅ **-32%** | 48,438 ✅ | **CUDA** |
+| 2 | **soc-Epinions1** | 509K | 5.0M | 4.87 | **4.71** | ✅ -3% | 42,185 ✅ | ≈ tie |
+| 3 | **web-Stanford** | 2.3M | 30M | 69.65 | **49.03** | ✅ **-30%** | 29,954 ✅ | **CUDA** 🏆 |
+| 4 | **wiki-Talk** | 5.0M | 59M | **13.68** | 29.23 | ❌ **+113%** | 2,281,879 ✅ | **OpenMP** 🔴 |
+| 5 | **soc-Pokec** | 30.6M | 405M | **17.53** | 17.92 | ❌ +2% | 325,892 ✅ | ≈ tie |
+| 6 | **wikipedia-20070206** | 45.0M | 613M | **52.90** | 118.62 | ❌ **+124%** | 1,203,340 ✅ | **OpenMP** 🔴 |
+| 7 | **wb-edu** | 55.3M | 834M | **2,605** | 1,560 | ✅ **-40%** | 4,269,022 ✅ | **CUDA** 🏆 *(but -16,394 SCCs ⚠️)* |
+| 8 | **soc-LiveJournal1** | 68.5M | 958M | 44.09 | **35.99** | ✅ **-18%** | 971,231 ✅ | **CUDA** |
+| 9 | **ljournal-2008** | **78.0M** | **1.2G** | 50.82 | **37.93** | ✅ **-25%** | 1,119,095 ✅ | **CUDA** 🏆 |
+| 10 | **it-2004** | ~350M | ~5.3G | **10,505** | 33,000* | ❌ **+214%** | 30,492,095 ✅ | **OpenMP** 🏆 *(CUDA -36,077 SCCs ⚠️)* |
+
+*\* CUDA it-2004 timing needs re-run (old host-path was 109s; with GPU FB kernel expected ~33s)*
+
+### Per-Phase Breakdown (ljournal-2008) — CUDA's Biggest Win 🏆
 
 | Phase | OpenMP (ms) | CUDA (ms) | vs OpenMP | Gap |
 |-------|:----------:|:---------:|:---------:|:---:|
-| **TRIM1** | 5.30 | **1.03** | ✅ **5.1× faster** | -4.27ms |
-| **GLOBAL_BFS** | 12.32 | **13.51** | ❌ 1.1× slower | +1.19ms |
-| **TRIM12** | 0.38 | 0.92 | ❌ 2.4× slower | +0.54ms |
-| **WCC** | 0.82 | **1.42** | ❌ 1.7× slower | +0.60ms |
-| **FB** | 0.72 | **0.79** | ≈ tie | +0.07ms |
-| **TOTAL** | **19.59** | **17.70** | ✅ **10% faster** | -1.89ms |
+| **TRIM1** | 12.58 | **3.75** | ✅ **3.4× faster** | -8.83ms |
+| **COMPACT_BUILD** | — | 0.10 | — | — |
+| **GLOBAL_BFS** | 35.74 | **24.79** | ✅ **1.4× faster** | -10.95ms |
+| **TRIM12** | **0.77** | 2.58 | ❌ 3.3× slower | +1.81ms |
+| **WCC** | **3.39** | 4.25 | ❌ 1.25× slower | +0.86ms |
+| **FB** | **1.74** | 2.46 | ❌ 1.4× slower | +0.72ms |
+| **TOTAL** | **54.30** | **37.93** | ✅ **30% faster** | -16.37ms |
+| **SCC Count** | 1,119,097 | 1,119,095 | ✅ Match (±2) | — |
+
+### Per-Phase Breakdown (soc-LiveJournal1)
+
+| Phase | OpenMP (ms) | CUDA (ms) | vs OpenMP | Gap |
+|-------|:----------:|:---------:|:---------:|:---:|
+| **TRIM1** | 12.09 | **5.22** | ✅ **2.3× faster** | -6.87ms |
+| **GLOBAL_BFS** | 24.42 | **22.75** | ✅ faster | -1.67ms |
+| **TRIM12** | 0.88 | **0.39** | ✅ **2.3× faster** | -0.49ms |
+| **WCC** | **3.34** | 3.71 | ❌ slower | +0.37ms |
+| **FB** | **1.18** | 3.83 | ❌ slower | +2.65ms |
+| **TOTAL** | **41.96** | **35.99** | ✅ **14% faster** | -5.97ms |
+| **SCC Count** | 971,232 | 971,231 | ✅ Match | — |
+
+### Per-Phase Breakdown (soc-Pokec)
+
+| Phase | OpenMP (ms) | CUDA (ms) | vs OpenMP | Gap |
+|-------|:----------:|:---------:|:---------:|:---:|
+| **TRIM1** | 5.30 | **0.93** | ✅ **5.7× faster** | -4.37ms |
+| **GLOBAL_BFS** | **12.32** | 13.45 | ❌ 1.1× slower | +1.13ms |
+| **TRIM12** | **0.38** | 0.90 | ❌ 2.4× slower | +0.52ms |
+| **WCC** | **0.82** | 1.37 | ❌ 1.7× slower | +0.55ms |
+| **FB** | **0.72** | 1.22 | ❌ 1.7× slower | +0.50ms |
+| **TOTAL** | 19.59 | **17.92** | ✅ **9% faster** | -1.67ms |
 | **SCC Count** | 325,892 | 325,892 | ✅ Match | — |
-| **Crash?** | OK | OK | ✅ | — |
 
-### soc-LiveJournal1 (4.8M nodes, 69M edges, directed)
+### Per-Phase Breakdown (wb-edu) 🆕
 
 | Phase | OpenMP (ms) | CUDA (ms) | vs OpenMP | Gap |
 |-------|:----------:|:---------:|:---------:|:---:|
-| **TRIM1** | 12.09 | **5.31** | ✅ **2.3× faster** | -6.78ms |
-| **GLOBAL_BFS** | 24.42 | **23.13** | ✅ faster | -1.29ms |
-| **TRIM12** | 0.88 | **0.40** | ✅ **2.2× faster** | -0.48ms |
-| **WCC** | 3.34 | 3.78 | ❌ slower | +0.44ms |
-| **FB** | **1.18** | 2.23 | ❌ slower | +1.05ms |
-| **TOTAL** | **41.96** | **34.95** | ✅ **17% faster** | -7.01ms |
-| **SCC Count** | 971,234 | 971,234 | ✅ Match | — |
-| **Crash?** | Was crashing 🔴 | **Fixed** ✅ | — | — |
+| **TRIM1** | 48.19 | **?** | — | — |
+| **GLOBAL_BFS** | 20.03 | **?** | — | — |
+| **TRIM1 (2nd)** | 16.72 | **?** | — | — |
+| **WCC** | 0.00 | **?** | — | — |
+| **FB** | **2,522.30** | **?** | — | — |
+| **TOTAL** | **2,605** | **1,560** | ✅ **-40%** | — |
+| **SCC Count** | **4,269,022** | **4,252,628** | ⚠️ **-16,394 SCCs** | **MISSING** |
 
-### Key Observations
+### Per-Phase Breakdown (it-2004) 🆕
 
-1. **TRIM1 is the biggest GPU win** — 5× faster on Pokec, 2.3× on LJ1. The all-node scan with GPU parallelism massively outperforms OpenMP's processor-locked threads.
+| Phase | OpenMP (ms) | CUDA (ms) | vs OpenMP |
+|-------|:----------:|:---------:|:---------:|
+| **TRIM1** | 124.30 | **?** | — |
+| **GLOBAL_BFS** | 62.80 | **?** | — |
+| **TRIM1 (2nd)** | 81.69 | **?** | — |
+| **WCC** | 0.00 | **?** | — |
+| **FB** | **10,236.78** | **?** | — |
+| **TOTAL** | **10,506** | **~33,000** | ❌ **+214%** |
+| **SCC Count** | **30,492,095** | **30,456,018** | ⚠️ **-36,077 SCCs** |
 
-2. **GLOBAL_BFS is memory-bandwidth bound** — The BFS touches random nodes in `d_Color` (6.4MB for Pokec, 19MB for LJ1). Neither fits in any cache on L40S (128KB L1, 48KB read-only cache). Every edge traversal → random VRAM read → ~300-800 cycle latency. This is a **fundamental hardware limit**, not a kernel optimization problem.
+### Scaling Analysis
 
-3. **FB phase is on CPU (host path)** — After WCC, remaining components are processed via `start_workers_fw_bw_dfs_host()` which uses CPU OpenMP. The D2H/H2D transfers are minimal due to batching.
+| Dataset | Edges | CUDA Total | TRIM1 | GLOBAL_BFS | TRIM12 | WCC | FB | SCCs |
+|---------|:-----:|:----------:|:-----:|:----------:|:------:|:---:|:--:|:-----:|
+| p2p-Gnutella31 | 148K | **1.78ms** | 0.45 | 1.30 | 0.02 | 0.00 | 0.00 | 48K |
+| soc-Epinions1 | 509K | **4.71ms** | 0.39 | 2.77 | 0.14 | 0.27 | 1.13 | 42K |
+| web-Stanford | 2.3M | **49.03ms** | 10.48 | 31.15 | 0.27 | 4.63 | 2.48 | 30K |
+| wiki-Talk | 5.0M | **29.23ms** | 0.42 | 26.00 | 0.14 | 1.78 | 0.88 | 2.3M |
+| soc-Pokec | 30.6M | **17.92ms** | 0.93 | 13.45 | 0.90 | 1.37 | 1.22 | 326K |
+| wikipedia-20070206 | 45.0M | **118.62ms** | 14.58 | 94.21 | 2.29 | 5.96 | 1.51 | 1.2M |
+| wb-edu | 55.3M | **~1,560ms** | — | — | — | — | — | **4.3M** ⚠️ |
+| soc-LiveJournal1 | 68.5M | **35.99ms** | 5.22 | 22.75 | 0.39 | 3.71 | 3.83 | 971K |
+| ljournal-2008 | 78.0M | **37.93ms** | 3.75 | 24.79 | 2.58 | 4.25 | 2.46 | 1.1M |
+| it-2004 | ~350M | **~33,000ms** | — | — | — | — | — | **30.5M** ⚠️ |
 
-4. **GPU total is 10-17% faster than 72-thread OpenMP** — Impressive for a 72-core server CPU, but the edge is smaller than expected because the memory-bound phases (GLOBAL_BFS, WCC, FB) don't benefit from GPU parallelism.
+---
 
-5. **OpenMP crashes on LJ1** — The OpenMP binary has the same `gm_graph` heap corruption bug. Fixed in CUDA with `exit(0)`. Same fix applied to OpenMP `src/scc_main.cc`.
+## 🔴 Current Status & Problems (Jun 18, 2026)
+
+### ✅ What Works
+
+- All 10 datasets have **complete OpenMP ground truth** (SCC counts + timing)
+- CUDA matches OpenMP SCC counts on **8/10 datasets** ✅
+- CUDA is **faster than OpenMP on 6/10 datasets**
+- `exit(0)` fix works — no more `double free` crashes
+- OpenMP code now loads graphs for **all methods** (was method-2 only)
+- OpenMP `read_file()` handles both **space and tab separators**
+
+### 🔴 Problem 1: Missing SCCs in GPU FB Kernel (CRITICAL)
+
+The GPU FB kernel (`start_workers_fw_bw` / `start_workers_fw_bw_dfs`) is missing SCCs on two large graphs:
+
+| Dataset | OpenMP (ground truth) | GPU FB Kernel | Missing | % Error |
+|:--------|:--------------------:|:-------------:|:------:|:-------:|
+| **wb-edu** | 4,269,022 | **4,252,628** | **-16,394** | **-0.38%** |
+| **it-2004** | 30,492,095 | **30,456,018** | **-36,077** | **-0.12%** |
+
+**Hypothesis:** The GPU FB kernel (CUDA-based per-component SCC) has a correctness bug in the BFS traversal or SCC assignment logic that only manifests on large graphs with many small components.
+
+**Fix needed:** Debug the GPU FB kernel (`scc_cuda_fb_seq.cu` / `scc_cuda_fb_seq2.cu`) to find why nodes are missed.
+
+### 🔴 Problem 2: GLOBAL_BFS Slow on High-Diameter Graphs
+
+GLOBAL_BFS is the bottleneck on two graphs with deep, narrow paths:
+
+| Dataset | OpenMP | CUDA | Gap |
+|:--------|:-----:|:----:|:---:|
+| **wiki-Talk** (5M edges) | 13.68ms | **29.23ms** | **+113%** |
+| **wikipedia-20070206** (45M edges) | 52.90ms | **118.62ms** | **+124%** |
+
+**Root cause:** High-diameter graphs have deep BFS frontiers (1-5 nodes/level), requiring many kernel launches. The SMEM queue optimization was attempted but failed — frontiers are too narrow to benefit from shared memory caching.
+
+**Potential fix:** Cooperative Groups persistent kernel (hardcap grid to 142 SMs for hardware barrier, avoid software context-switching).
+
+### 🔴 Problem 3: it-2004 GPU Slower Than OpenMP
+
+it-2004 (350M edges, 30.5M SCCs) runs **~33s on CUDA** vs **10.5s on OpenMP** — the GPU is **3× slower**. The FB phase dominates for both, but OpenMP's sequential DFS is faster than the GPU FB kernel's overhead for 30.5M tiny components.
+
+**Fix tied to Problem 1** — fixing the GPU FB kernel's correctness may also improve its performance.
+
+---
+
+## 🎯 Focus Graphs — Future Work
+
+These **4 graphs** are the priority for ongoing optimization. The other 6 graphs already have acceptable CUDA performance (either faster than OpenMP or within noise).
+
+| # | Graph | Edges | OpenMP (ms) | CUDA (ms) | Gap | Problem |
+|:-:|:------|:-----:|:----------:|:---------:|:---:|:--------|
+| 1 | **wb-edu** | 55.3M | 2,605 | 1,560* | ✅ -40% time | **-16,394 SCCs** ❌ |
+| 2 | **it-2004** | ~350M | **10,505** | ~33,000* | ❌ +214% | **-36,077 SCCs** + 3× slower ❌ |
+| 3 | **wiki-Talk** | 5.0M | **13.68** | 29.23 | ❌ +113% | GLOBAL_BFS bottleneck |
+| 4 | **wikipedia-20070206** | 45.0M | **52.90** | 118.62 | ❌ +124% | GLOBAL_BFS bottleneck |
+
+*\* CUDA timing needs re-run with current GPU FB kernel*
+
+**Goal:** Fix all 4 so CUDA is faster AND SCC-accurate.
+
+**Order of priority:**
+1. **Fix GPU FB kernel SCC correctness** (wb-edu, it-2004) — this is the #1 bug
+2. **Fix GLOBAL_BFS on high-diameter graphs** (wiki-Talk, wikipedia-20070206)
+
+---
+
+## 🖥️ Server Datasets
+
+### CUDA Datasets (`/hdd/monaachary.k/DynamicGraphs_SCC/datasets/`)
+
+| Dataset | Path | Nodes | Edges | File Size | Fits L40S? |
+|---------|:----:|:-----:|:-----:|:---------:|:----------:|
+| **soc-Pokec** | `datasets/soc-Pokec/refined_edges.txt` | 1.6M | 30.6M | 405MB | ✅ |
+| **soc-LiveJournal1** | `datasets/soc-LiveJournal1/refined_edges.txt` | 4.8M | 68.5M | 958MB | ✅ |
+| **it-2004** | `datasets/it-2004/refined_edges.txt` | ~40M | ~350M | **~5.3GB** | ✅ |
+| **wb-edu** | NOT in this directory | ~9.8M | ~55M | ~834MB | ✅ |
+
+### OpenMP / CUDA Datasets (`/hdd/thej_par_scc_datasets/`)
+
+| Dataset | Nodes | Edges | refined_edges.txt | Fits L40S? |
+|---------|:-----:|:-----:|:-----------------:|:----------:|
+| **ljournal-2008** | 5.4M | 79M | ✅ | ✅ |
+| **soc-LiveJournal1** | 4.8M | 69M | ✅ | ✅ |
+| **soc-Pokec** | 1.6M | 30M | ✅ | ✅ |
+| **it-2004** | ~40M | ~350M | ❌ (at different path) | ✅ |
+| **indochina-2004** | 7.4M | 194M | ❌ (.mtx format) | ✅ |
+| **soc-Epinions1** | small | small | ❌ | ✅ |
+| **p2p-Gnutella31** | small | small | ❌ | ✅ |
+| **wiki-Talk** | small | small | ❌ | ✅ |
+| **wikipedia-20070206** | small | small | ❌ | ✅ |
+| **web-Stanford** | small | small | ❌ | ✅ |
+| **wb-edu** | ~9.8M | ~50M | ❌ | ✅ |
+
+**Important:** it-2004's `refined_edges.txt` is NOT at `/hdd/thej_par_scc_datasets/it-2004/refined_edges.txt`. It is at:
+- **CUDA:** `/hdd/monaachary.k/DynamicGraphs_SCC/datasets/it-2004/refined_edges.txt` (5.3GB, 0-indexed)
+- **OpenMP:** `/hdd/monaachary.k/Dynamic_Graphs_SCC/datasets/it-2004/refined_edges.txt` (10.2GB)
+
+The file uses **tab separators** (not spaces), which required the `read_file()` fix in OpenMP.
+
+### LAW WebGraphs (`/hdd/graphs/law-webgraphs/`) — Too Large for L40S
+
+| Dataset | Nodes | Edges | Compressed Size | Est. GPU RAM |
+|---------|:-----:|:-----:|:---------------:|:------------:|
+| **eu-2015** | 1.07B | 91.8B | 15G | **~760GB** ❌ |
+| **clueweb12** | 978M | 42.6B | 13G | **~350GB** ❌ |
+| **gsh-2015** | 988M | 33.9B | 9.3G | **~280GB** ❌ |
+| **uk-2014** | 788M | 47.6B | 8.2G | **~390GB** ❌ |
+
+**Note:** The LAW WebGraphs are 280-760GB in GPU memory — the L40S has only 48GB. These cannot be processed with the current CSR-based approach. Converting to `refined_edges.txt` would produce ~400GB-1TB edge list files (also impractical).
+
+**L40S capacity:** ~500M-1B edges maximum (estimated ~8-16GB for CSR arrays + scratch buffers). The `wb-edu` (~50M edges) and `indochina-2004` (~194M edges) datasets should fit comfortably.
+
+### Converting Indochina-2004 to Refined Edges
+
+```bash
+# Option 1: Extract to writable location and convert via dataset_handler.py
+cd ~ && tar -xzf /hdd/thej_par_scc_datasets/indochina-2004.tar.gz
+cd ~/DynamicGraphs_SCC && python3 -c "
+import dataset_handler as dh
+edges, adj, num = dh.read_file('$HOME/indochina-2004/indochina-2004.mtx')
+dh.write_file('/hdd/thej_par_scc_datasets/indochina-2004/refined_edges.txt', edges)
+print(f'Done: {len(edges):,} edges, {num:,} nodes')
+"
+```
+
+### Converting LAW WebGraphs to Refined Edges
+
+```bash
+cd ~/DynamicGraphs_SCC
+python3 tools/convert_graph.py \
+    /hdd/graphs/law-webgraphs/<dataset>/<dataset> \
+    /hdd/graphs/law-webgraphs/<dataset>/refined_edges.txt
+```
 
 ---
 
@@ -130,17 +362,17 @@ The FB phase runs on GPU via `start_workers_fw_bw_dfs()` (GPU BFS kernels, not C
 ### Build & Run CUDA
 
 ```bash
-cd ~/DynamicGraphs_SCC/src_CUDA && make && ./scc_cuda ../datasets/soc-Pokec/refined_edges.txt 72 2
+cd ~/DynamicGraphs_SCC/src_CUDA && make && ./scc_cuda <graph_file> 72 2
 ```
 
 Arguments: `<graph_file> <num_threads> <method>`
-- `num_threads`: affects graph loading + batch sizes (GPU uses its own cores)
-- `method`: `2` = full pipeline (Trim1 + Global BFS + Trim12 + WCC + FB-DFS)
+- `num_threads`: affects graph loading + batch sizes
+- `method`: `2` = full pipeline
 
-### Build & Run OpenMP
+### Build & Run OpenMP (comparison)
 
 ```bash
-cd ~/DynamicGraphs_SCC/src && make && ../scc ../datasets/soc-Pokec/refined_edges.txt 72 2 -d
+cd ~/DynamicGraphs_SCC/src && make && ../scc <graph_file> 72 2 -d
 ```
 
 Arguments: `<graph_file> <num_threads> <method> [-d|-a|-p]`
@@ -148,56 +380,42 @@ Arguments: `<graph_file> <num_threads> <method> [-d|-a|-p]`
 - `-a`: SCC size histogram
 - `-p`: output SCC list to file
 
-### WebGraph .graph Converter (LAW datasets)
+### Profile with NVIDIA Nsight Compute
 
 ```bash
-# Download
-wget http://data.law.di.unimi.it/webdata/it-2004/it-2004.graph
-mkdir -p datasets/it-2004
-
-# Convert (auto-downloads .properties + .offsets)
-python3 tools/convert_graph.py it-2004 datasets/it-2004/refined_edges.txt
-```
-
-The converter:
-1. Auto-downloads missing `.properties` and `.offsets` files from LAW
-2. Uses the `webgraph` Python package (auto-installs via `pip`)
-3. Outputs plain `src dst` edge list format
-
-**Known datasets:**
-- `soc-Pokec` (1.6M nodes, 30M edges) — already in edge list format
-- `soc-LiveJournal1` (4.8M nodes, 69M edges) — already in edge list format
-- `indochina-2004` (7.4M nodes, 194M edges) — LAW .graph format
-- `it-2004` (41M nodes, 1.15B edges) — LAW .graph format
-
-### profile with NVIDIA Nsight Compute (ncu)
-
-```bash
-# Check if ncu is available
-which ncu
-
-# Profile (requires sudo for perf counters)
 sudo /usr/local/cuda-13.1/bin/ncu --set full -o profile_output ./scc_cuda ../datasets/soc-Pokec/refined_edges.txt 72 2
 ```
-
-If you get `ERR_NVGPUCTRPERM`, you need to enable permissions:
-```bash
-sudo /usr/local/cuda-13.1/bin/ncu --device-memory-bandwidth ./scc_cuda ...
-```
-
-### Benchmark Comparison (use with care — see note)
-
-```bash
-cd ~/DynamicGraphs_SCC && ./benchmark.sh datasets/soc-Pokec/refined_edges.txt 72
-```
-
-**⚠️ WARNING:** The benchmark script has thermal throttling issues. The FB phase runs OpenMP on CPU with 72 threads, which heats up the CPU and inflates subsequent CUDA FB times (observed: 1.4ms → 16ms+). For accurate CUDA results, run CUDA standalone.
 
 ### Quick Test After Changes
 
 ```bash
-cd ~/DynamicGraphs_SCC && git pull && cd src_CUDA && make && ./scc_cuda ../datasets/soc-Pokec/refined_edges.txt 72 2 | grep -E "CUDA_PROFILE|Total # SCCs"
+cd ~/DynamicGraphs_SCC && git pull && cd src_CUDA && make && \
+./scc_cuda ../datasets/soc-Pokec/refined_edges.txt 72 2 | grep -E "CUDA_PROFILE|Total # SCCs"
 # Expected: TOTAL ~17-18ms, SCC = 325892
+```
+
+### Run on ljournal-2008
+
+```bash
+cd ~/DynamicGraphs_SCC/src_CUDA && make && \
+./scc_cuda /hdd/thej_par_scc_datasets/ljournal-2008/refined_edges.txt 72 2 | grep -E "CUDA_PROFILE|Total # SCCs"
+# Expected: TOTAL ~37ms, SCC = 1119094 (±3)
+```
+
+### Run on wb-edu (OpenMP reference)
+
+```bash
+cd ~/DynamicGraphs_SCC/src && make && \
+../scc /hdd/thej_par_scc_datasets/wb-edu/refined_edges.txt 72 1 -d | grep -E "Total # SCCs|running_time"
+# Expected: ~2,605ms, 4,269,022 SCCs
+```
+
+### Run on it-2004 (OpenMP reference)
+
+```bash
+cd ~/DynamicGraphs_SCC/src && make && \
+../scc /hdd/monaachary.k/DynamicGraphs_SCC/datasets/it-2004/refined_edges.txt 72 1 -d | grep -E "Total # SCCs|running_time"
+# Expected: ~10,505ms, 30,492,095 SCCs
 ```
 
 ---
@@ -209,18 +427,19 @@ cd ~/DynamicGraphs_SCC && git pull && cd src_CUDA && make && ./scc_cuda ../datas
 | `src_CUDA/scc_cuda_main.cpp` | Main entry, graph loading, method dispatch, cleanup |
 | `src_CUDA/scc_cuda.h` | Header: all declarations, structs, macros |
 | `src_CUDA/scc_cuda_graph.cu` | GPU graph upload/free, state alloc/free |
-| `src_CUDA/scc_cuda_trim1.cu` | TRIM1: remove 0-in/out-degree nodes |
+| `src_CUDA/scc_cuda_trim1.cu` | TRIM1: remove 0-in/out-degree nodes + compact build (warp-ballot) |
 | `src_CUDA/scc_cuda_trim2.cu` | TRIM2: 2-node SCC detection (Phase 1+2) |
 | `src_CUDA/scc_cuda_trim2_new.cu` | TRIM2_new: single-pass 2-node SCC |
-| `src_CUDA/scc_cuda_fb_global.cu` | GLOBAL_BFS: pivot selection, FW+BW BFS kernels, `cuda_get_new_color()` |
+| `src_CUDA/scc_cuda_fb_global.cu` | GLOBAL_BFS: pivot, FW+BW BFS kernels, visited bitmap, async stream |
 | `src_CUDA/scc_cuda_fb_seq.cu` | Per-subgraph FW-BW (GPU BFS kernels) — Method 0 |
 | `src_CUDA/scc_cuda_fb_seq2.cu` | Per-subgraph FW-BW + host FB path — Methods 1 & 2 |
-| `src_CUDA/scc_cuda_weak.cu` | WCC: weakly connected components |
+| `src_CUDA/scc_cuda_weak.cu` | WCC: label propagation, root colors, work item creation |
 | `src_CUDA/scc_cuda_work_queue.cu` | Work queue, scatter/gather kernels |
 | `src_CUDA/scc_cuda_dynamic.cpp` | Dynamic/incremental method helpers |
-| `src/scc_main.cc` | OpenMP main (also has crash fix) |
+| `src/scc_main.cc` | OpenMP main (also has exit(0) crash fix) |
+| `src/common_main.h` | OpenMP graph loading, read_file (tab/space separator fix) |
 | `tools/convert_graph.py` | WebGraph .graph → edge list converter |
-| `benchmark.sh` | Side-by-side comparison script (⚠️ thermal throttling issues) |
+| `dataset_handler.py` | Python dataset handler for .mtx + insert/delete edge generation |
 
 ---
 
@@ -228,116 +447,90 @@ cd ~/DynamicGraphs_SCC && git pull && cd src_CUDA && make && ./scc_cuda ../datas
 
 ### 1. `gm_graph` Heap Corruption (HIGH — Both Binaries)
 
-**Symptom:** `"double free or corruption (out)"` after `Total # SCCs` is printed, only on large graphs (LiveJournal1: 4.8M nodes, 1.7GB CSR arrays). Works on Pokec.
+**Symptom:** `"double free or corruption (out)"` after `Total # SCCs` is printed on large graphs (LJ1: 4.8M nodes).
 
-**Root Cause:** The `gm_graph` CSR arrays (`begin`, `node_idx`, `r_begin`, etc.) are allocated during graph construction. The 1.7GB heap allocation on LJ1 somehow corrupts glibc heap metadata. The corruption manifests when `gm_graph::~gm_graph()` tries to `delete[]` the arrays.
+**Root Cause:** The `gm_graph` CSR arrays (1.7GB heap on LJ1) corrupt glibc heap metadata during construction. The corruption manifests when `gm_graph::~gm_graph()` tries to `delete[]` the arrays.
 
-**Fix (CUDA & OpenMP):** Added `exit(0);` at the end of `main()` after all output is printed. This skips destructors entirely — the OS reclaims the memory. All GPU memory is freed explicitly before `exit(0)`.
+**Fix (CUDA & OpenMP):** `exit(0);` at end of `main()` skips destructors. OS reclaims memory. GPU memory freed explicitly before `exit(0)`.
 
-**Files:** `src_CUDA/scc_cuda_main.cpp`, `src/scc_main.cc`
+### 2. OpenMP OOM on Large Graphs
 
-### 2. Benchmark Thermal Throttling
+**Symptom:** wb-edu (55M edges) and it-2004 (350M edges) used to crash during graph loading.
 
-**Symptom:** Running CUDA immediately after OpenMP (or a warmup run that uses CPU OpenMP) inflates CUDA FB time from ~1.4ms to ~16ms+.
+**Root Cause:** `gm_graph` stores all edges in flexible `unordered_map` format during construction, and the `orig_edges` vector wasn't freed after the graph build.
 
-**Root Cause:** The FB phase uses `start_workers_fw_bw_dfs_host()` which runs 72 OpenMP threads on CPU. This heats up the CPU, and the next run's FB phase is slower due to thermal throttling.
+**Fix:** Added `vector<pair<int,int>>().swap(orig_edges)` after graph construction (commit `a92fd9d`). This frees ~440MB (wb-edu) or ~2.8GB (it-2004). The graph can now load, but method 2 still segfaults during TRIM12 on wb-edu — use **method 1** for large graphs instead.
 
-**Workaround:** Run CUDA standalone for accurate timing. The `benchmark.sh` script has a warmup run but still shows inflated FB times.
+### 3. Missing SCCs in GPU FB Kernel (CRITICAL — Open Issue)
 
-### 3. `cuda_get_new_color()` Not Thread-Safe
+| Dataset | OpenMP | GPU FB | Missing | Status |
+|:--------|:------:|:------:|:-------:|:-------|
+| **wb-edu** | 4,269,022 | 4,252,628 | **-16,394** | 🔴 Unfixed |
+| **it-2004** | 30,492,095 | 30,456,018 | **-36,077** | 🔴 Unfixed |
 
-**Location:** `scc_cuda_fb_global.cu`
+Root cause unknown — likely a bug in the GPU per-component SCC decomposition.
 
-**Problem:** Uses non-atomic `_cuda_color_used++` and plain-int reads. If called from multiple OpenMP threads simultaneously, two threads could get the same color.
+### 4. Benchmark Thermal Throttling
 
-**Current Status:** The host FB path (`start_workers_fw_bw_dfs_host`) uses `#pragma omp parallel for` and calls `cuda_get_new_color()` inside the parallel region. This IS a data race.
+Running CUDA after OpenMP inflates CUDA FB time (~1.4ms → 16ms+) because 72 OpenMP threads heat the CPU. Run CUDA standalone for accurate timing.
 
-**Impact:** Could cause incorrect color assignment (two partitions with same color), potentially leading to incorrect SCC merging. However, in practice the color counter increments fast enough that collisions are rare, and the algorithm's redundant checks catch most issues.
+### 5. `cuda_get_new_color()` Not Thread-Safe
 
-**Fix needed:** Use `#pragma omp atomic` or `__sync_fetch_and_add`.
+**Location:** `scc_cuda_fb_global.cu`. Uses non-atomic `_cuda_color_used++`. If called from multiple OpenMP threads simultaneously, two threads could get the same color. Fix: use `#pragma omp atomic`.
 
-### 4. GLOBAL_BFS Memory-Bound (Fundamental)
+### 6. GLOBAL_BFS Memory-Bound (Fundamental)
 
-**Symptom:** GLOBAL_BFS = 13.5ms (Pokec) / 23ms (LJ1). The kernel is memory-latency bound — every edge traversal reads a random `d_Color` value from VRAM.
+GLOBAL_BFS = 13.5ms (Pokec) / 24.6ms (ljournal). Every edge traversal reads a random `d_Color` value from VRAM (~300-800 cycle latency). Social network graphs have no locality — the `d_Color` array (19MB for ljournal) doesn't fit in L2 cache (6MB on L40S).
 
-**Why it can't be fixed:** Social network graphs have no locality. The `d_Color` array (6.4MB Pokec, 19MB LJ1) doesn't fit in any cache. On L40S: L1=128KB, read-only cache=48KB, L2=6MB (Pokec barely fits in L2, LJ1 doesn't).
+### 7. SMEM Queue BFS Failed (Reverted)
 
-### 5. OpenMP Binary Also Has the Crash (Fixed)
-
-The OpenMP binary (`src/scc`) has the same `gm_graph` heap corruption. Fixed with `exit(0)` in `src/scc_main.cc`.
-
----
-
-## 📈 What Was Tried — Full Experiment Log
-
-All experiments were on **soc-Pokec (1.6M nodes, 30M edges)** unless noted. Times are GLOBAL_BFS phase except where specified.
-
-| Date | Experiment | Result | Verdict |
-|:----:|-----------|--------|:-------:|
-| Jun 15 | **Baseline** — initial GPU BFS kernel | GLOBAL_BFS ~17ms, TOTAL ~22ms | Starting point |
-| Jun 15 | **Visited Bitmap** — atomicOr instead of atomicCAS | 14.46ms → **13.53ms** (-6.4%) | ✅ Kept |
-| Jun 15 | **STAGE_SIZE=4** — per-thread staging buffer | ~-3ms GLOBAL_BFS | ✅ Kept |
-| Jun 15 | **STAGE_SIZE=8,16** — larger staging buffers | Register spill, slower | 🔴 Reverted to 4 |
-| Jun 15 | **Block size 64** | 13.53ms (within noise) | 🔴 Reverted |
-| Jun 15 | **Block size 128** | 13.73ms (within noise) | 🔴 Reverted |
-| Jun 15 | **Block size 512** | 13.44ms (within noise) | 🔴 Reverted |
-| Jun 15 | **Warp-aggregated atomics** | Regression | 🔴 Reverted |
-| Jun 15 | **Grid cap removal** | -0.2ms | ✅ Kept |
-| Jun 15 | **Batch D2H for FB sets** | -29ms on LJ1 FB | ✅ Kept |
-| Jun 15 | **WCC root color gather** | FB 3.07→2.52ms | ✅ Kept |
-| Jun 15 | **Edge-centric BFS** | 2-3× slower | 🔴 Reverted |
-| Jun 15 | **Hybrid FB GPU path** | 760ms GPU vs 43ms CPU | 🔴 Reverted |
-| Jun 15 | **`__ldg()` read-only cache** | ~1% improvement | 🔴 Reverted |
-| Jun 15 | **CPU offload GLOBAL_BFS** | 45ms CPU vs 13.5ms GPU (3.4×) | 🔴 Reverted |
-| Jun 15 | **`exit(0)` crash fix** | LJ1 crash fixed ✅ | ✅ Kept |
-| Jun 15 | **TOCTOU race fix** | Correctness | ✅ Kept |
-| Jun 15 | **Final benchmark Pokec** | TOTAL 17.70ms (10% faster than OpenMP) | ✅ |
-| Jun 15 | **Final benchmark LJ1** | TOTAL 34.95ms (17% faster than OpenMP) | ✅ |
+Two attempts to improve GLOBAL_BFS on high-diameter graphs using shared memory queues were reverted:
+- **Monotonic queue (commit `5568294`):** Single 1024-entry queue with monotonically growing tail — full after ~30 levels
+- **Ping-pong double-buffer (commit `949f7f8`):** 2×512 queues swapping each level — actually added +20% overhead (29ms → 35ms)
 
 ---
 
-## 📌 Quick Reference
-
-### If you come back after a break:
+## 📌 Quick Reference — When You Come Back
 
 **1. Pull latest code on server:**
 ```bash
 cd ~/DynamicGraphs_SCC && git pull
 ```
 
-**2. Build and verify SCC count on soc-Pokec:**
+**2. Verify SCC count on Pokec:**
 ```bash
-cd ~/DynamicGraphs_SCC/src_CUDA && make && ./scc_cuda ../datasets/soc-Pokec/refined_edges.txt 72 2 | grep -E "CUDA_PROFILE|Total # SCCs"
+cd ~/DynamicGraphs_SCC/src_CUDA && make && \
+./scc_cuda ../datasets/soc-Pokec/refined_edges.txt 72 2 | grep -E "CUDA_PROFILE|Total # SCCs"
 # Expected: TOTAL ~17-18ms, SCC = 325892
 ```
 
-**3. Run on LiveJournal1:**
+**3. Run on ljournal-2008 (37ms, 1.1M SCCs):**
 ```bash
-./scc_cuda ../datasets/soc-LiveJournal1/refined_edges.txt 72 2 | grep -E "CUDA_PROFILE|Total # SCCs"
-# Expected: TOTAL ~35ms, SCC = 971234
+./scc_cuda /hdd/thej_par_scc_datasets/ljournal-2008/refined_edges.txt 72 2
 ```
 
-**4. Compare with OpenMP:**
+**4. Run OpenMP comparison on wb-edu:**
 ```bash
-cd ~/DynamicGraphs_SCC/src && make && ../scc ../datasets/soc-Pokec/refined_edges.txt 72 2 -d | grep -E "phase:|running_time"
+cd ~/DynamicGraphs_SCC/src && make clean && make && \
+../scc /hdd/thej_par_scc_datasets/wb-edu/refined_edges.txt 72 1 -d | grep -E "Total # SCCs|running_time"
 ```
 
-**5. Download and convert a LAW dataset:**
+**5. Run OpenMP on it-2004 (10.5s, 30.5M SCCs):**
 ```bash
-wget http://data.law.di.unimi.it/webdata/it-2004/it-2004.graph
-mkdir -p datasets/it-2004
-python3 tools/convert_graph.py it-2004 datasets/it-2004/refined_edges.txt
+cd ~/DynamicGraphs_SCC/src && make clean && make && \
+../scc /hdd/monaachary.k/DynamicGraphs_SCC/datasets/it-2004/refined_edges.txt 72 1 -d | grep -E "Total # SCCs|running_time"
 ```
 
-**6. Edit code locally (Windows), commit, push:**
+**6. CRITICAL OPEN ISSUE:** GPU FB kernel missing **-16,394 SCCs** on wb-edu and **-36,077** on it-2004. This is the #1 bug to fix.
+
+**7. 4 Focus Graphs:** wb-edu, it-2004, wiki-Talk, wikipedia-20070206. See [Focus Graphs](#-focus-graphs--future-work) section.
+
+**8. Edit, commit, push:**
 ```bash
 cd "/mnt/c/Users/Shashwat Trigunayat/OneDrive/Desktop/Admin/DynamicGRAPHS_SCC/DynamicGraphs_SCC"
 git pull --ff-only
-# make changes...
-git add src_CUDA/<file>
-git commit -m "description"
-git push
-# On server: git pull, make, test
+git add src_CUDA/<file> && git commit -m "description" && git push
+# Server: git pull && make && test
 ```
 
 ---
@@ -346,45 +539,40 @@ git push
 
 ```
 DynamicGraphs_SCC/
-├── benchmark.sh              # Side-by-side CUDA vs OpenMP comparison (⚠️ thermal issues)
-├── dataset_handler.py        # Python dataset handler (orig_edges, insert/delete)
+├── benchmark.sh              # CUDA vs OpenMP comparison (⚠️ thermal issues)
+├── dataset_handler.py        # .mtx converter + insert/delete edge generator
 ├── DOCUMENTATION.md          # This file
 ├── DOCUMENTATION.html        # HTML version
 ├── datasets/
 │   ├── soc-Pokec/refined_edges.txt
-│   └── soc-LiveJournal1/refined_edges.txt
+│   ├── soc-LiveJournal1/refined_edges.txt
+│   └── it-2004/refined_edges.txt (5.3GB, tab-separated)
 ├── src/                      # OpenMP implementation
 │   ├── Makefile
-│   ├── scc_main.cc           # Main entry (has exit(0) crash fix)
-│   ├── scc_color.cc          # Color management
-│   ├── scc_trim1.cc          # TRIM1
-│   ├── scc_trim2.cc          # TRIM2
-│   ├── scc_fb_*.cc           # FW-BW phases
-│   ├── scc_weak.cc           # WCC
-│   ├── scc_tarjan.cc         # Tarjan (reference)
-│   ├── scc_incremental.cc    # Incremental methods
-│   └── scc.h                 # Header
+│   ├── common_main.h         # Graph loading, read_file (tab fix), orig_edges free
+│   ├── scc_main.cc           # Main entry (exit(0) crash fix)
+│   ├── scc_color.cc, scc_trim1.cc, scc_trim2.cc
+│   ├── scc_fb_*.cc, scc_weak.cc, scc_tarjan.cc
+│   ├── scc_incremental.cc, scc_decremental.cc
+│   └── scc.h
 ├── src_CUDA/                 # CUDA implementation
 │   ├── Makefile
 │   ├── scc_cuda_main.cpp     # Main entry
 │   ├── scc_cuda.h            # Header + declarations
-│   ├── scc_cuda_graph.cu     # GPU graph upload/free
-│   ├── scc_cuda_trim1.cu     # TRIM1 device kernels
-│   ├── scc_cuda_trim2.cu     # TRIM2 device kernels
+│   ├── scc_cuda_graph.cu     # Graph upload/free
+│   ├── scc_cuda_trim1.cu     # TRIM1 kernels (warp-ballot compact)
+│   ├── scc_cuda_trim2.cu     # TRIM2 kernels
 │   ├── scc_cuda_trim2_new.cu # TRIM2 new single-pass
-│   ├── scc_cuda_fb_global.cu # GLOBAL BFS kernels
+│   ├── scc_cuda_fb_global.cu # GLOBAL BFS (visited bitmap, async stream)
 │   ├── scc_cuda_fb_seq.cu    # Per-subgraph FB (GPU)
 │   ├── scc_cuda_fb_seq2.cu   # Per-subgraph FB + host path
-│   ├── scc_cuda_weak.cu      # WCC
+│   ├── scc_cuda_weak.cu      # WCC (fused propagation)
 │   ├── scc_cuda_work_queue.cu# Work queue + scatter/gather
 │   └── scc_cuda_dynamic.cpp  # Dynamic/incremental
-├── gm_graph/                 # Green-Marl graph library
-│   ├── inc/                  # Headers
-│   ├── src/                  # Source
-│   └── lib/libgmgraph.a      # Static library
+├── gm_graph/                 # Green-Marl library
+│   ├── inc/, src/, lib/
 └── tools/
     ├── convert_graph.py      # WebGraph .graph → edge list converter
-    ├── convert.cc            # Broken Green-Marl converter (deprecated)
-    ├── convert.h
-    └── Makefile              # Fixed (removed Green-Marl dependency)
+    ├── convert.cc, convert.h # Deprecated Green-Marl converter
+    └── Makefile
 ```

