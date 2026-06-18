@@ -173,13 +173,13 @@ __global__ void gpu_fb_batch_kernel(
         __syncthreads();
 
         // Swap frontiers (cap at GPU_FB_MAX_SMEM_NODES to prevent OOB SMEM reads)
-        // NOTE: use swap_idx = threadIdx.x to force a FRESH register read.
-        // The compiler reuses the loop's fi*4 register for tid*4 in the frontier
-        // swap, causing reads from the wrong smem_next entry and garbage indices
-        // in the next BFS level. Computing swap_idx separately fixes this.
+        // CRITICAL: volatile swap_idx prevents the compiler from reusing a stale
+        // register from the BFS loop body for the frontier swap index. The compiler
+        // reuses the loop's fi*4 register for tid*4, causing reads from the wrong
+        // smem_next entry and garbage indices in the next BFS level.
         int ncnt = smem_ncount;
         if (ncnt > GPU_FB_MAX_SMEM_NODES) ncnt = GPU_FB_MAX_SMEM_NODES;
-        int swap_idx = threadIdx.x;
+        volatile int swap_idx = threadIdx.x;
         if (ncnt > 0 && swap_idx < ncnt) smem_frontier[swap_idx] = smem_next[swap_idx];
         if (tid == 0) smem_fsize = ncnt;
         __syncthreads();
@@ -248,7 +248,7 @@ __global__ void gpu_fb_batch_kernel(
 
         int ncnt = smem_ncount;
         if (ncnt > GPU_FB_MAX_SMEM_NODES) ncnt = GPU_FB_MAX_SMEM_NODES;
-        int swap_idx = threadIdx.x;
+        volatile int swap_idx = threadIdx.x;
         if (ncnt > 0 && swap_idx < ncnt) smem_frontier[swap_idx] = smem_next[swap_idx];
         if (tid == 0) smem_fsize = ncnt;
         __syncthreads();
