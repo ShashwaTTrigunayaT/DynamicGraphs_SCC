@@ -594,9 +594,9 @@ double run_gpu_fb(GPUState& st, const GPUGraph& g, int num_threads)
                                (h_num_out + 1) * sizeof(int), cudaMemcpyHostToDevice));
 
         // Launch bulk scatter: one block per sub-component, chunked for max grid
-        int max_grid = 65535;
-        for (int ch = 0; ch < h_num_out; ch += max_grid) {
-            int n = min(max_grid, h_num_out - ch);
+        int scatter_max_grid = 65535;
+        for (int ch = 0; ch < h_num_out; ch += scatter_max_grid) {
+            int n = min(scatter_max_grid, h_num_out - ch);
             bulk_scatter_single_color_kernel<<<n, block_size>>>(
                 st.d_Color, d_in_nodes, (int)cur.nodes.size(),
                 d_out_sizes + ch, d_out_colors + ch, n,
