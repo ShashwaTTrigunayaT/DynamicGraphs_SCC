@@ -39,10 +39,10 @@ static int  d_bulk_off_cap = 0;
 //   [3*MAX+MAX/2+2]            : smem_fw_color (int)  — fw color [0]
 //   [3*MAX+MAX/2+3]            : smem_bw_color (int)  — bw color [0]
 //   [3*MAX+MAX/2+4]            : smem_next_count (int)— next count [0]
-//   [3*MAX+MAX/2+5..]          : warp_sums (int)      — warp reduction sums
+//   [3*MAX+MAX/2+5..]          : warp_sums (int)      — warp reduction sums (max 32 warps × 3)
 //
-// Layout bytes = MAX*14 + 5*4 + 8*3*4 = MAX*14 + 20 + 96
-// For MAX=2048: 28672 + 20 + 96 = 28788 bytes < 48KB ✓
+// Layout bytes = MAX*3*4 + MAX*2*1 + (5+32*3)*4 = MAX*14 + 404
+// For MAX=2048: 28672 + 404 = 29076 bytes < 48KB ✓
 // ======================================================================
 __global__ void gpu_fb_batch_kernel(
     const edge_t* __restrict__ d_begin,
@@ -304,32 +304,21 @@ __global__ void gpu_fb_batch_kernel(
     }
 
     // ================================================================
-    // Write sub-component descriptors to output
+    // Write sub-component descriptors to output (exact slot count)
     // ================================================================
     // We don't write the actual node IDs here — the host will scatter them
     // using a single pre-allocated buffer, avoiding per-component cudaMalloc.
     if (tid == 0) {
-        // We need to write (size, color) triplets to output.
-        // But d_out_comp_color and d_out_comp_size are indexed by output component.
-        // We'll write them sequentially using atomic add.
-        if (local_fw > 0) {
-            int idx = atomicAdd(d_num_out, 3);  // reserve 3 slots
-            d_out_comp_size[idx]     = local_fw;
-            d_out_comp_color[idx]    = fw_color;
-            d_out_comp_size[idx + 1] = local_bw;
-            d_out_comp_color[idx + 1] = bw_color;
-            d_out_comp_size[idx + 2] = local_base;
-            d_out_comp_color[idx + 2] = base_color;
-        } else if (local_bw > 0) {
-            int idx = atomicAdd(d_num_out, 2);  // reserve 2 slots
-            d_out_comp_size[idx]     = local_bw;
-            d_out_comp_color[idx]    = bw_color;
-            d_out_comp_size[idx + 1] = local_base;
-            d_out_comp_color[idx + 1] = base_color;
-        } else if (local_base > 0) {
-            int idx = atomicAdd(d_num_out, 1);
-            d_out_comp_size[idx] = local_base;
-            d_out_comp_color[idx] = base_color;
+        // Count how many non-zero sub-components we actually have
+        int slots = (local_fw > 0 ? 1 : 0)
+                  + (local_bw > 0 ? 1 : 0)
+                  + (local_base > 0 ? 1 : 0);
+        if (slots > 0) {
+            int idx = atomicAdd(d_num_out, slots);
+            int i = idx;
+            if (local_fw   > 0) { d_out_comp_size[i] = local_fw;   d_out_comp_color[i] = fw_color;   i++; }
+            if (local_bw   > 0) { d_out_comp_size[i] = local_bw;   d_out_comp_color[i] = bw_color;   i++; }
+            if (local_base > 0) { d_out_comp_size[i] = local_base; d_out_comp_color[i] = base_color; i++; }
         }
     }
 }
@@ -499,13 +488,11 @@ double run_gpu_fb(GPUState& st, const GPUGraph& g, int num_threads)
     alloc_grow();
 
     // ---- SMEM size ----
-    int num_warps_smem = (block_size + 31) / 32;
-    int warp_sums_size = num_warps_smem * 3 * sizeof(int);
-    int smem_size = GPU_FB_MAX_SMEM_NODES * (3 * sizeof(int))  // nodes, frontier, next
-                  + GPU_FB_MAX_SMEM_NODES * 2                   // fw_flag, bw_flag (char)
-                  + 5 * sizeof(int)                             // shared scalars
-                  + warp_sums_size;                             // warp sums (dynamic)
-    // = 2048*(12+2) + 20 + 8*3*4 = 28692 + 96 = 28788 bytes < 48KB ✓
+    // smem_shared: 5 scalars + warp_sums (up to 32 warps × 3 counters = 96 ints max)
+    int smem_shared_ints = 5 + 32 * 3;  // max possible warps for safety
+    int smem_size = GPU_FB_MAX_SMEM_NODES * (3 * sizeof(int) + 2 * sizeof(char))
+                  + smem_shared_ints * sizeof(int);
+    // = 2048*(12+2) + (5+96)*4 = 28672 + 404 = 29076 bytes < 48KB ✓
 
     // ---- Iterative processing ----
     int total_levels = 0;
