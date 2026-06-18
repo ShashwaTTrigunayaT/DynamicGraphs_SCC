@@ -86,7 +86,7 @@ int main(int argc, char** argv)
         // ---- Static methods (0-4): load directly ----
         if (met_algo_original == 0 || met_algo_original == 1 ||
             met_algo_original == 2 || met_algo_original == 3 ||
-            met_algo_original == 4)
+            met_algo_original == 4 || met_algo_original == 22)
         {
             // OpenMP: int num_vertices = read_file(fname, orig_edges);
             //         for (int i = 0; i < num_vertices; i++) G.add_node();
