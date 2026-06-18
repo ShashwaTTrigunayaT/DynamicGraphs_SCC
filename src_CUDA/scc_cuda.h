@@ -10,6 +10,7 @@
 #include <queue>
 #include <vector>
 #include <cuda_runtime.h>
+#include <cooperative_groups.h>
 
 // Forward declaration of gm_graph (used as reference parameter in dynamic helpers)
 // Full definition is in gm.h, included by the .cpp files that instantiate these
@@ -268,6 +269,10 @@ extern int* d_bfs_bw_count;
 extern uint32_t* d_bfs_visited_bits;
 extern int       d_bfs_visited_words;
 
+// Persistent-thread BFS counters (cooperative kernel, replaces level-by-level loop)
+extern int* d_bfs_cur_count;    // [1] current level size (ping-pong counter)
+extern int* d_bfs_total_fw;     // [1] total FW count accumulator
+
 // Pinned host memory + stream for async BFS level loop (pinned = faster D2H)
 extern int* h_pinned_next_count;
 extern int* h_pinned_scc_count;
@@ -293,6 +298,25 @@ extern __global__ void bw_bfs_level_kernel(
     int* d_Color, int* d_SCC,
     const int* d_queue, int queue_size,
     int* d_next_queue, int* d_next_count,
+    int fw_color, int bw_color, int base_color, node_t pivot,
+    int* d_scc_count, int* d_bw_count,
+    uint32_t* d_visited_bits);
+
+// Persistent-thread cooperative kernels (replace old level-by-level BFS loop)
+extern __global__ void fw_bfs_persistent_kernel(
+    const edge_t* d_begin, const node_t* d_node_idx,
+    int* d_Color,
+    int* d_queue_a, int* d_queue_b,
+    int* d_count_a, int* d_count_b,
+    int fw_color, int base_color,
+    uint32_t* d_visited_bits,
+    int* d_total_fw);
+
+extern __global__ void bw_bfs_persistent_kernel(
+    const edge_t* d_r_begin, const node_t* d_r_node_idx,
+    int* d_Color, int* d_SCC,
+    int* d_queue_a, int* d_queue_b,
+    int* d_count_a, int* d_count_b,
     int fw_color, int bw_color, int base_color, node_t pivot,
     int* d_scc_count, int* d_bw_count,
     uint32_t* d_visited_bits);

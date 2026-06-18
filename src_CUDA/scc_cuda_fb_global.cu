@@ -1,5 +1,7 @@
 #include "scc_cuda.h"
 
+namespace cg = cooperative_groups;
+
 // ======================================================================
 // Device-side global state: analogs of OpenMP static globals
 // ======================================================================
@@ -40,6 +42,11 @@ int d_bfs_visited_words = 0;
 // Persistent scratch buffers to avoid cudaMalloc/cudaFree in hot BFS path
 int* d_pivot_scratch    = NULL;  // [1] temp for pivot selection
 int* d_remain_scratch   = NULL;  // [1] temp for remaining count
+
+// Persistent thread BFS counters (cooperative kernel, replaces level-by-level loop)
+// d_bfs_next_count doubles as one of the two ping-pong counters
+int* d_bfs_cur_count    = NULL;  // [1] current level size (other ping-pong counter)
+int* d_bfs_total_fw     = NULL;  // [1] total FW count accumulator
 
 // Pinned host memory + stream for async BFS level loop
 // Pinned memory enables faster D2H transfers (avoids staging buffer)
@@ -127,6 +134,12 @@ void initialize_global_fb(int num_nodes)
     if (!d_pivot_scratch)  CUDA_CHECK(cudaMalloc(&d_pivot_scratch,  sizeof(int)));
     if (!d_remain_scratch) CUDA_CHECK(cudaMalloc(&d_remain_scratch, sizeof(int)));
 
+    // Allocate persistent-thread BFS counters (cooperative kernel)
+    if (d_bfs_cur_count) cudaFree(d_bfs_cur_count);
+    if (d_bfs_total_fw)  cudaFree(d_bfs_total_fw);
+    CUDA_CHECK(cudaMalloc(&d_bfs_cur_count, sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_bfs_total_fw,  sizeof(int)));
+
     // Allocate pinned host memory for async D2H copies (faster D2H, no staging)
     if (!h_pinned_next_count) CUDA_CHECK(cudaMallocHost(&h_pinned_next_count, sizeof(int)));
     if (!h_pinned_scc_count)  CUDA_CHECK(cudaMallocHost(&h_pinned_scc_count,  sizeof(int)));
@@ -160,6 +173,10 @@ void finalize_global_fb()
     // Free persistent scratch buffers
     if (d_pivot_scratch)  { cudaFree(d_pivot_scratch);  d_pivot_scratch = NULL; }
     if (d_remain_scratch) { cudaFree(d_remain_scratch); d_remain_scratch = NULL; }
+
+    // Free persistent-thread BFS counters
+    if (d_bfs_cur_count) { cudaFree(d_bfs_cur_count); d_bfs_cur_count = NULL; }
+    if (d_bfs_total_fw)  { cudaFree(d_bfs_total_fw);  d_bfs_total_fw = NULL; }
 
     // Free pinned memory and destroy stream
     if (h_pinned_next_count) { cudaFreeHost(h_pinned_next_count); h_pinned_next_count = NULL; }
@@ -415,6 +432,175 @@ __global__ void bw_bfs_level_kernel(
 }
 
 // ======================================================================
+// Persistent-thread FW BFS kernel
+// Replaces the host-side level loop with a single cooperative kernel launch.
+// Uses cg::this_grid().sync() for global barriers between levels,
+// eliminating per-level kernel launch overhead on high-diameter graphs.
+// ======================================================================
+__global__ void fw_bfs_persistent_kernel(
+    const edge_t* d_begin, const node_t* d_node_idx,
+    int* d_Color,
+    int* d_queue_a, int* d_queue_b,
+    int* d_count_a, int* d_count_b,
+    int fw_color, int base_color,
+    uint32_t* d_visited_bits,
+    int* d_total_fw)
+{
+    cg::grid_group grid = cg::this_grid();
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+
+    const int STAGE_SIZE = 4;
+    int staged[STAGE_SIZE];
+    int staged_cnt = 0;
+
+#define FW_FLUSH(next_q, next_cnt) do {                                    \
+    if (staged_cnt > 0) {                                                   \
+        int base = atomicAdd(next_cnt, staged_cnt);                         \
+        for (int _j = 0; _j < staged_cnt; _j++)                             \
+            next_q[base + _j] = staged[_j];                                 \
+        staged_cnt = 0;                                                      \
+    }                                                                        \
+} while(0)
+
+    int* cur_q  = d_queue_a;
+    int* nxt_q  = d_queue_b;
+    int* cur_cnt = d_count_a;
+    int* nxt_cnt = d_count_b;
+
+    while (true) {
+        __shared__ int s_cur_size;
+        if (threadIdx.x == 0) s_cur_size = *cur_cnt;
+        __syncthreads();
+        int cur_size = s_cur_size;
+
+        if (cur_size == 0) break;
+
+        // Reset next count (block 0, thread 0 — covered by grid sync)
+        if (blockIdx.x == 0 && threadIdx.x == 0) *nxt_cnt = 0;
+        grid.sync();
+
+        // Process frontier
+        for (int i = tid; i < cur_size; i += stride) {
+            node_t t = cur_q[i];
+            for (edge_t nx = d_begin[t]; nx < d_begin[t + 1]; nx++) {
+                node_t k = d_node_idx[nx];
+                if (d_Color[k] == base_color) {
+                    int word = k >> 5;
+                    uint32_t bit = 1u << (k & 31);
+                    uint32_t old = atomicOr(&d_visited_bits[word], bit);
+                    if ((old & bit) == 0) {
+                        d_Color[k] = fw_color;
+                        staged[staged_cnt++] = k;
+                        if (staged_cnt == STAGE_SIZE)
+                            FW_FLUSH(nxt_q, nxt_cnt);
+                    }
+                }
+            }
+        }
+        FW_FLUSH(nxt_q, nxt_cnt);
+        grid.sync();
+
+        // Accumulate total (block 0, thread 0)
+        if (blockIdx.x == 0 && threadIdx.x == 0)
+            atomicAdd(d_total_fw, *nxt_cnt);
+
+        // Ping-pong swap
+        int* tmp = cur_q; cur_q = nxt_q; nxt_q = tmp;
+        tmp = cur_cnt; cur_cnt = nxt_cnt; nxt_cnt = tmp;
+    }
+#undef FW_FLUSH
+}
+
+// ======================================================================
+// Persistent-thread BW BFS kernel
+// Same cooperative approach as FW BFS, but with SCC/BW color dispatch.
+// On claiming a fw_color node → SCC_FOUND. On base_color → bw_color.
+// ======================================================================
+__global__ void bw_bfs_persistent_kernel(
+    const edge_t* d_r_begin, const node_t* d_r_node_idx,
+    int* d_Color, int* d_SCC,
+    int* d_queue_a, int* d_queue_b,
+    int* d_count_a, int* d_count_b,
+    int fw_color, int bw_color, int base_color, node_t pivot,
+    int* d_scc_count, int* d_bw_count,
+    uint32_t* d_visited_bits)
+{
+    cg::grid_group grid = cg::this_grid();
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+
+    const int STAGE_SIZE = 4;
+    int staged[STAGE_SIZE];
+    int staged_cnt = 0;
+    int local_scc = 0;
+    int local_bw = 0;
+
+#define BW_FLUSH(next_q, next_cnt) do {                                    \
+    if (staged_cnt > 0) {                                                   \
+        int base = atomicAdd(next_cnt, staged_cnt);                         \
+        for (int _j = 0; _j < staged_cnt; _j++)                             \
+            next_q[base + _j] = staged[_j];                                 \
+        staged_cnt = 0;                                                      \
+    }                                                                        \
+} while(0)
+
+    int* cur_q  = d_queue_a;
+    int* nxt_q  = d_queue_b;
+    int* cur_cnt = d_count_a;
+    int* nxt_cnt = d_count_b;
+
+    while (true) {
+        __shared__ int s_cur_size;
+        if (threadIdx.x == 0) s_cur_size = *cur_cnt;
+        __syncthreads();
+        int cur_size = s_cur_size;
+
+        if (cur_size == 0) break;
+
+        if (blockIdx.x == 0 && threadIdx.x == 0) *nxt_cnt = 0;
+        grid.sync();
+
+        for (int i = tid; i < cur_size; i += stride) {
+            node_t t = cur_q[i];
+            for (edge_t nx = d_r_begin[t]; nx < d_r_begin[t + 1]; nx++) {
+                node_t k = d_r_node_idx[nx];
+                int k_color = d_Color[k];
+                if (k_color == fw_color || k_color == base_color) {
+                    int word = k >> 5;
+                    uint32_t bit = 1u << (k & 31);
+                    uint32_t old = atomicOr(&d_visited_bits[word], bit);
+                    if ((old & bit) == 0) {
+                        if (k_color == fw_color) {
+                            d_Color[k] = SCC_FOUND;
+                            d_SCC[k] = pivot;
+                            local_scc++;
+                        } else {
+                            d_Color[k] = bw_color;
+                            local_bw++;
+                        }
+                        staged[staged_cnt++] = k;
+                        if (staged_cnt == STAGE_SIZE)
+                            BW_FLUSH(nxt_q, nxt_cnt);
+                    }
+                }
+            }
+        }
+        BW_FLUSH(nxt_q, nxt_cnt);
+        grid.sync();
+
+        // Swap ping-pong buffers
+        int* tmp = cur_q; cur_q = nxt_q; nxt_q = tmp;
+        tmp = cur_cnt; cur_cnt = nxt_cnt; nxt_cnt = tmp;
+    }
+
+    // Flush local SCC/BW counters
+    if (local_scc > 0) atomicAdd(d_scc_count, local_scc);
+    if (local_bw > 0) atomicAdd(d_bw_count, local_bw);
+#undef BW_FLUSH
+}
+
+// ======================================================================
 // pick_pivot_kernel()
 // OpenMP: pivot = choose_pivot_from_color(G, base_color);
 // Parallel: each thread checks one target, uses atomicMin for race-safe write
@@ -591,65 +777,57 @@ int do_global_fw_bw_main(GPUState& st, const GPUGraph& g,
     int bw_color = cuda_get_new_color();
 
     // ---------------------------------------------------------------
-    // Forward BFS
+    // Forward BFS (persistent-thread cooperative kernel)
+    // Replaces the old level-by-level host loop with a single cooperative
+    // launch using grid.sync() barriers between BFS levels.
     // OpenMP:
     //   fw_trim_global FW_BFS(G, base_color, fw_color);
     //   FW_BFS.prepare(pivot, gm_rt_get_num_threads());
     //   FW_BFS.do_bfs_forward();
     //   int fw_count = FW_BFS.get_fw_count();
     // ---------------------------------------------------------------
-    int queue_size = 1;
-    CUDA_CHECK(cudaMemcpyAsync(d_bfs_queue, &h_pivot, sizeof(int),
-                                cudaMemcpyHostToDevice, bfs_stream));
-    CUDA_CHECK(cudaMemcpyAsync(&st.d_Color[h_pivot], &fw_color, sizeof(int),
-                                cudaMemcpyHostToDevice, bfs_stream));
-    CUDA_CHECK(cudaStreamSynchronize(bfs_stream));
+    int tmp_one = 1, tmp_zero = 0;
+    CUDA_CHECK(cudaMemcpy(d_bfs_queue, &h_pivot, sizeof(int),
+                           cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(&st.d_Color[h_pivot], &fw_color, sizeof(int),
+                           cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_bfs_next_count, &tmp_one, sizeof(int),
+                           cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemset(d_bfs_cur_count, 0, sizeof(int)));
+    CUDA_CHECK(cudaMemset(d_bfs_total_fw, 0, sizeof(int)));
 
-    int total_fw = 1;  // pivot counted
+    // Query max blocks for cooperative launch (all blocks must be resident)
+    int fw_max_blocks;
+    cudaOccupancyMaxActiveBlocksPerMultiprocessor(&fw_max_blocks,
+        fw_bfs_persistent_kernel, block_size, 0);
+    int fw_grid = min(fw_max_blocks * 142, (num_targets + block_size - 1) / block_size);
+    fw_grid = max(fw_grid, 1);
 
-    while (queue_size > 0) {
-        CUDA_CHECK(cudaMemsetAsync(d_bfs_next_count, 0, sizeof(int), bfs_stream));
+    void* fw_args[] = {
+        (void*)&g.d_begin, (void*)&g.d_node_idx, (void*)&st.d_Color,
+        (void*)&d_bfs_queue, (void*)&d_bfs_next_queue,
+        (void*)&d_bfs_next_count, (void*)&d_bfs_cur_count,
+        (void*)&fw_color, (void*)&base_color,
+        (void*)&d_bfs_visited_bits, (void*)&d_bfs_total_fw
+    };
+    CUDA_CHECK(cudaLaunchCooperativeKernel((void*)fw_bfs_persistent_kernel,
+        fw_grid, block_size, fw_args));
+    CUDA_CHECK(cudaDeviceSynchronize());
 
-        int grid = (queue_size + block_size - 1) / block_size;
-
-        fw_bfs_level_kernel<<<grid, block_size, 0, bfs_stream>>>(
-            g.d_begin, g.d_node_idx,
-            st.d_Color,
-            d_bfs_queue, queue_size,
-            d_bfs_next_queue, d_bfs_next_count,
-            fw_color, base_color,
-            d_bfs_visited_bits);
-
-        // Async D2H copy — starts as soon as kernel completes on stream
-        CUDA_CHECK(cudaMemcpyAsync(h_pinned_next_count, d_bfs_next_count,
-                                    sizeof(int), cudaMemcpyDeviceToHost, bfs_stream));
-
-        // Single sync point instead of DeviceSynchronize + blocking Memcpy
-        CUDA_CHECK(cudaStreamSynchronize(bfs_stream));
-
-        int* tmp = d_bfs_queue;
-        d_bfs_queue = d_bfs_next_queue;
-        d_bfs_next_queue = tmp;
-
-        queue_size = *h_pinned_next_count;
-        total_fw += queue_size;
-    }
-
-    // OpenMP: int fw_count = FW_BFS.get_fw_count();
-    int fw_count = total_fw;
+    int h_total_fw;
+    CUDA_CHECK(cudaMemcpy(&h_total_fw, d_bfs_total_fw, sizeof(int),
+                           cudaMemcpyDeviceToHost));
+    int fw_count = h_total_fw + 1;  // +1 for pivot
 
     // ---------------------------------------------------------------
     // Reset visited bitmap between FW and BW BFS
-    // FW BFS set bits for all FW-reachable nodes; BW BFS needs a clean bitmap
-    // for claiming SCC/bw-set nodes (tiny 200KB memset, ~0.01ms)
+    // (tiny 200KB memset, ~0.01ms)
     // ---------------------------------------------------------------
-    CUDA_CHECK(cudaMemsetAsync(d_bfs_visited_bits, 0,
-                                d_bfs_visited_words * sizeof(uint32_t),
-                                bfs_stream));
-    CUDA_CHECK(cudaStreamSynchronize(bfs_stream));
+    CUDA_CHECK(cudaMemset(d_bfs_visited_bits, 0,
+                           d_bfs_visited_words * sizeof(uint32_t)));
 
     // ---------------------------------------------------------------
-    // Backward BFS
+    // Backward BFS (persistent-thread cooperative kernel)
     // OpenMP:
     //   bw_trim_global BW_BFS(G, base_color, fw_color, bw_color, pivot);
     //   BW_BFS.prepare(pivot, gm_rt_get_num_threads());
@@ -662,51 +840,42 @@ int do_global_fw_bw_main(GPUState& st, const GPUGraph& g,
     //   base_count = base_count - fw_count - bw_count - scc_count;
     // ---------------------------------------------------------------
     // Mark pivot itself as SCC (always in intersection)
-    { int _scc_val = SCC_FOUND; CUDA_CHECK(cudaMemcpyAsync(&st.d_Color[h_pivot], &_scc_val, sizeof(int),
-                                   cudaMemcpyHostToDevice, bfs_stream)); }
-    CUDA_CHECK(cudaMemcpyAsync(&st.d_SCC[h_pivot], &h_pivot, sizeof(int),
-                                cudaMemcpyHostToDevice, bfs_stream));
-    CUDA_CHECK(cudaMemcpyAsync(d_bfs_queue, &h_pivot, sizeof(int),
-                                cudaMemcpyHostToDevice, bfs_stream));
-    CUDA_CHECK(cudaMemsetAsync(d_bfs_scc_count, 0, sizeof(int), bfs_stream));
-    CUDA_CHECK(cudaMemsetAsync(d_bfs_bw_count, 0, sizeof(int), bfs_stream));
-    CUDA_CHECK(cudaStreamSynchronize(bfs_stream));
-    queue_size = 1;
-    int scc_count = 1;
+    { int _scc_val = SCC_FOUND; CUDA_CHECK(cudaMemcpy(&st.d_Color[h_pivot], &_scc_val, sizeof(int),
+                                   cudaMemcpyHostToDevice)); }
+    CUDA_CHECK(cudaMemcpy(&st.d_SCC[h_pivot], &h_pivot, sizeof(int),
+                           cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_bfs_queue, &h_pivot, sizeof(int),
+                           cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemset(d_bfs_scc_count, 0, sizeof(int)));
+    CUDA_CHECK(cudaMemset(d_bfs_bw_count, 0, sizeof(int)));
+    CUDA_CHECK(cudaMemcpy(d_bfs_next_count, &tmp_one, sizeof(int),
+                           cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemset(d_bfs_cur_count, 0, sizeof(int)));
 
-    while (queue_size > 0) {
-        CUDA_CHECK(cudaMemsetAsync(d_bfs_next_count, 0, sizeof(int), bfs_stream));
+    int bw_max_blocks;
+    cudaOccupancyMaxActiveBlocksPerMultiprocessor(&bw_max_blocks,
+        bw_bfs_persistent_kernel, block_size, 0);
+    int bw_grid = min(bw_max_blocks * 142, (num_targets + block_size - 1) / block_size);
+    bw_grid = max(bw_grid, 1);
 
-        int grid = (queue_size + block_size - 1) / block_size;
-
-        bw_bfs_level_kernel<<<grid, block_size, 0, bfs_stream>>>(
-            g.d_r_begin, g.d_r_node_idx,
-            st.d_Color, st.d_SCC,
-            d_bfs_queue, queue_size,
-            d_bfs_next_queue, d_bfs_next_count,
-            fw_color, bw_color, base_color, h_pivot,
-            d_bfs_scc_count, d_bfs_bw_count,
-            d_bfs_visited_bits);
-
-        // Async D2H — starts after kernel on stream
-        CUDA_CHECK(cudaMemcpyAsync(h_pinned_next_count, d_bfs_next_count,
-                                    sizeof(int), cudaMemcpyDeviceToHost, bfs_stream));
-
-        CUDA_CHECK(cudaStreamSynchronize(bfs_stream));
-
-        int* tmp = d_bfs_queue;
-        d_bfs_queue = d_bfs_next_queue;
-        d_bfs_next_queue = tmp;
-
-        queue_size = *h_pinned_next_count;
-    }
+    void* bw_args[] = {
+        (void*)&g.d_r_begin, (void*)&g.d_r_node_idx,
+        (void*)&st.d_Color, (void*)&st.d_SCC,
+        (void*)&d_bfs_queue, (void*)&d_bfs_next_queue,
+        (void*)&d_bfs_next_count, (void*)&d_bfs_cur_count,
+        (void*)&fw_color, (void*)&bw_color, (void*)&base_color, (void*)&h_pivot,
+        (void*)&d_bfs_scc_count, (void*)&d_bfs_bw_count,
+        (void*)&d_bfs_visited_bits
+    };
+    CUDA_CHECK(cudaLaunchCooperativeKernel((void*)bw_bfs_persistent_kernel,
+        bw_grid, block_size, bw_args));
+    CUDA_CHECK(cudaDeviceSynchronize());
 
     // Read final SCC / BW counts
-    int h_scc;
-    int h_bw;
+    int h_scc, h_bw;
     CUDA_CHECK(cudaMemcpy(&h_scc, d_bfs_scc_count, sizeof(int), cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaMemcpy(&h_bw, d_bfs_bw_count, sizeof(int), cudaMemcpyDeviceToHost));
-    scc_count += h_scc;
+    int scc_count = 1 + h_scc;  // +1 for pivot
     int bw_count = h_bw;
 
     // OpenMP: compute counts for each partition
