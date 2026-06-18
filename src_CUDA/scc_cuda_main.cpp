@@ -448,7 +448,6 @@ int main(int argc, char** argv)
                     -1,                  // good_init_pivot (-1 = not met_algo 6/11)
                     false);              // create_work_items = false
             } else {  // method 22: skip GLOBAL_BFS
-                global_bfs_ms = 0.0;
                 // No GLOBAL_BFS — go straight to TRIM1/2 + WCC + GPU FB
                 // The SCC will be found during the FB phase.
                 printf("[CUDA] Skipping GLOBAL_BFS (method 22)\n");
