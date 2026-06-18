@@ -39,11 +39,10 @@ static int  d_bulk_off_cap = 0;
 //   [3*MAX+MAX/2+2]            : smem_fw_color (int)  — fw color [0]
 //   [3*MAX+MAX/2+3]            : smem_bw_color (int)  — bw color [0]
 //   [3*MAX+MAX/2+4]            : smem_next_count (int)— next count [0]
+//   [3*MAX+MAX/2+5..]          : warp_sums (int)      — warp reduction sums
 //
-// Total: MAX*3*4 + MAX/4 + MAX/4 + 5*4 ≈ MAX*12 + MAX/2 + 20
-// For MAX=2048: 24576 + 1024 + 20 = 25620 bytes < 48KB ✓
-// Actually with char arrays: MAX*3*4 + MAX*1 + MAX*1 + 5*4 = MAX*14 + 20
-// For MAX=2048: 28672 + 20 = 28692 bytes < 48KB ✓
+// Layout bytes = MAX*14 + 5*4 + 8*3*4 = MAX*14 + 20 + 96
+// For MAX=2048: 28672 + 20 + 96 = 28788 bytes < 48KB ✓
 // ======================================================================
 __global__ void gpu_fb_batch_kernel(
     const edge_t* __restrict__ d_begin,
@@ -173,14 +172,15 @@ __global__ void gpu_fb_batch_kernel(
         __syncthreads();
 
         // Swap frontiers (cap at GPU_FB_MAX_SMEM_NODES to prevent OOB SMEM reads)
-        // CRITICAL: volatile swap_idx prevents the compiler from reusing a stale
-        // register from the BFS loop body for the frontier swap index. The compiler
-        // reuses the loop's fi*4 register for tid*4, causing reads from the wrong
-        // smem_next entry and garbage indices in the next BFS level.
+        // NOTE: must use a stride loop, NOT smem_frontier[tid] = smem_next[tid].
+        // With blockDim.x=256 but ncnt up to 2048, a single tid assignment only
+        // copies 256 entries — the other 1792 slots retain stale garbage from the
+        // previous BFS level, causing OOB SMEM reads in the next iteration.
         int ncnt = smem_ncount;
         if (ncnt > GPU_FB_MAX_SMEM_NODES) ncnt = GPU_FB_MAX_SMEM_NODES;
-        volatile int swap_idx = threadIdx.x;
-        if (ncnt > 0 && swap_idx < ncnt) smem_frontier[swap_idx] = smem_next[swap_idx];
+        for (int i = tid; i < ncnt; i += stride) {
+            smem_frontier[i] = smem_next[i];
+        }
         if (tid == 0) smem_fsize = ncnt;
         __syncthreads();
     }
@@ -248,8 +248,9 @@ __global__ void gpu_fb_batch_kernel(
 
         int ncnt = smem_ncount;
         if (ncnt > GPU_FB_MAX_SMEM_NODES) ncnt = GPU_FB_MAX_SMEM_NODES;
-        volatile int swap_idx = threadIdx.x;
-        if (ncnt > 0 && swap_idx < ncnt) smem_frontier[swap_idx] = smem_next[swap_idx];
+        for (int i = tid; i < ncnt; i += stride) {
+            smem_frontier[i] = smem_next[i];
+        }
         if (tid == 0) smem_fsize = ncnt;
         __syncthreads();
     }
