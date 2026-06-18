@@ -318,7 +318,9 @@ int do_fw_bw_dfs(GPUState& st, const GPUGraph& g,
                                 cudaMemcpyHostToDevice, bfs_stream));
     CUDA_CHECK(cudaStreamSynchronize(bfs_stream));
 
-    int total_fw = 1;  // pivot counted
+    // Repurpose d_bfs_bw_count as FW discovered counter (unused during FW pass)
+    CUDA_CHECK(cudaMemsetAsync(d_bfs_bw_count, 0, sizeof(int), bfs_stream));
+    CUDA_CHECK(cudaStreamSynchronize(bfs_stream));
 
     while (queue_size > 0) {
         CUDA_CHECK(cudaMemsetAsync(d_bfs_next_count, 0, sizeof(int), bfs_stream));
@@ -334,7 +336,8 @@ int do_fw_bw_dfs(GPUState& st, const GPUGraph& g,
             st.d_Color,
             d_bfs_queue, queue_size,
             d_bfs_next_queue, d_bfs_next_count,              fw_color, base_color,
-              d_bfs_visited_bits);
+              d_bfs_visited_bits,
+              d_bfs_bw_count);  // passed as d_fw_count
 
         // Async D2H — starts after kernel on stream
         CUDA_CHECK(cudaMemcpyAsync(h_pinned_next_count, d_bfs_next_count,
@@ -348,11 +351,12 @@ int do_fw_bw_dfs(GPUState& st, const GPUGraph& g,
         d_bfs_next_queue = tmp;
 
         queue_size = *h_pinned_next_count;
-        total_fw += queue_size;
     }
 
     // OpenMP: int fw_count = FW_BFS.get_fw_count();
-    int fw_count = total_fw;
+    int h_fw_discovered = 0;
+    CUDA_CHECK(cudaMemcpy(&h_fw_discovered, d_bfs_bw_count, sizeof(int), cudaMemcpyDeviceToHost));
+    int fw_count = 1 + h_fw_discovered;  // pivot + discovered
 
     // ---- Reset visited bitmap between FW and BW BFS ----
     // FW BFS set bits for all forward-reachable nodes; BW BFS needs a clean bitmap
