@@ -27,8 +27,8 @@ int main(int argc, char** argv)
     if (argc < 4) {
         printf("Usage: %s <graph_file> <num_threads> <method> [-d|-a|-p]\n", argv[0]);
         printf("  method 0: Trim1 + FW-BW BFS (Baseline)\n");
-        printf("  method 1: Trim1 + Global FW-BW + Trim1 + FW-BW DFS\n");
-        printf("  method 2: Trim1 + Global FW-BW + Trim1/2 + WCC + FW-BW DFS\n");
+        printf("  method 1: Trim1 + Global FW-BW + Trim1 + FW-BW DFS\n");        printf("  method  2: Trim1 + Global FW-BW + Trim1/2 + WCC + FW-BW DFS\n");
+        printf("  method 22: Trim1 + Trim1/2 + WCC + FW-BW DFS (skip GLOBAL_BFS)\n");
         printf("  method 5: Incremental (naive graph)\n");
         printf("  method 6: Incremental (SCC condensation)\n");
         printf("  method 7: Incremental (SCC condensation + BFS levels)\n");
@@ -405,7 +405,7 @@ int main(int argc, char** argv)
         runtime_ms = (R2.tv_sec - R1.tv_sec) * 1000.0 +
                      (R2.tv_usec - R1.tv_usec) * 0.001;
 
-    } else if (met_algo == 2) {
+    } else if (met_algo == 2 || met_algo == 22) {
         // ============================================================
         // Method 2: Trim1 + Global FW-BW + Trim1/2 + WCC + FW-BW DFS
         // OpenMP: do_baseline_global_wcc_fb()
@@ -438,43 +438,59 @@ int main(int argc, char** argv)
 
             // ---------- Phase 2: GLOBAL BFS ----------
             // OpenMP: do_fw_bw_global_main(G, curr_color, curr_count, false)
-            initialize_global_fb(N);
-            int scc_size = do_global_fw_bw_main(
-                st, gpuG,
-                COLOR_UNASSIGNED,   // base_color = curr_color = -1
-                curr_count,          // base_count from trim_targets
-                -1,                  // good_init_pivot (-1 = not met_algo 6/11)
-                false);              // create_work_items = false
+            int scc_size = 0;
+            if (met_algo == 2) {
+                initialize_global_fb(N);
+                scc_size = do_global_fw_bw_main(
+                    st, gpuG,
+                    COLOR_UNASSIGNED,   // base_color = curr_color = -1
+                    curr_count,          // base_count from trim_targets
+                    -1,                  // good_init_pivot (-1 = not met_algo 6/11)
+                    false);              // create_work_items = false
+            } else {  // method 22: skip GLOBAL_BFS
+                global_bfs_ms = 0.0;
+                // No GLOBAL_BFS — go straight to TRIM1/2 + WCC + GPU FB
+                // The SCC will be found during the FB phase.
+                printf("[CUDA] Skipping GLOBAL_BFS (method 22)\n");
+            }
             gettimeofday(&t_bfs, NULL);
-            printf("[CUDA] First SCC size = %d\n", scc_size);
+            if (met_algo == 2)
+                printf("[CUDA] First SCC size = %d\n", scc_size);
 
-            // ---------------------------------------------------------------
-            // Phase 2.5: Method-11 flag check (1:1 mirror of OpenMP)
-            // ---------------------------------------------------------------
-            if (met_algo_original == 11)
-            {
-                flag11 = 2;
-                vector<int> check_indices;
-                for (size_t i = 0; i < h_new_edge_nodes.size(); i++) {
-                    if (h_new_edge_nodes[i] >= 0)
-                        check_indices.push_back(h_new_edge_nodes[i]);
+        // ---------------------------------------------------------------
+        // Phase 2.5: Method-11 flag check (1:1 mirror of OpenMP)
+        // ---------------------------------------------------------------
+        if (met_algo_original == 11)
+        {
+            flag11 = 2;
+            vector<int> check_indices;
+            for (size_t i = 0; i < h_new_edge_nodes.size(); i++) {
+                if (h_new_edge_nodes[i] >= 0)
+                    check_indices.push_back(h_new_edge_nodes[i]);
+            }
+            if (!check_indices.empty()) {
+                vector<int> h_scc_check(check_indices.size());
+                for (size_t i = 0; i < check_indices.size(); i++) {
+                    CUDA_CHECK(cudaMemcpy(&h_scc_check[i],
+                        &st.d_SCC[check_indices[i]],
+                        sizeof(int), cudaMemcpyDeviceToHost));
                 }
-                if (!check_indices.empty()) {
-                    vector<int> h_scc_check(check_indices.size());
-                    for (size_t i = 0; i < check_indices.size(); i++) {
-                        CUDA_CHECK(cudaMemcpy(&h_scc_check[i],
-                            &st.d_SCC[check_indices[i]],
-                            sizeof(int), cudaMemcpyDeviceToHost));
-                    }
-                    for (size_t i = 0; i < h_scc_check.size(); i++) {
-                        if (h_scc_check[i] < 0) {
-                            cout << "Helloooo" << endl;
-                            flag11 = 1;
-                            break;
-                        }
+                for (size_t i = 0; i < h_scc_check.size(); i++) {
+                    if (h_scc_check[i] < 0) {
+                        cout << "Helloooo" << endl;
+                        flag11 = 1;
+                        break;
                     }
                 }
             }
+        }
+
+        // ---------------------------------------------------------------
+        // Timing: record start for each phase (also used for method 22)
+        // ---------------------------------------------------------------
+        double global_bfs_ms = 0.0;
+        gettimeofday(&t_bfs, NULL);  // GLOBAL_BFS end time (will be same as start if skipped)
+
 
             // ---------- Phase 3: TRIM1/2 (compact) — separate passes ----------
             trimmed = repeat_global_trim1_compact(st, gpuG, d_count,
@@ -517,8 +533,7 @@ int main(int argc, char** argv)
                     (t_trim1.tv_usec - t_start.tv_usec) * 0.001;
         double t2 = (t_compact.tv_sec - t_trim1.tv_sec) * 1000.0 +
                     (t_compact.tv_usec - t_trim1.tv_usec) * 0.001;
-        double t3 = (t_bfs.tv_sec - t_compact.tv_sec) * 1000.0 +
-                    (t_bfs.tv_usec - t_compact.tv_usec) * 0.001;
+        double t3 = global_bfs_ms;  // 0 for method 22, actual for method 2
         double t4 = (t_trim12.tv_sec - t_bfs.tv_sec) * 1000.0 +
                     (t_trim12.tv_usec - t_bfs.tv_usec) * 0.001;
         double t5 = (t_wcc.tv_sec - t_trim12.tv_sec) * 1000.0 +
