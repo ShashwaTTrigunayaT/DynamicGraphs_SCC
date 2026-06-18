@@ -293,16 +293,25 @@ __global__ void fw_bfs_level_kernel(
     // --- PHASE 2: Block-local BFS loop ---
     // Drain the SMEM queue block-locally (no global sync needed).
     // Each block walks its own portion of the graph independently.
+    //
+    // FIX: Use __shared__ variables for work_start/work_end so thread 0
+    // can broadcast the queue boundaries to ALL threads in the block.
+    // Without this, only thread 0 sees the correct values; all other
+    // threads see 0 >= 0 and break immediately, causing deadlock.
+    __shared__ int s_work_start;
+    __shared__ int s_work_end;
+
     while (true) {
         __syncthreads();
-        int work_start = 0;
-        int work_end = 0;
         if (threadIdx.x == 0) {
-            work_start = s_q_head;
-            work_end = min(s_q_tail, LOCAL_Q_SIZE);
-            s_q_head = work_end;  // Advance head for next iteration
+            s_work_start = s_q_head;
+            s_work_end = min(s_q_tail, LOCAL_Q_SIZE);
+            s_q_head = s_work_end;  // Advance head for next iteration
         }
         __syncthreads();
+
+        int work_start = s_work_start;
+        int work_end = s_work_end;
 
         // If local queue is empty, exit Phase 2
         if (work_start >= work_end) break;
@@ -499,16 +508,25 @@ __global__ void bw_bfs_level_kernel(
     }
 
     // --- PHASE 2: Block-local BFS loop ---
+    //
+    // FIX: Use __shared__ variables for work_start/work_end so thread 0
+    // can broadcast the queue boundaries to ALL threads in the block.
+    // Without this, only thread 0 sees the correct values; all other
+    // threads see 0 >= 0 and break immediately, causing deadlock.
+    __shared__ int s_work_start;
+    __shared__ int s_work_end;
+
     while (true) {
         __syncthreads();
-        int work_start = 0;
-        int work_end = 0;
         if (threadIdx.x == 0) {
-            work_start = s_q_head;
-            work_end = min(s_q_tail, LOCAL_Q_SIZE);
-            s_q_head = work_end;
+            s_work_start = s_q_head;
+            s_work_end = min(s_q_tail, LOCAL_Q_SIZE);
+            s_q_head = s_work_end;
         }
         __syncthreads();
+
+        int work_start = s_work_start;
+        int work_end = s_work_end;
 
         if (work_start >= work_end) break;
 
@@ -745,6 +763,14 @@ int do_global_fw_bw_main(GPUState& st, const GPUGraph& g,
     //   FW_BFS.do_bfs_forward();
     //   int fw_count = FW_BFS.get_fw_count();
     // ---------------------------------------------------------------
+    // FIX: Clear visited bitmap before FW BFS to prevent dirty bits from
+    // previous subproblem's BW BFS from incorrectly blocking node claims.
+    // do_global_fw_bw_main is called multiple times for different subgraphs,
+    // and the visited bitmap is NOT reset between calls without this fix.
+    CUDA_CHECK(cudaMemsetAsync(d_bfs_visited_bits, 0,
+                                d_bfs_visited_words * sizeof(uint32_t),
+                                bfs_stream));
+
     int queue_size = 1;
     CUDA_CHECK(cudaMemcpyAsync(d_bfs_queue, &h_pivot, sizeof(int),
                                 cudaMemcpyHostToDevice, bfs_stream));
