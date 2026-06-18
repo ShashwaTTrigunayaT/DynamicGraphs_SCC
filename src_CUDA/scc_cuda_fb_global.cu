@@ -231,18 +231,25 @@ __global__ void fw_bfs_level_kernel(
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     int stride = blockDim.x * gridDim.x;
 
-    // --- Shared memory: block-local BFS queue ---
-    // Each block has its own 1024-entry SMEM queue.
-    // On narrow (high-diameter) paths, this lets the block walk
-    // many BFS levels locally without returning to the host.
-    const int LOCAL_Q_SIZE = 1024;
-    __shared__ int s_q[LOCAL_Q_SIZE];
-    __shared__ int s_q_tail;
-    __shared__ int s_q_head;
+    // --- Shared memory: Ping-Pong Block-Local Queue ---
+    // Two 512-entry queues that swap at each BFS level.
+    // This allows the block to walk arbitrarily deep paths (500+ levels)
+    // without returning to the host, as long as each level's frontier
+    // stays below 512 nodes.
+    //
+    // FIX (monotonic queue bug): The original single-queue design had
+    // s_q_tail growing monotonically — once it hit 1024, the queue was
+    // permanently "full" and all subsequent levels spilled to global.
+    // Ping-pong eliminates this by reclaiming space after each hop.
+    const int LOCAL_Q_SIZE = 512;
+    __shared__ int s_q1[LOCAL_Q_SIZE];
+    __shared__ int s_q2[LOCAL_Q_SIZE];
+    __shared__ int s_count1;
+    __shared__ int s_count2;
     __shared__ int s_fw;
 
     if (threadIdx.x == 0) {
-        s_q_tail = 0; s_q_head = 0; s_fw = 0;
+        s_count1 = 0; s_count2 = 0; s_fw = 0;
     }
     __syncthreads();
 
@@ -262,7 +269,7 @@ __global__ void fw_bfs_level_kernel(
     }                                                                     \
 } while(0)
 
-    // --- PHASE 1: Pull from global queue, push to SMEM queue ---
+    // --- PHASE 1: Pull from global queue, push to s_q1 ---
     for (int i = tid; i < queue_size; i += stride) {
         node_t t = d_queue[i];
         for (edge_t nx = d_begin[t]; nx < d_begin[t + 1]; nx++) {
@@ -275,10 +282,9 @@ __global__ void fw_bfs_level_kernel(
                     d_Color[k] = fw_color;
                     local_fw_reg++;
 
-                    // Try to enqueue locally in SMEM
-                    int local_idx = atomicAdd(&s_q_tail, 1);
-                    if (local_idx < LOCAL_Q_SIZE) {
-                        s_q[local_idx] = k;
+                    int pos = atomicAdd(&s_count1, 1);
+                    if (pos < LOCAL_Q_SIZE) {
+                        s_q1[pos] = k;
                     } else {
                         // SMEM full: spill to global queue
                         global_staged[global_staged_cnt++] = k;
@@ -290,35 +296,28 @@ __global__ void fw_bfs_level_kernel(
         }
     }
 
-    // --- PHASE 2: Block-local BFS loop ---
-    // Drain the SMEM queue block-locally (no global sync needed).
-    // Each block walks its own portion of the graph independently.
-    //
-    // FIX: Use __shared__ variables for work_start/work_end so thread 0
-    // can broadcast the queue boundaries to ALL threads in the block.
-    // Without this, only thread 0 sees the correct values; all other
-    // threads see 0 >= 0 and break immediately, causing deadlock.
-    __shared__ int s_work_start;
-    __shared__ int s_work_end;
+    // Ensure all Phase 1 enqueues are visible before entering Phase 2
+    __syncthreads();
+
+    // --- PHASE 2: Ping-Pong Loop ---
+    // Read from curr_q, write neighbors to next_q, then swap.
+    // This allows arbitrarily deep path walking without host round-trips.
+    int* curr_q = s_q1;
+    int* next_q = s_q2;
+    int* curr_count = &s_count1;
+    int* next_count = &s_count2;
 
     while (true) {
-        __syncthreads();
+        int work_count = min(*curr_count, LOCAL_Q_SIZE);
+        if (work_count == 0) break;  // Path exhausted locally
+
         if (threadIdx.x == 0) {
-            s_work_start = s_q_head;
-            s_work_end = min(s_q_tail, LOCAL_Q_SIZE);
-            s_q_head = s_work_end;  // Advance head for next iteration
+            *next_count = 0;  // Reset the receiving queue for this hop
         }
         __syncthreads();
 
-        int work_start = s_work_start;
-        int work_end = s_work_end;
-
-        // If local queue is empty, exit Phase 2
-        if (work_start >= work_end) break;
-
-        int num_work = work_end - work_start;
-        for (int i = threadIdx.x; i < num_work; i += blockDim.x) {
-            int my_node = s_q[work_start + i];
+        for (int i = threadIdx.x; i < work_count; i += blockDim.x) {
+            int my_node = curr_q[i];
             for (edge_t nx = d_begin[my_node]; nx < d_begin[my_node + 1]; nx++) {
                 node_t k = d_node_idx[nx];
                 if (fw_check_navigator_device(d_Color, k, base_color)) {
@@ -329,9 +328,9 @@ __global__ void fw_bfs_level_kernel(
                         d_Color[k] = fw_color;
                         local_fw_reg++;
 
-                        int local_idx = atomicAdd(&s_q_tail, 1);
-                        if (local_idx < LOCAL_Q_SIZE) {
-                            s_q[local_idx] = k;
+                        int pos = atomicAdd(next_count, 1);
+                        if (pos < LOCAL_Q_SIZE) {
+                            next_q[pos] = k;
                         } else {
                             global_staged[global_staged_cnt++] = k;
                             if (global_staged_cnt == STAGE_SIZE)
@@ -341,6 +340,13 @@ __global__ void fw_bfs_level_kernel(
                 }
             }
         }
+
+        // Ensure all threads are done processing before we swap pointers
+        __syncthreads();
+
+        // Swap queues for the next level deep
+        int* tmp_q = curr_q; curr_q = next_q; next_q = tmp_q;
+        int* tmp_c = curr_count; curr_count = next_count; next_count = tmp_c;
     }
 
     // Flush remaining global queue entries
@@ -437,18 +443,18 @@ __global__ void bw_bfs_level_kernel(
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     int stride = blockDim.x * gridDim.x;
 
-    // --- Shared memory: block-local BFS queue ---
-    // Same approach as FW kernel: each block walks deep paths locally
-    // using a 1024-entry SMEM queue, only spilling to global on overflow.
-    const int LOCAL_Q_SIZE = 1024;
-    __shared__ int s_q[LOCAL_Q_SIZE];
-    __shared__ int s_q_tail;
-    __shared__ int s_q_head;
+    // --- Shared memory: Ping-Pong Block-Local Queue ---
+    // Two 512-entry queues that swap at each BFS level (same approach as FW kernel).
+    const int LOCAL_Q_SIZE = 512;
+    __shared__ int s_q1[LOCAL_Q_SIZE];
+    __shared__ int s_q2[LOCAL_Q_SIZE];
+    __shared__ int s_count1;
+    __shared__ int s_count2;
     __shared__ int s_scc;
     __shared__ int s_bw;
 
     if (threadIdx.x == 0) {
-        s_q_tail = 0; s_q_head = 0; s_scc = 0; s_bw = 0;
+        s_count1 = 0; s_count2 = 0; s_scc = 0; s_bw = 0;
     }
     __syncthreads();
 
@@ -469,7 +475,7 @@ __global__ void bw_bfs_level_kernel(
     }                                                                     \
 } while(0)
 
-    // --- PHASE 1: Pull from global queue, push to SMEM queue ---
+    // --- PHASE 1: Pull from global queue, push to s_q1 ---
     for (int i = tid; i < queue_size; i += stride) {
         node_t t = d_queue[i];
         for (edge_t nx = d_r_begin[t]; nx < d_r_begin[t + 1]; nx++) {
@@ -494,9 +500,9 @@ __global__ void bw_bfs_level_kernel(
                         local_bw_reg++;
                     }
 
-                    int local_idx = atomicAdd(&s_q_tail, 1);
-                    if (local_idx < LOCAL_Q_SIZE) {
-                        s_q[local_idx] = k;
+                    int pos = atomicAdd(&s_count1, 1);
+                    if (pos < LOCAL_Q_SIZE) {
+                        s_q1[pos] = k;
                     } else {
                         global_staged[global_staged_cnt++] = k;
                         if (global_staged_cnt == STAGE_SIZE)
@@ -507,32 +513,26 @@ __global__ void bw_bfs_level_kernel(
         }
     }
 
-    // --- PHASE 2: Block-local BFS loop ---
-    //
-    // FIX: Use __shared__ variables for work_start/work_end so thread 0
-    // can broadcast the queue boundaries to ALL threads in the block.
-    // Without this, only thread 0 sees the correct values; all other
-    // threads see 0 >= 0 and break immediately, causing deadlock.
-    __shared__ int s_work_start;
-    __shared__ int s_work_end;
+    // Ensure all Phase 1 enqueues are visible before entering Phase 2
+    __syncthreads();
+
+    // --- PHASE 2: Ping-Pong Loop ---
+    int* curr_q = s_q1;
+    int* next_q = s_q2;
+    int* curr_count = &s_count1;
+    int* next_count = &s_count2;
 
     while (true) {
-        __syncthreads();
+        int work_count = min(*curr_count, LOCAL_Q_SIZE);
+        if (work_count == 0) break;  // Path exhausted locally
+
         if (threadIdx.x == 0) {
-            s_work_start = s_q_head;
-            s_work_end = min(s_q_tail, LOCAL_Q_SIZE);
-            s_q_head = s_work_end;
+            *next_count = 0;  // Reset the receiving queue for this hop
         }
         __syncthreads();
 
-        int work_start = s_work_start;
-        int work_end = s_work_end;
-
-        if (work_start >= work_end) break;
-
-        int num_work = work_end - work_start;
-        for (int i = threadIdx.x; i < num_work; i += blockDim.x) {
-            int my_node = s_q[work_start + i];
+        for (int i = threadIdx.x; i < work_count; i += blockDim.x) {
+            int my_node = curr_q[i];
             for (edge_t nx = d_r_begin[my_node]; nx < d_r_begin[my_node + 1]; nx++) {
                 node_t k = d_r_node_idx[nx];
                 int k_color = d_Color[k];
@@ -551,9 +551,9 @@ __global__ void bw_bfs_level_kernel(
                             local_bw_reg++;
                         }
 
-                        int local_idx = atomicAdd(&s_q_tail, 1);
-                        if (local_idx < LOCAL_Q_SIZE) {
-                            s_q[local_idx] = k;
+                        int pos = atomicAdd(next_count, 1);
+                        if (pos < LOCAL_Q_SIZE) {
+                            next_q[pos] = k;
                         } else {
                             global_staged[global_staged_cnt++] = k;
                             if (global_staged_cnt == STAGE_SIZE)
@@ -563,6 +563,12 @@ __global__ void bw_bfs_level_kernel(
                 }
             }
         }
+
+        __syncthreads();
+
+        // Swap queues for the next level deep
+        int* tmp_q = curr_q; curr_q = next_q; next_q = tmp_q;
+        int* tmp_c = curr_count; curr_count = next_count; next_count = tmp_c;
     }
 
     // Flush remaining global queue entries
