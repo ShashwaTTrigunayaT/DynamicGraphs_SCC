@@ -225,52 +225,125 @@ __global__ void fw_bfs_level_kernel(
     const int* d_queue, int queue_size,
     int* d_next_queue, int* d_next_count,
     int fw_color, int base_color,
-    uint32_t* d_visited_bits)
+    uint32_t* d_visited_bits,
+    int* d_fw_count)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     int stride = blockDim.x * gridDim.x;
 
+    // --- Shared memory: block-local BFS queue ---
+    // Each block has its own 1024-entry SMEM queue.
+    // On narrow (high-diameter) paths, this lets the block walk
+    // many BFS levels locally without returning to the host.
+    const int LOCAL_Q_SIZE = 1024;
+    __shared__ int s_q[LOCAL_Q_SIZE];
+    __shared__ int s_q_tail;
+    __shared__ int s_q_head;
+    __shared__ int s_fw;
+
+    if (threadIdx.x == 0) {
+        s_q_tail = 0; s_q_head = 0; s_fw = 0;
+    }
+    __syncthreads();
+
     // Per-thread staging buffer (STAGE_SIZE=4 fits in registers, no local memory spill)
     const int STAGE_SIZE = 4;
-    int staged[STAGE_SIZE];
-    int staged_cnt = 0;
+    int global_staged[STAGE_SIZE];
+    int global_staged_cnt = 0;
+    int local_fw_reg = 0;
 
     // Helper: flush local buffer to global queue (single atomicAdd per flush)
-#define FW_FLUSH() do {                                                 \
-    if (staged_cnt > 0) {                                               \
-        int base = atomicAdd(d_next_count, staged_cnt);                 \
-        for (int _j = 0; _j < staged_cnt; _j++)                         \
-            d_next_queue[base + _j] = staged[_j];                       \
-        staged_cnt = 0;                                                  \
-    }                                                                    \
+#define FW_FLUSH_GLOBAL() do {                                           \
+    if (global_staged_cnt > 0) {                                         \
+        int base = atomicAdd(d_next_count, global_staged_cnt);           \
+        for (int _j = 0; _j < global_staged_cnt; _j++)                   \
+            d_next_queue[base + _j] = global_staged[_j];                 \
+        global_staged_cnt = 0;                                            \
+    }                                                                     \
 } while(0)
 
+    // --- PHASE 1: Pull from global queue, push to SMEM queue ---
     for (int i = tid; i < queue_size; i += stride) {
         node_t t = d_queue[i];
         for (edge_t nx = d_begin[t]; nx < d_begin[t + 1]; nx++) {
             node_t k = d_node_idx[nx];
-            // Navigate: check if node has base_color (d_Color stays in L2 because
-            // we don't CAS it — only write with simple store after claiming)
             if (fw_check_navigator_device(d_Color, k, base_color)) {
-                // Claim via visited bitmap: atomicOr on 200KB bitmask (L2-resident)
-                int word = k >> 5;  // k / 32
+                int word = k >> 5;
                 uint32_t bit = 1u << (k & 31);
                 uint32_t old = atomicOr(&d_visited_bits[word], bit);
                 if ((old & bit) == 0) {
-                    // Claimed! Write color with simple store
                     d_Color[k] = fw_color;
-                    staged[staged_cnt++] = k;
-                    if (staged_cnt == STAGE_SIZE) {
-                        FW_FLUSH();
+                    local_fw_reg++;
+
+                    // Try to enqueue locally in SMEM
+                    int local_idx = atomicAdd(&s_q_tail, 1);
+                    if (local_idx < LOCAL_Q_SIZE) {
+                        s_q[local_idx] = k;
+                    } else {
+                        // SMEM full: spill to global queue
+                        global_staged[global_staged_cnt++] = k;
+                        if (global_staged_cnt == STAGE_SIZE)
+                            FW_FLUSH_GLOBAL();
                     }
                 }
             }
         }
     }
 
-    // Flush remaining
-    FW_FLUSH();
-#undef FW_FLUSH
+    // --- PHASE 2: Block-local BFS loop ---
+    // Drain the SMEM queue block-locally (no global sync needed).
+    // Each block walks its own portion of the graph independently.
+    while (true) {
+        __syncthreads();
+        int work_start = 0;
+        int work_end = 0;
+        if (threadIdx.x == 0) {
+            work_start = s_q_head;
+            work_end = min(s_q_tail, LOCAL_Q_SIZE);
+            s_q_head = work_end;  // Advance head for next iteration
+        }
+        __syncthreads();
+
+        // If local queue is empty, exit Phase 2
+        if (work_start >= work_end) break;
+
+        int num_work = work_end - work_start;
+        for (int i = threadIdx.x; i < num_work; i += blockDim.x) {
+            int my_node = s_q[work_start + i];
+            for (edge_t nx = d_begin[my_node]; nx < d_begin[my_node + 1]; nx++) {
+                node_t k = d_node_idx[nx];
+                if (fw_check_navigator_device(d_Color, k, base_color)) {
+                    int word = k >> 5;
+                    uint32_t bit = 1u << (k & 31);
+                    uint32_t old = atomicOr(&d_visited_bits[word], bit);
+                    if ((old & bit) == 0) {
+                        d_Color[k] = fw_color;
+                        local_fw_reg++;
+
+                        int local_idx = atomicAdd(&s_q_tail, 1);
+                        if (local_idx < LOCAL_Q_SIZE) {
+                            s_q[local_idx] = k;
+                        } else {
+                            global_staged[global_staged_cnt++] = k;
+                            if (global_staged_cnt == STAGE_SIZE)
+                                FW_FLUSH_GLOBAL();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Flush remaining global queue entries
+    FW_FLUSH_GLOBAL();
+#undef FW_FLUSH_GLOBAL
+
+    // Flush FW node counter to global
+    if (local_fw_reg > 0) atomicAdd(&s_fw, local_fw_reg);
+    __syncthreads();
+    if (threadIdx.x == 0 && s_fw > 0) {
+        atomicAdd(d_fw_count, s_fw);
+    }
 }
 
 // ======================================================================
@@ -355,23 +428,39 @@ __global__ void bw_bfs_level_kernel(
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     int stride = blockDim.x * gridDim.x;
 
+    // --- Shared memory: block-local BFS queue ---
+    // Same approach as FW kernel: each block walks deep paths locally
+    // using a 1024-entry SMEM queue, only spilling to global on overflow.
+    const int LOCAL_Q_SIZE = 1024;
+    __shared__ int s_q[LOCAL_Q_SIZE];
+    __shared__ int s_q_tail;
+    __shared__ int s_q_head;
+    __shared__ int s_scc;
+    __shared__ int s_bw;
+
+    if (threadIdx.x == 0) {
+        s_q_tail = 0; s_q_head = 0; s_scc = 0; s_bw = 0;
+    }
+    __syncthreads();
+
     // Per-thread staging buffer (STAGE_SIZE=4 fits in registers)
     const int STAGE_SIZE = 4;
-    int staged[STAGE_SIZE];
-    int staged_cnt = 0;
-    int local_scc = 0;
-    int local_bw = 0;
+    int global_staged[STAGE_SIZE];
+    int global_staged_cnt = 0;
+    int local_scc_reg = 0;
+    int local_bw_reg = 0;
 
     // Helper: flush local buffer to global queue (single atomicAdd per flush)
-#define BW_FLUSH() do {                                                 \
-    if (staged_cnt > 0) {                                               \
-        int base = atomicAdd(d_next_count, staged_cnt);                 \
-        for (int _j = 0; _j < staged_cnt; _j++)                         \
-            d_next_queue[base + _j] = staged[_j];                       \
-        staged_cnt = 0;                                                  \
-    }                                                                    \
+#define BW_FLUSH_GLOBAL() do {                                           \
+    if (global_staged_cnt > 0) {                                         \
+        int base = atomicAdd(d_next_count, global_staged_cnt);           \
+        for (int _j = 0; _j < global_staged_cnt; _j++)                   \
+            d_next_queue[base + _j] = global_staged[_j];                 \
+        global_staged_cnt = 0;                                            \
+    }                                                                     \
 } while(0)
 
+    // --- PHASE 1: Pull from global queue, push to SMEM queue ---
     for (int i = tid; i < queue_size; i += stride) {
         node_t t = d_queue[i];
         for (edge_t nx = d_r_begin[t]; nx < d_r_begin[t + 1]; nx++) {
@@ -381,7 +470,6 @@ __global__ void bw_bfs_level_kernel(
 
             // Navigate: check if node is fw_color (intersection) or base_color (bw-set)
             if (k_color == fw_color || k_color == base_color) {
-                // Claim via visited bitmap
                 int word = k >> 5;
                 uint32_t bit = 1u << (k & 31);
                 uint32_t old = atomicOr(&d_visited_bits[word], bit);
@@ -390,28 +478,87 @@ __global__ void bw_bfs_level_kernel(
                         // Intersection: mark as SCC
                         d_Color[k] = SCC_FOUND;
                         d_SCC[k] = pivot;
-                        local_scc++;
+                        local_scc_reg++;
                     } else {
                         // BW-set
                         d_Color[k] = bw_color;
-                        local_bw++;
+                        local_bw_reg++;
                     }
-                    staged[staged_cnt++] = k;
-                    if (staged_cnt == STAGE_SIZE) {
-                        BW_FLUSH();
+
+                    int local_idx = atomicAdd(&s_q_tail, 1);
+                    if (local_idx < LOCAL_Q_SIZE) {
+                        s_q[local_idx] = k;
+                    } else {
+                        global_staged[global_staged_cnt++] = k;
+                        if (global_staged_cnt == STAGE_SIZE)
+                            BW_FLUSH_GLOBAL();
                     }
                 }
             }
         }
     }
 
-    // Flush remaining queue entries
-    BW_FLUSH();
-#undef BW_FLUSH
+    // --- PHASE 2: Block-local BFS loop ---
+    while (true) {
+        __syncthreads();
+        int work_start = 0;
+        int work_end = 0;
+        if (threadIdx.x == 0) {
+            work_start = s_q_head;
+            work_end = min(s_q_tail, LOCAL_Q_SIZE);
+            s_q_head = work_end;
+        }
+        __syncthreads();
+
+        if (work_start >= work_end) break;
+
+        int num_work = work_end - work_start;
+        for (int i = threadIdx.x; i < num_work; i += blockDim.x) {
+            int my_node = s_q[work_start + i];
+            for (edge_t nx = d_r_begin[my_node]; nx < d_r_begin[my_node + 1]; nx++) {
+                node_t k = d_r_node_idx[nx];
+                int k_color = d_Color[k];
+
+                if (k_color == fw_color || k_color == base_color) {
+                    int word = k >> 5;
+                    uint32_t bit = 1u << (k & 31);
+                    uint32_t old = atomicOr(&d_visited_bits[word], bit);
+                    if ((old & bit) == 0) {
+                        if (k_color == fw_color) {
+                            d_Color[k] = SCC_FOUND;
+                            d_SCC[k] = pivot;
+                            local_scc_reg++;
+                        } else {
+                            d_Color[k] = bw_color;
+                            local_bw_reg++;
+                        }
+
+                        int local_idx = atomicAdd(&s_q_tail, 1);
+                        if (local_idx < LOCAL_Q_SIZE) {
+                            s_q[local_idx] = k;
+                        } else {
+                            global_staged[global_staged_cnt++] = k;
+                            if (global_staged_cnt == STAGE_SIZE)
+                                BW_FLUSH_GLOBAL();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Flush remaining global queue entries
+    BW_FLUSH_GLOBAL();
+#undef BW_FLUSH_GLOBAL
 
     // Flush local SCC / BW counters
-    if (local_scc > 0) atomicAdd(d_scc_count, local_scc);
-    if (local_bw > 0) atomicAdd(d_bw_count, local_bw);
+    if (local_scc_reg > 0) atomicAdd(&s_scc, local_scc_reg);
+    if (local_bw_reg > 0) atomicAdd(&s_bw, local_bw_reg);
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        if (s_scc > 0) atomicAdd(d_scc_count, s_scc);
+        if (s_bw > 0) atomicAdd(d_bw_count, s_bw);
+    }
 }
 
 // ======================================================================
@@ -605,7 +752,9 @@ int do_global_fw_bw_main(GPUState& st, const GPUGraph& g,
                                 cudaMemcpyHostToDevice, bfs_stream));
     CUDA_CHECK(cudaStreamSynchronize(bfs_stream));
 
-    int total_fw = 1;  // pivot counted
+    // Repurpose d_bfs_bw_count as FW discovered counter (unused during FW pass)
+    CUDA_CHECK(cudaMemsetAsync(d_bfs_bw_count, 0, sizeof(int), bfs_stream));
+    CUDA_CHECK(cudaStreamSynchronize(bfs_stream));
 
     while (queue_size > 0) {
         CUDA_CHECK(cudaMemsetAsync(d_bfs_next_count, 0, sizeof(int), bfs_stream));
@@ -618,7 +767,8 @@ int do_global_fw_bw_main(GPUState& st, const GPUGraph& g,
             d_bfs_queue, queue_size,
             d_bfs_next_queue, d_bfs_next_count,
             fw_color, base_color,
-            d_bfs_visited_bits);
+            d_bfs_visited_bits,
+            d_bfs_bw_count);  // passed as d_fw_count
 
         // Async D2H copy — starts as soon as kernel completes on stream
         CUDA_CHECK(cudaMemcpyAsync(h_pinned_next_count, d_bfs_next_count,
@@ -632,11 +782,12 @@ int do_global_fw_bw_main(GPUState& st, const GPUGraph& g,
         d_bfs_next_queue = tmp;
 
         queue_size = *h_pinned_next_count;
-        total_fw += queue_size;
     }
 
     // OpenMP: int fw_count = FW_BFS.get_fw_count();
-    int fw_count = total_fw;
+    int h_fw_discovered = 0;
+    CUDA_CHECK(cudaMemcpy(&h_fw_discovered, d_bfs_bw_count, sizeof(int), cudaMemcpyDeviceToHost));
+    int fw_count = 1 + h_fw_discovered;  // pivot + discovered
 
     // ---------------------------------------------------------------
     // Reset visited bitmap between FW and BW BFS

@@ -286,7 +286,8 @@ extern __global__ void fw_bfs_level_kernel(
     const int* d_queue, int queue_size,
     int* d_next_queue, int* d_next_count,
     int fw_color, int base_color,
-    uint32_t* d_visited_bits);
+    uint32_t* d_visited_bits,
+    int* d_fw_count);
 
 extern __global__ void bw_bfs_level_kernel(
     const edge_t* d_r_begin, const node_t* d_r_node_idx,
