@@ -172,8 +172,9 @@ __global__ void gpu_fb_batch_kernel(
         }
         __syncthreads();
 
-        // Swap frontiers
+        // Swap frontiers (cap at GPU_FB_MAX_SMEM_NODES to prevent OOB SMEM reads)
         int ncnt = smem_ncount;
+        if (ncnt > GPU_FB_MAX_SMEM_NODES) ncnt = GPU_FB_MAX_SMEM_NODES;
         if (ncnt > 0 && tid < ncnt) smem_frontier[tid] = smem_next[tid];
         if (tid == 0) smem_fsize = ncnt;
         __syncthreads();
@@ -207,27 +208,26 @@ __global__ void gpu_fb_batch_kernel(
 
             for (edge_t e = d_r_begin[n]; e < d_r_begin[n + 1]; e++) {
                 node_t k = d_r_node_idx[e];
-                int k_color = d_Color[k];
 
-                if (k_color == fw_color || k_color == base_color) {
-                    int target = (k_color == fw_color) ? SCC_FOUND : bw_color;
-                    int old = atomicCAS(&d_Color[k], k_color, target);
-                    if (old == k_color) {
-                        if (target == SCC_FOUND) {
-                            d_SCC[k] = smem_nodes[pivot_pos];
+                // TOCTOU-safe: two separate atomicCAS calls instead of read-then-CAS
+                // First try: claim fw_color node as SCC_FOUND
+                int old = atomicCAS(&d_Color[k], fw_color, SCC_FOUND);
+                if (old == fw_color) {
+                    d_SCC[k] = smem_nodes[pivot_pos];
+                    for (int j = 0; j < comp_size; j++) {
+                        if (smem_nodes[j] == k) {
+                            smem_bw_flag[j] = 1;
+                            int np = atomicAdd((int*)&smem_ncount, 1);
+                            if (np < GPU_FB_MAX_SMEM_NODES) smem_next[np] = j;
+                            break;
                         }
+                    }
+                } else {
+                    // Second try: claim base_color node as bw_color
+                    old = atomicCAS(&d_Color[k], base_color, bw_color);
+                    if (old == base_color) {
                         for (int j = 0; j < comp_size; j++) {
-                            if (smem_nodes[j] == k && !smem_bw_flag[j]) {
-                                smem_bw_flag[j] = 1;
-                                int np = atomicAdd((int*)&smem_ncount, 1);
-                                if (np < GPU_FB_MAX_SMEM_NODES) smem_next[np] = j;
-                                break;
-                            }
-                        }
-                    } else if (old == target) {
-                        // Already claimed, but might not be in bw_flag
-                        for (int j = 0; j < comp_size; j++) {
-                            if (smem_nodes[j] == k && !smem_bw_flag[j]) {
+                            if (smem_nodes[j] == k) {
                                 smem_bw_flag[j] = 1;
                                 int np = atomicAdd((int*)&smem_ncount, 1);
                                 if (np < GPU_FB_MAX_SMEM_NODES) smem_next[np] = j;
@@ -235,12 +235,14 @@ __global__ void gpu_fb_batch_kernel(
                             }
                         }
                     }
+                    // else: already claimed by another thread, or SCC_FOUND — skip
                 }
             }
         }
         __syncthreads();
 
         int ncnt = smem_ncount;
+        if (ncnt > GPU_FB_MAX_SMEM_NODES) ncnt = GPU_FB_MAX_SMEM_NODES;
         if (ncnt > 0 && tid < ncnt) smem_frontier[tid] = smem_next[tid];
         if (tid == 0) smem_fsize = ncnt;
         __syncthreads();
