@@ -68,15 +68,17 @@ public:
         {
             if (line.empty() || line[0] == '%') continue;
 
-            vector<string> tokens;
-            string token;
-            stringstream ss(line);
-            while (getline(ss, token, ' '))
-            {
-                tokens.push_back(token);
-            }
-            edges_list.push_back(make_pair(stoi(tokens[0]) - 1, stoi(tokens[1]) - 1));
-            max_vertex = max(max_vertex, max(stoi(tokens[0]), stoi(tokens[1])));
+            // Parse two integers separated by space or tab
+            size_t pos1 = line.find_first_of(" \t");
+            if (pos1 == string::npos) continue;
+            size_t pos2 = line.find_first_of(" \t", pos1 + 1);
+            if (pos2 == string::npos) pos2 = line.size();
+
+            int v1 = stoi(line.substr(0, pos1));
+            int v2 = stoi(line.substr(pos1 + 1, pos2 - pos1 - 1));
+
+            edges_list.push_back(make_pair(v1 - 1, v2 - 1));
+            max_vertex = max(max_vertex, max(v1, v2));
         }
 
         inputFile.close();
