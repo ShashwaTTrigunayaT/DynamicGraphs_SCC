@@ -744,6 +744,9 @@ public:
             {
                 G.add_edge(orig_edges[i].first, orig_edges[i].second);
             }
+            // Free edge list memory — no longer needed after graph is built.
+            // For wb-edu (55M edges) this saves ~440MB; for it-2004 (350M) ~2.8GB.
+            vector<pair<int,int>>().swap(orig_edges);
         }
         if (!b)
         {
