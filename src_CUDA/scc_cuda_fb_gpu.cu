@@ -19,24 +19,11 @@
 
 static int* d_fb_color_counter = NULL;
 
-// ---- Pre-allocated scatter buffers (reused across iterations) ----
-static int* d_scatter_buf   = NULL;  // [max_comp_nodes]
-static int* d_scatter_pos   = NULL;  // [1]
-static int  d_scatter_cap   = 0;
-
-// ======================================================================
-// Ensure scatter buffers are large enough
-// ======================================================================
-static void ensure_scatter_buf(int max_comp_nodes)
-{
-    if (d_scatter_cap < max_comp_nodes) {
-        if (d_scatter_buf) cudaFree(d_scatter_buf);
-        if (d_scatter_pos) cudaFree(d_scatter_pos);
-        d_scatter_cap = max_comp_nodes * 2;  // generous
-        cudaMalloc(&d_scatter_buf, d_scatter_cap * sizeof(int));
-        cudaMalloc(&d_scatter_pos, sizeof(int));
-    }
-}
+// ---- Bulk scatter buffer (reused across iterations, avoids per-comp cudaMemcpy) ----
+static int* d_bulk_buf   = NULL;  // [d_bulk_cap]
+static int  d_bulk_cap   = 0;
+static int* d_bulk_off   = NULL;  // [max_comps] prefix sum offsets (reused)
+static int  d_bulk_off_cap = 0;
 
 // ======================================================================
 // gpu_fb_batch_kernel
@@ -283,7 +270,8 @@ __global__ void gpu_fb_batch_kernel(
     SUM_REDUCE(local_bw);
     SUM_REDUCE(local_base);
 
-    volatile __shared__ int warp_sums[96];  // 3 * 32 warps
+    // warp_sums is in dynamic SMEM, after smem_shared (5 ints)
+    int* warp_sums = smem_shared + 5;
     int warp_id = threadIdx.x / 32;
     int lane = threadIdx.x & 31;
     int num_warps = (blockDim.x + 31) / 32;
@@ -338,6 +326,55 @@ __global__ void gpu_fb_batch_kernel(
 }
 
 // ======================================================================
+// bulk_scatter_single_color_kernel — one block per sub-component
+// Scatters matching nodes into pre-allocated range in d_bulk_buf.
+// Uses warp ballot: 1 atomic per warp per iteration.
+// All blocks write to the same bulk buffer at different offsets.
+// ======================================================================
+__global__ void bulk_scatter_single_color_kernel(
+    const int* d_Color,
+    const int* d_in_nodes, int num_src,
+    const int* d_out_sizes,
+    const int* d_out_colors,
+    int num_out,
+    const int* d_bulk_offsets,  // [num_out] prefix sum of sizes
+    int* d_bulk_buf)            // [total_nodes] flat output buffer
+{
+    int oi = blockIdx.x;
+    if (oi >= num_out) return;
+
+    int sz = d_out_sizes[oi];
+    int color = d_out_colors[oi];
+    if (sz <= 0) return;
+
+    int base = d_bulk_offsets[oi];
+
+    // Per-block atomic position counter in shared memory
+    __shared__ volatile int s_pos;
+    if (threadIdx.x == 0) s_pos = base;
+    __syncthreads();
+
+    int tid = threadIdx.x;
+    int stride = blockDim.x;
+
+    for (int i = tid; i < num_src; i += stride) {
+        bool match = (d_Color[d_in_nodes[i]] == color);
+
+        unsigned mask = __ballot_sync(0xffffffff, match);
+        int lane = threadIdx.x & 31;
+        int warp_count = __popc(mask);
+
+        int pos = 0;
+        if (lane == 0 && warp_count > 0)
+            pos = atomicAdd((int*)&s_pos, warp_count);
+        pos = __shfl_sync(0xffffffff, pos, 0);
+
+        if (match)
+            d_bulk_buf[pos + __popc(mask & ((1u << lane) - 1))] = d_in_nodes[i];
+    }
+}
+
+// ======================================================================
 // run_gpu_fb() — Host driver
 //
 // Iteratively processes all components on GPU.
@@ -357,7 +394,6 @@ double run_gpu_fb(GPUState& st, const GPUGraph& g, int num_threads)
     }
     CUDA_CHECK(cudaMemcpy(d_fb_color_counter, &_cuda_the_color, sizeof(int),
                            cudaMemcpyHostToDevice));
-    ensure_scatter_buf(GPU_FB_MAX_SMEM_NODES);
 
     // ---- Drain WCC work queue ----
     std::vector<CUDAMyWork*> all_works;
@@ -454,10 +490,13 @@ double run_gpu_fb(GPUState& st, const GPUGraph& g, int num_threads)
     alloc_grow();
 
     // ---- SMEM size ----
+    int num_warps_smem = (block_size + 31) / 32;
+    int warp_sums_size = num_warps_smem * 3 * sizeof(int);
     int smem_size = GPU_FB_MAX_SMEM_NODES * (3 * sizeof(int))  // nodes, frontier, next
                   + GPU_FB_MAX_SMEM_NODES * 2                   // fw_flag, bw_flag (char)
-                  + 5 * sizeof(int);                            // shared scalars
-    // = 2048*(12+2)+20 = 28692 bytes < 48KB ✓
+                  + 5 * sizeof(int)                             // shared scalars
+                  + warp_sums_size;                             // warp sums (dynamic)
+    // = 2048*(12+2) + 20 + 8*3*4 = 28692 + 96 = 28788 bytes < 48KB ✓
 
     // ---- Iterative processing ----
     int total_levels = 0;
@@ -518,7 +557,7 @@ double run_gpu_fb(GPUState& st, const GPUGraph& g, int num_threads)
 
         if (h_num_out == 0) break;  // all done
 
-        // ---- Build next batch via per-component scatter (using pre-allocated buf) ----
+        // ---- Build next batch via bulk scatter (single cudaMemcpy) ----
         std::vector<int> h_out_sizes(h_num_out);
         std::vector<int> h_out_colors(h_num_out);
         CUDA_CHECK(cudaMemcpy(h_out_sizes.data(), d_out_sizes,
@@ -528,28 +567,61 @@ double run_gpu_fb(GPUState& st, const GPUGraph& g, int num_threads)
 
         gettimeofday(&ts, NULL);
 
-        CompData next;
-        int num_src = (int)cur.nodes.size();
-        int gs2 = min((num_src + block_size - 1) / block_size, 1024);
+        // Compute prefix sums on host
+        std::vector<int> h_bulk_offsets(h_num_out + 1, 0);
+        int total_sz = 0;
+        for (int oi = 0; oi < h_num_out; oi++) {
+            h_bulk_offsets[oi] = total_sz;
+            total_sz += h_out_sizes[oi];
+        }
+        h_bulk_offsets[h_num_out] = total_sz;
 
+        // Allocate/grow bulk buffer if needed
+        if (d_bulk_cap < total_sz) {
+            if (d_bulk_buf) cudaFree(d_bulk_buf);
+            d_bulk_cap = max(total_sz * 2, 1024);
+            cudaMalloc(&d_bulk_buf, d_bulk_cap * sizeof(int));
+        }
+        // Allocate/grow offsets buffer if needed
+        if (d_bulk_off_cap < h_num_out + 1) {
+            if (d_bulk_off) cudaFree(d_bulk_off);
+            d_bulk_off_cap = max(h_num_out + 1, 1024);
+            cudaMalloc(&d_bulk_off, d_bulk_off_cap * sizeof(int));
+        }
+
+        // Upload offsets to device
+        CUDA_CHECK(cudaMemcpy(d_bulk_off, h_bulk_offsets.data(),
+                               (h_num_out + 1) * sizeof(int), cudaMemcpyHostToDevice));
+
+        // Launch bulk scatter: one block per sub-component, chunked for max grid
+        int max_grid = 65535;
+        for (int ch = 0; ch < h_num_out; ch += max_grid) {
+            int n = min(max_grid, h_num_out - ch);
+            bulk_scatter_single_color_kernel<<<n, block_size>>>(
+                st.d_Color, d_in_nodes, (int)cur.nodes.size(),
+                d_out_sizes + ch, d_out_colors + ch, n,
+                d_bulk_off + ch,
+                d_bulk_buf
+            );
+        }
+        CUDA_CHECK(cudaDeviceSynchronize());
+
+        // ONE cudaMemcpy for ALL sub-components
+        std::vector<int> host_bulk(total_sz);
+        CUDA_CHECK(cudaMemcpy(host_bulk.data(), d_bulk_buf,
+                               total_sz * sizeof(int), cudaMemcpyDeviceToHost));
+
+        // Unpack on host using prefix sums
+        CompData next;
         for (int oi = 0; oi < h_num_out; oi++) {
             int sz = h_out_sizes[oi];
             int color = h_out_colors[oi];
             if (sz <= 0) continue;
-
-            CUDA_CHECK(cudaMemset(d_scatter_pos, 0, sizeof(int)));
-
-            scatter_single_color_kernel<<<gs2, block_size>>>(
-                st.d_Color, d_in_nodes, num_src, color,
-                d_scatter_buf, d_scatter_pos);
-            CUDA_CHECK(cudaDeviceSynchronize());
-
-            std::vector<int> tmp(sz);
-            CUDA_CHECK(cudaMemcpy(tmp.data(), d_scatter_buf,
-                                   sz * sizeof(int), cudaMemcpyDeviceToHost));
-
+            int base = h_bulk_offsets[oi];
             next.starts.push_back((int)next.nodes.size());
-            next.nodes.insert(next.nodes.end(), tmp.begin(), tmp.end());
+            next.nodes.insert(next.nodes.end(),
+                               host_bulk.begin() + base,
+                               host_bulk.begin() + base + sz);
             next.sizes.push_back(sz);
             next.colors.push_back(color);
         }
@@ -587,7 +659,7 @@ double run_gpu_fb(GPUState& st, const GPUGraph& g, int num_threads)
 void finalize_fb_gpu()
 {
     if (d_fb_color_counter) { cudaFree(d_fb_color_counter); d_fb_color_counter = NULL; }
-    if (d_scatter_buf)      { cudaFree(d_scatter_buf);      d_scatter_buf = NULL; }
-    if (d_scatter_pos)      { cudaFree(d_scatter_pos);      d_scatter_pos = NULL; }
-    d_scatter_cap = 0;
+    if (d_bulk_buf)         { cudaFree(d_bulk_buf);         d_bulk_buf = NULL; }
+    if (d_bulk_off)         { cudaFree(d_bulk_off);         d_bulk_off = NULL; }
+    d_bulk_cap = 0; d_bulk_off_cap = 0;
 }
