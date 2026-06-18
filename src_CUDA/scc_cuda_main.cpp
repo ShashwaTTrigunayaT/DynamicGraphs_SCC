@@ -410,7 +410,10 @@ int main(int argc, char** argv)
         // Method 2: Trim1 + Global FW-BW + Trim1/2 + WCC + FW-BW DFS
         // OpenMP: do_baseline_global_wcc_fb()
         // ============================================================
-        printf("Running Method 2: Trim1 + Global FW-BW + Trim1/2 + WCC + FW-BW DFS\n");
+        if (met_algo == 22)
+            printf("Running Method 22: Trim1 + Trim1/2 + WCC + FW-BW DFS (skip GLOBAL_BFS)\n");
+        else
+            printf("Running Method 2: Trim1 + Global FW-BW + Trim1/2 + WCC + FW-BW DFS\n");
 
         // Per-phase timing using gettimeofday (host-side, works on any server)
         struct timeval t_start, t_trim1, t_compact, t_bfs, t_trim12, t_wcc, t_end;
