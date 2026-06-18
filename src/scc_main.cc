@@ -169,19 +169,12 @@ class my_main : public main_t
 
             if (print) output_scc_list();
 
-            // Flush output and exit immediately to skip gm_graph heap corruption.
+            // Exit immediately to skip gm_graph heap corruption.
             // The destructor ~gm_graph() corrupts glibc heap metadata on large
             // graphs (wb-edu, it-2004), causing "double free or corruption" crash.
             fflush(stdout);
             fflush(stderr);
             exit(0);
-
-            finalize_color();
-            finalize_tarjan();
-            finalize_trim2();
-            finalize_WCC();
-            finalize_analyze();
-            return true;
         }
 
 #define PHASE_BEGIN(X) {if (detail_time) {gettimeofday(&V1, NULL);}}
@@ -379,10 +372,5 @@ int main(int argc, char** argv)
     my_main T;
     T.main(argc,argv);
 
-    // Flush output and exit immediately to skip corrupted gm_graph destructor.
-    // On large graphs (e.g. LiveJournal1: 4.8M nodes, 69M edges), heap metadata
-    // gets corrupted during processing, causing "double free or corruption" on cleanup.
-    fflush(stdout);
-    fflush(stderr);
-    exit(0);
+
 }
