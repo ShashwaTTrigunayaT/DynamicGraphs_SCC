@@ -477,9 +477,9 @@ int main(int argc, char** argv)
                 if (remaining > 0) {
                     printf("[SPAN_FOREST] Running fallback (WCC + FB) on %d remaining nodes\n", remaining);
 
-                    initialize_global_fb(N);
                     do_global_wcc(st, gpuG);
                     create_work_items_from_wcc(st, gpuG);
+                    initialize_global_fb(N);
                     double fb_time = start_workers_fw_bw_dfs_host(st, gpuG, num_threads);
                     if (fb_time < 0.0) fb_time = 0.0;
                     finalize_global_fb();
