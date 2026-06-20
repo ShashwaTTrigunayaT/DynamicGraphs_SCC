@@ -9,8 +9,7 @@ int main()
     
 
     // Custom batches
-    generate_scc_aware_insert_batches("diameter_45
-        _1000000_100000.txt","Insertion_batch",{0.10f, 0.25f, 0.50f, 1.0f},0.70f);
+    //generate_scc_aware_insert_batches("diameter_45 _1000000_100000.txt","Insertion_batch",{0.10f, 0.25f, 0.50f, 1.0f},0.70f);
 
     return 0;
 }
