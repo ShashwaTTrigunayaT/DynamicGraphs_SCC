@@ -639,9 +639,11 @@ int run_spanning_forest_round(GPUState& st, const GPUGraph& g)
     double extract_ms = (te_ex.tv_sec - ts_ex.tv_sec) * 1000.0 +
                         (te_ex.tv_usec - ts_ex.tv_usec) * 0.001;
 
-    printf("[SPAN_FOREST] Round: %d pivots, FW=%d(%.2fms) BW=%d(%.2fms) "
+    double density = (num_targets > 0) ? (double)num_targets / h_num_pivots : 0.0;
+    printf("[SPAN_FOREST] Round: %d pivots for %d targets (1:%.0f), FW=%d(%.2fms) BW=%d(%.2fms) "
            "Compress=%.2fms Extract=%d SCCs(%.2fms)\n",
-           h_num_pivots, fw_iters, fw_ms, bw_iters, bw_ms,
+           h_num_pivots, num_targets, density,
+           fw_iters, fw_ms, bw_iters, bw_ms,
            compress_ms, h_scc_count, extract_ms);
 
     return h_scc_count;
