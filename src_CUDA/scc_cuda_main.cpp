@@ -463,60 +463,35 @@ int main(int argc, char** argv)
                 printf("[DEBUG_SCC] Unique d_SCC values (any): %zu\n", unique_scc.size());
             }
             
-            // ---------- Phase 6: Fallback — full FB on all nodes ----------
-            // The spanning forest marks ~94% of non-TRIM1 nodes as SCC_FOUND.
-            // This prevents the fallback from seeing their connectivity:
-            // remaining nodes connected through resolved nodes appear
-            // disconnected, causing false singleton SCC counting.
-            //
-            // Fix: reset d_Color so the FB sees the FULL graph. Include
-            // ALL non-TRIM1 nodes in a single work item. FB natively
-            // decomposes any set into SCCs using FW-BW BFS.
+            // ---------- Phase 6: Fallback — WCC + FB on remaining nodes ----------
+            // After the spanning forest's early exit, d_trim_targets contains only
+            // the unresolved residual (~21K for Pokec). Run the standard Method 22
+            // fallback (WCC + FB) scoped to this residual. Do NOT reset d_Color —
+            // the forest's SCC assignments are correct; the residual forms its own
+            // SCCs independently and doesn't need to see through resolved neighbors.
             {
                 struct timeval fb_start, fb_end;
                 gettimeofday(&fb_start, NULL);
-                
-                printf("[SPAN_FOREST] Resetting d_Color, running full FB on all nodes\n");
-                
-                // Reset ALL d_Color (TRIM1 singletons + forest-resolved)
-                // to COLOR_UNASSIGNED so FB sees the full graph
-                reset_forest_colors(st.d_Color, N);
-                
-                // Build compact target list from ALL nodes
-                create_trim1_compact(st, gpuG);
-                int total_count = d_trim_targets_count;
-                
-                if (total_count > 0) {
+
+                int remaining = d_trim_targets_count;
+                if (remaining > 0) {
+                    printf("[SPAN_FOREST] Running fallback (WCC + FB) on %d remaining nodes\n", remaining);
+
                     initialize_global_fb(N);
-                    
-                    // Allocate device copy of ALL nodes for the work item
-                    int* d_all_nodes = NULL;
-                    CUDA_CHECK(cudaMalloc(&d_all_nodes, total_count * sizeof(int)));
-                    CUDA_CHECK(cudaMemcpy(d_all_nodes, d_trim_targets,
-                                           total_count * sizeof(int),
-                                           cudaMemcpyDeviceToDevice));
-                    
-                    // Single work item containing ALL non-TRIM1 nodes
-                    CUDAMyWork* work = new CUDAMyWork();
-                    work->color       = COLOR_UNASSIGNED;
-                    work->count       = total_count;
-                    work->d_set_nodes = d_all_nodes;
-                    work->set_capacity = total_count;
-                    work->owns_set    = 1;
-                    work->depth       = 0;
-                    work_q_put(0, work);
-                    
-                    // FB processes the full graph and finds ALL SCCs correctly
+                    do_global_wcc(st, gpuG);
+                    create_work_items_from_wcc(st, gpuG);
                     double fb_time = start_workers_fw_bw_dfs_host(st, gpuG, num_threads);
                     if (fb_time < 0.0) fb_time = 0.0;
-                    
                     finalize_global_fb();
+
+                    gettimeofday(&fb_end, NULL);
+                    double fb_ms = (fb_end.tv_sec - fb_start.tv_sec) * 1000.0 +
+                                   (fb_end.tv_usec - fb_start.tv_usec) * 0.001;
+                    printf("[SPAN_FOREST] Fallback FB (residual only): %.2fms\n", fb_ms);
+                } else {
+                    gettimeofday(&fb_end, NULL);
+                    printf("[SPAN_FOREST] No remaining nodes, skipping fallback\n");
                 }
-                
-                gettimeofday(&fb_end, NULL);
-                double fb_ms = (fb_end.tv_sec - fb_start.tv_sec) * 1000.0 +
-                               (fb_end.tv_usec - fb_start.tv_usec) * 0.001;
-                printf("[SPAN_FOREST] Fallback FB (full graph): %.2fms\n", fb_ms);
             }
             
             gettimeofday(&t_forest, NULL);
