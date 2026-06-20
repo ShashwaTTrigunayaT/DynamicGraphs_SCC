@@ -35,7 +35,7 @@ CXXFLAGS  = -O3 -I. -I$(GM_INC) -I$(CUDA_HOME)/include -std=c++17 -fopenmp
 LFLAGS    = -L$(CUDA_HOME)/lib64 -lcudart -L$(GM_LIB) -lgmgraph -lgomp
 
 TARGET = scc_cuda
-OBJS = scc_cuda_main.o scc_cuda_dynamic.o scc_cuda_graph.o scc_cuda_trim1.o scc_cuda_trim2.o scc_cuda_trim2_new.o scc_cuda_fb_global.o scc_cuda_fb_seq.o scc_cuda_fb_seq2.o scc_cuda_fb_gpu.o scc_cuda_weak.o scc_cuda_work_queue.o
+OBJS = scc_cuda_main.o scc_cuda_dynamic.o scc_cuda_graph.o scc_cuda_trim1.o scc_cuda_trim2.o scc_cuda_trim2_new.o scc_cuda_fb_global.o scc_cuda_fb_seq.o scc_cuda_fb_seq2.o scc_cuda_fb_gpu.o scc_cuda_weak.o scc_cuda_work_queue.o scc_cuda_spanning_forest.o
 
 all: $(TARGET)
 
@@ -79,6 +79,9 @@ scc_cuda_weak.o: scc_cuda_weak.cu scc_cuda.h
 	$(NVCC) $(NVCCFLAGS) -dc $< -o $@
 
 scc_cuda_work_queue.o: scc_cuda_work_queue.cu scc_cuda.h
+	$(NVCC) $(NVCCFLAGS) -dc $< -o $@
+
+scc_cuda_spanning_forest.o: scc_cuda_spanning_forest.cu scc_cuda.h
 	$(NVCC) $(NVCCFLAGS) -dc $< -o $@
 
 clean:
