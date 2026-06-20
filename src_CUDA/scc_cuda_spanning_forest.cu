@@ -672,6 +672,17 @@ __global__ void reset_d_colors_kernel(int* d_Color, int num_nodes)
     }
 }
 
+// Host wrapper — called from main.cpp (compiled by g++, needs host function)
+void reset_forest_colors(int* d_Color, int num_nodes)
+{
+    if (num_nodes <= 0) return;
+    int block_size = 256;
+    int grid_size = (num_nodes + block_size - 1) / block_size;
+    grid_size = min(grid_size, 65535);
+    reset_d_colors_kernel<<<grid_size, block_size>>>(d_Color, num_nodes);
+    CUDA_CHECK(cudaDeviceSynchronize());
+}
+
 // ======================================================================
 // run_spanning_forest_scc() — Full host driver
 //

@@ -476,9 +476,7 @@ int main(int argc, char** argv)
                 gettimeofday(&fb_start, NULL);
                 
                 // Reset d_Color so fallback sees the full graph
-                int reset_gs = min((N + 255) / 256, 65535);
-                reset_d_colors_kernel<<<reset_gs, 256>>>(st.d_Color, N);
-                CUDA_CHECK(cudaDeviceSynchronize());
+                reset_forest_colors(st.d_Color, N);
                 
                 printf("[SPAN_FOREST] Running fallback pipeline (TRIM12 + WCC + FB)\n");
                 
