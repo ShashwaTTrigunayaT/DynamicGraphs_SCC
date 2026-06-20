@@ -484,18 +484,24 @@ int main(int argc, char** argv)
                     
                     initialize_global_fb(N);
                     
+                    // Allocate device copy of remaining nodes for the work item
+                    int* d_remaining = NULL;
+                    CUDA_CHECK(cudaMalloc(&d_remaining, remaining_count * sizeof(int)));
+                    CUDA_CHECK(cudaMemcpy(d_remaining, d_trim_targets,
+                                           remaining_count * sizeof(int),
+                                           cudaMemcpyDeviceToDevice));
+                    
                     // Create a single work item with all remaining nodes
                     CUDAMyWork* work = new CUDAMyWork();
                     work->color       = COLOR_UNASSIGNED;
                     work->count       = remaining_count;
-                    work->d_set_nodes = NULL;
-                    work->set_capacity = 0;
+                    work->d_set_nodes = d_remaining;
+                    work->set_capacity = remaining_count;
+                    work->owns_set    = 1;  // FB will free this
                     work->depth       = 0;
-                    work->owns_set    = 0;
                     work_q_put(0, work);
                     
-                    // FB decomposes the set into SCCs directly
-                    // (uses d_trim_targets for node set, d_Color for BFS colors)
+                    // FB decomposes the set into SCCs directly (no WCC needed)
                     double fb_time = start_workers_fw_bw_dfs_host(st, gpuG, num_threads);
                     if (fb_time < 0.0) fb_time = 0.0;
                     
