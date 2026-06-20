@@ -383,7 +383,7 @@ __global__ void wcc_propagate_fused_kernel(
 
         if (min_val != d_WCC[n]) {
             d_WCC[n] = min_val;
-            *d_changed = 1;
+            atomicAdd(d_changed, 1);
         }
 
         // === Phase 2: path compression ===
@@ -396,7 +396,7 @@ __global__ void wcc_propagate_fused_kernel(
             int root_root = CUDA_GET_WCC_ROOT(wcc_root);
             if (root_root != root) {
                 d_WCC[n] = wcc_root;
-                *d_changed = 1;
+                atomicAdd(d_changed, 1);
             }
         }
     }
