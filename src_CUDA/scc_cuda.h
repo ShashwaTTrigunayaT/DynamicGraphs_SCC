@@ -566,11 +566,11 @@ __global__ void extract_sccs_from_forest_kernel(
     const int* d_targets, int num_targets,
     int* d_scc_counter);
 
-// Mark pivot nodes as SCC roots
+// Mark pivot nodes as SCC roots (only canonical FW group roots via uf_find)
 __global__ void mark_scc_roots_kernel(
     int* d_Color, int* d_SCC,
     const int* d_parent_fw, const int* d_parent_bw,
-    const int* d_pivots, int num_pivots);
+    const int* d_pivots, int* d_pivot_parent_fw, int num_pivots);
 
 // Mark remaining unassigned nodes as singleton SCCs
 __global__ void mark_remaining_sccs_kernel(

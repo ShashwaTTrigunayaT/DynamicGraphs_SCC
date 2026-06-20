@@ -412,11 +412,17 @@ __global__ void extract_sccs_from_forest_kernel(
 
 // ======================================================================
 // Kernel: mark pivot nodes as SCC roots
+//
+// Only marks pivots that are the CANONICAL ROOT of their FW merge group
+// (uf_find(d_pivot_parent_fw, i) == i). Non-root pivots that merged into
+// another pivot's group are left for extract_sccs_from_forest_kernel to
+// handle — it will assign them d_SCC = d_pivots[resolved_fw] (the canonical
+// pivot node), preventing double-counting.
 // ======================================================================
 __global__ void mark_scc_roots_kernel(
     int* d_Color, int* d_SCC,
     const int* d_parent_fw, const int* d_parent_bw,
-    const int* d_pivots, int num_pivots)
+    const int* d_pivots, int* d_pivot_parent_fw, int num_pivots)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     int stride = blockDim.x * gridDim.x;
@@ -427,8 +433,14 @@ __global__ void mark_scc_roots_kernel(
         if (d_Color[p] == SCC_FOUND) continue;
 
         if (d_parent_fw[p] == p && d_parent_bw[p] == p) {
-            d_Color[p] = SCC_FOUND;
-            d_SCC[p] = p;
+            int resolved = uf_find(d_pivot_parent_fw, i);
+            if (resolved == i) {
+                // This pivot is the canonical root of its FW merge group
+                d_Color[p] = SCC_FOUND;
+                d_SCC[p] = p;
+            }
+            // else: merged into another pivot's group —
+            // leave for extract_sccs_from_forest_kernel to absorb
         }
     }
 }
@@ -599,12 +611,12 @@ int run_spanning_forest_round(GPUState& st, const GPUGraph& g)
     // ---------------------------------------------------------------
     gettimeofday(&ts_ex, NULL);
 
-    // First mark pivot nodes as SCC roots
+    // First mark pivot nodes as SCC roots (only canonical FW group roots)
     int pivot_gs = (h_num_pivots + block_size - 1) / block_size;
     mark_scc_roots_kernel<<<pivot_gs, block_size>>>(
         st.d_Color, st.d_SCC,
         d_parent_fw, d_parent_bw,
-        d_pivots, h_num_pivots);
+        d_pivots, d_pivot_parent_fw, h_num_pivots);
     CUDA_CHECK(cudaDeviceSynchronize());
 
     // Extract SCC members using resolved (merged) pivot IDs
@@ -664,19 +676,24 @@ int run_spanning_forest_scc(GPUState& st, const GPUGraph& g)
             break;
         }
 
+        int before = d_trim_targets_count;
         int scc_found = run_spanning_forest_round(st, g);
+        create_trim1_compact(st, g);
+        int after = d_trim_targets_count;
+        int resolved = before - after;
         total_sccs += scc_found;
+
+        printf("[SPAN_FOREST] Round %d: resolved %d/%d nodes (%.1f%%), "
+               "found %d SCCs, %d remain\n",
+               round, resolved, before,
+               (before > 0) ? 100.0 * resolved / before : 0.0,
+               scc_found, after);
 
         if (scc_found == 0) {
             printf("[SPAN_FOREST] Converged after %d rounds (%d SCCs), "
                    "%d targets remain — returning for fallback\n",
-                   round, total_sccs, d_trim_targets_count);
+                   round, total_sccs, after);
             break;
-        }
-
-        if (round % 10 == 0) {
-            printf("[SPAN_FOREST] Round %d: %d SCCs found so far, %d targets remain\n",
-                   round, total_sccs, d_trim_targets_count);
         }
     }
 
