@@ -464,22 +464,37 @@ int main(int argc, char** argv)
             }
             
             // ---------- Phase 6: Fallback for remaining nodes ----------
-            // After spanning forest converges, remaining nodes have COLOR_UNASSIGNED.
-            // Skip TRIM12 (their neighbors marked SCC_FOUND by spanning forest are
-            // invisible to trim, causing false singleton counts). Go directly to
-            // WCC + FB which correctly groups and processes them.
+            // The spanning forest marked ~94% of non-TRIM1 nodes as SCC_FOUND.
+            // These markers make remaining nodes' neighbors invisible to TRIM12
+            // and WCC — causing false singleton counting and WCC fragmentation.
+            //
+            // Fix: reset d_Color for all SCC_FOUND nodes so the fallback sees
+            // the full graph connectivity. The d_SCC values from the spanning
+            // forest are preserved; TRIM12 re-identifies singletons quickly.
             {
+                struct timeval fb_start, fb_end;
+                gettimeofday(&fb_start, NULL);
+                
+                // Reset d_Color so fallback sees the full graph
+                int reset_gs = min((N + 255) / 256, 65535);
+                reset_d_colors_kernel<<<reset_gs, 256>>>(st.d_Color, N);
+                CUDA_CHECK(cudaDeviceSynchronize());
+                
+                printf("[SPAN_FOREST] Running fallback pipeline (TRIM12 + WCC + FB)\n");
+                
+                // TRIM12 — re-identifies singletons and 2-node SCCs
                 create_trim1_compact(st, gpuG);
+                trimmed = repeat_global_trim1_compact(st, gpuG, d_count,
+                    met_algo, flag11, da, d_count_trim_spec, 0);
+                int trim_total = do_global_trim2_new(st, gpuG, d_count);
+                trim_total += repeat_global_trim1_compact(st, gpuG, d_count,
+                    met_algo, flag11, da, d_count_trim_spec, 100);
+                trimmed += trim_total;
+                
                 int remaining_count = d_trim_targets_count;
                 
                 if (remaining_count > 0) {
-                    printf("[SPAN_FOREST] Processing %d remaining nodes through WCC+FB fallback (no TRIM12)\n",
-                           remaining_count);
-                    
-                    struct timeval fb_start, fb_end;
-                    gettimeofday(&fb_start, NULL);
-                    
-                    // Skip TRIM12 — go directly to WCC + FB
+                    // WCC — correctly groups remaining nodes (full graph visible)
                     initialize_global_fb(N);
                     do_global_wcc(st, gpuG);
                     create_work_items_from_wcc(st, gpuG);
@@ -493,12 +508,12 @@ int main(int argc, char** argv)
                     }
                     
                     finalize_global_fb();
-                    
-                    gettimeofday(&fb_end, NULL);
-                    double fb_ms = (fb_end.tv_sec - fb_start.tv_sec) * 1000.0 +
-                                   (fb_end.tv_usec - fb_start.tv_usec) * 0.001;
-                    printf("[SPAN_FOREST] Fallback pipeline (no trim12): %.2fms\n", fb_ms);
                 }
+                
+                gettimeofday(&fb_end, NULL);
+                double fb_ms = (fb_end.tv_sec - fb_start.tv_sec) * 1000.0 +
+                               (fb_end.tv_usec - fb_start.tv_usec) * 0.001;
+                printf("[SPAN_FOREST] Fallback pipeline: %.2fms\n", fb_ms);
             }
             
             gettimeofday(&t_forest, NULL);
