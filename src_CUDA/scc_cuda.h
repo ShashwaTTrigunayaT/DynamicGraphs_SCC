@@ -521,8 +521,6 @@ __global__ void select_pivots_kernel(
 
 // Union-find init + compress
 __global__ void init_pivot_union_find_kernel(int* d_pivot_parent, int num_pivots);
-__global__ void init_pivot_union_find_both_kernel(
-    int* d_pivot_parent_fw, int* d_pivot_parent_bw, int num_pivots);
 __global__ void uf_compress_kernel(int* d_pivot_parent, int num_pivots);
 
 // Spanning tree initialization
@@ -535,33 +533,32 @@ __global__ void init_spanning_trees_kernel(
     int* d_Color);
 
 // FW spanning forest expansion (one iteration)
-// Includes inline cross-pivot uf_union on d_pivot_parent_fw (FW-only merges)
+// Merges into SHARED d_pivot_parent (same array used by BW kernel)
 __global__ void fw_spanning_forest_iteration_kernel(
     const edge_t* d_begin, const node_t* d_node_idx,
     int* d_Color,
     int* d_parent_fw, int* d_pivot_id_fw, int* d_tree_depth,
-    int* d_pivot_parent_fw,
+    int* d_pivot_parent,
     int* d_changed,
     const int* d_targets, int num_targets);
 
 // BW spanning forest expansion (one iteration, reverse edges)
-// Includes inline cross-pivot uf_union on d_pivot_parent_bw (BW-only merges)
+// Merges into SHARED d_pivot_parent (same array used by FW kernel)
 __global__ void bw_spanning_forest_iteration_kernel(
     const edge_t* d_r_begin, const node_t* d_r_node_idx,
     int* d_Color,
     int* d_parent_bw, int* d_pivot_id_bw, int* d_tree_depth,
-    int* d_pivot_parent_bw,
+    int* d_pivot_parent,
     int* d_changed,
     const int* d_targets, int num_targets);
 
 // SCC extraction from FW ∩ BW tree intersections
-// Uses SEPARATE uf_find() on pivot_parent_fw and pivot_parent_bw
-// to prevent false SCCs from one-directional edge crossings
+// Uses ONE shared d_pivot_parent (FW+BW evidence combined)
 __global__ void extract_sccs_from_forest_kernel(
     int* d_Color, int* d_SCC,
     const int* d_parent_fw, const int* d_parent_bw,
     const int* d_pivot_id_fw, const int* d_pivot_id_bw,
-    int* d_pivot_parent_fw, int* d_pivot_parent_bw,
+    int* d_pivot_parent,
     const int* d_pivots,
     const int* d_targets, int num_targets,
     int* d_scc_counter);
@@ -569,11 +566,11 @@ __global__ void extract_sccs_from_forest_kernel(
 // Reset d_Color from SCC_FOUND to COLOR_UNASSIGNED (for fallback FB)
 void reset_forest_colors(int* d_Color, int num_nodes);
 
-// Mark pivot nodes as SCC roots (only canonical FW group roots via uf_find)
+// Mark pivot nodes as SCC roots (only canonical shared UF roots)
 __global__ void mark_scc_roots_kernel(
     int* d_Color, int* d_SCC,
     const int* d_parent_fw, const int* d_parent_bw,
-    const int* d_pivots, int* d_pivot_parent_fw, int num_pivots);
+    const int* d_pivots, int* d_pivot_parent, int num_pivots);
 
 // Mark remaining unassigned nodes as singleton SCCs
 __global__ void mark_remaining_sccs_kernel(
