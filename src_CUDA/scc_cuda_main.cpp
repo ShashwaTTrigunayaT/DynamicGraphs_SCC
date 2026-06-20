@@ -29,6 +29,7 @@ int main(int argc, char** argv)
         printf("  method 0: Trim1 + FW-BW BFS (Baseline)\n");
         printf("  method 1: Trim1 + Global FW-BW + Trim1 + FW-BW DFS\n");        printf("  method  2: Trim1 + Global FW-BW + Trim1/2 + WCC + FW-BW DFS\n");
         printf("  method 22: Trim1 + Trim1/2 + WCC + FW-BW DFS (skip GLOBAL_BFS)\n");
+        printf("  method 12: Trim1 + Spanning Forest SCC (multi-pivot, replaces Phases 2-5)\n");
         printf("  method 5: Incremental (naive graph)\n");
         printf("  method 6: Incremental (SCC condensation)\n");
         printf("  method 7: Incremental (SCC condensation + BFS levels)\n");
@@ -86,7 +87,8 @@ int main(int argc, char** argv)
         // ---- Static methods (0-4): load directly ----
         if (met_algo_original == 0 || met_algo_original == 1 ||
             met_algo_original == 2 || met_algo_original == 3 ||
-            met_algo_original == 4 || met_algo_original == 22)
+            met_algo_original == 4 || met_algo_original == 12 ||
+            met_algo_original == 22)
         {
             // OpenMP: int num_vertices = read_file(fname, orig_edges);
             //         for (int i = 0; i < num_vertices; i++) G.add_node();
@@ -405,6 +407,113 @@ int main(int argc, char** argv)
         runtime_ms = (R2.tv_sec - R1.tv_sec) * 1000.0 +
                      (R2.tv_usec - R1.tv_usec) * 0.001;
 
+    } else if (met_algo == 12) {
+        // ============================================================
+        // Method 12: Trim1 + Spanning Forest SCC
+        // Replaces Phases 2-5 (GLOBAL_BFS + TRIM1/2 + WCC + FB) with
+        // a multi-pivot spanning forest approach.
+        // ============================================================
+        printf("Running Method 12: Trim1 + Spanning Forest SCC\n");
+
+        struct timeval t_start, t_trim1, t_forest, t_end;
+        gettimeofday(&R1, NULL);
+        gettimeofday(&t_start, NULL);
+
+        // ---------- Phase 1: TRIM1 ----------
+        trimmed = repeat_global_trim1(st, gpuG, d_count,
+            met_algo, flag11, da, d_count_trim_spec, 0);
+        gettimeofday(&t_trim1, NULL);
+        printf("[CUDA] Trimmed = %d\n", trimmed);
+
+        int curr_count = N - trimmed;
+        if (curr_count == 0) {
+            printf("[CUDA] No remaining nodes after trim\n");
+            gettimeofday(&t_forest, NULL);
+        } else {
+            // ---------- Phase 2-5: Spanning Forest SCC ----------
+            // Initialize spanning forest state
+            initialize_spanning_forest(N);
+            
+            // Run the full spanning forest SCC algorithm
+            // Returns number of SCCs found; remaining nodes stay in d_trim_targets
+            run_spanning_forest_scc(st, gpuG);
+            
+            // ---------- Phase 6: Fallback for remaining nodes ----------
+            // After spanning forest converges, any remaining unassigned nodes
+            // are processed through the proven standard pipeline (trim12 + WCC + FB).
+            // This guarantees correctness even if spanning forest has boundary
+            // collisions between competing pivots in the same true SCC.
+            {
+                create_trim1_compact(st, gpuG);
+                int remaining_count = d_trim_targets_count;
+                
+                if (remaining_count > 0) {
+                    printf("[SPAN_FOREST] Processing %d remaining nodes through fallback pipeline\n",
+                           remaining_count);
+                    
+                    struct timeval fb_start, fb_end;
+                    gettimeofday(&fb_start, NULL);
+                    
+                    // Trim12 on remaining nodes
+                    int* d_fb_count;
+                    CUDA_CHECK(cudaMalloc(&d_fb_count, sizeof(int)));
+                    
+                    CUDA_CHECK(cudaMemset(d_fb_count, 0, sizeof(int)));
+                    repeat_global_trim1_compact(st, gpuG, d_fb_count,
+                        met_algo, flag11, da, d_count_trim_spec, 0);
+                    
+                    CUDA_CHECK(cudaMemset(d_fb_count, 0, sizeof(int)));
+                    do_global_trim2_new(st, gpuG, d_fb_count);
+                    
+                    CUDA_CHECK(cudaMemset(d_fb_count, 0, sizeof(int)));
+                    repeat_global_trim1_compact(st, gpuG, d_fb_count,
+                        met_algo, flag11, da, d_count_trim_spec, 100);
+                    
+                    CUDA_CHECK(cudaFree(d_fb_count));
+                    
+                    // WCC on remaining nodes
+                    initialize_global_fb(N);
+                    do_global_wcc(st, gpuG);
+                    create_work_items_from_wcc(st, gpuG);
+                    
+                    // FB on remaining components
+                    double fb_time = run_gpu_fb(st, gpuG, num_threads);
+                    if (fb_time < 0.0) fb_time = 0.0;
+                    if (!is_work_q_empty_from_seq_context()) {
+                        double host_time = start_workers_fw_bw_dfs_host(st, gpuG, num_threads);
+                        fb_time += host_time;
+                    }
+                    
+                    finalize_global_fb();
+                    
+                    gettimeofday(&fb_end, NULL);
+                    double fb_ms = (fb_end.tv_sec - fb_start.tv_sec) * 1000.0 +
+                                   (fb_end.tv_usec - fb_start.tv_usec) * 0.001;
+                    printf("[SPAN_FOREST] Fallback pipeline: %.2fms\n", fb_ms);
+                }
+            }
+            
+            gettimeofday(&t_forest, NULL);
+            finalize_spanning_forest();
+        }
+
+        gettimeofday(&t_end, NULL);
+
+        // Compute per-phase timings
+        double t1 = (t_trim1.tv_sec - t_start.tv_sec) * 1000.0 +
+                    (t_trim1.tv_usec - t_start.tv_usec) * 0.001;
+        double t2 = (t_forest.tv_sec - t_trim1.tv_sec) * 1000.0 +
+                    (t_forest.tv_usec - t_trim1.tv_usec) * 0.001;
+        double t_total = t1 + t2;
+
+        printf(">>>>CUDA_PROFILE: TRIM1=%.2fms SPAN_FOREST_FALLBACK=%.2fms TOTAL=%.2fms\n",
+               t1, t2, t_total);
+        fflush(stdout);
+
+        gettimeofday(&R2, NULL);
+        runtime_ms = (R2.tv_sec - R1.tv_sec) * 1000.0 +
+                     (R2.tv_usec - R1.tv_usec) * 0.001;
+
     } else if (met_algo == 2 || met_algo == 22) {
         // ============================================================
         // Method 2: Trim1 + Global FW-BW + Trim1/2 + WCC + FW-BW DFS
@@ -563,7 +672,7 @@ int main(int argc, char** argv)
 
     } else {
         printf("Running CUDA Method %d: (not implemented)\n", met_algo);
-        printf("Supported methods: 0 (Baseline), 1 (Global FB + FB DFS), 2 (Full pipeline)\n");
+        printf("Supported methods: 0 (Baseline), 1 (Global FB + FB DFS), 2 (Full pipeline), 12 (Spanning Forest)\n");
         cudaFree(d_count);
         if (d_count_trim_spec) cudaFree(d_count_trim_spec);
         dynamic_arrays_free(da);
@@ -636,6 +745,8 @@ int main(int argc, char** argv)
     dynamic_arrays_free(da);
     fprintf(stderr, "[DEBUG] cleanup: finalize_fb_gpu\n");
     finalize_fb_gpu();
+    fprintf(stderr, "[DEBUG] cleanup: finalize_spanning_forest\n");
+    finalize_spanning_forest();
     fprintf(stderr, "[DEBUG] cleanup: finalize_WCC\n");
     finalize_WCC();
     fprintf(stderr, "[DEBUG] cleanup: finalize_trim2\n");

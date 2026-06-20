@@ -502,4 +502,81 @@ double start_workers_fw_bw_dfs_host(GPUState& st, const GPUGraph& g, int N);
 double run_gpu_fb(GPUState& st, const GPUGraph& g, int num_threads);
 void   finalize_fb_gpu();
 
+// ---- scc_cuda_spanning_forest.cu (Spanning Forest SCC) ----
+// Replaces Phases 2-5 (GLOBAL_BFS + TRIM1/2 + WCC + FB) with a multi-pivot
+// spanning forest approach using full transitive union-find pivot tree merging.
+
+// initialize / finalize
+void initialize_spanning_forest(int num_nodes);
+void finalize_spanning_forest();
+
+// Pivot selection
+__global__ void select_pivots_kernel(
+    const int* d_Color,
+    const edge_t* d_begin, const edge_t* d_r_begin,
+    const int* d_targets, int num_targets,
+    int* d_pivots, int* d_num_pivots,
+    int max_pivots,
+    int* d_pivot_degrees);
+
+// Union-find init + compress
+__global__ void init_pivot_union_find_kernel(int* d_pivot_parent, int num_pivots);
+__global__ void uf_compress_kernel(int* d_pivot_parent, int num_pivots);
+
+// Spanning tree initialization
+__global__ void init_spanning_trees_kernel(
+    int* d_parent_fw, int* d_parent_bw,
+    int* d_pivot_id_fw, int* d_pivot_id_bw,
+    int* d_tree_depth,
+    const int* d_pivots, int num_pivots,
+    const int* d_targets, int num_targets,
+    int* d_Color);
+
+// FW spanning forest expansion (one iteration)
+// Includes inline cross-pivot uf_union for transitive pivot tree merging
+__global__ void fw_spanning_forest_iteration_kernel(
+    const edge_t* d_begin, const node_t* d_node_idx,
+    int* d_Color,
+    int* d_parent_fw, int* d_pivot_id_fw, int* d_tree_depth,
+    int* d_pivot_parent,
+    int* d_changed,
+    const int* d_targets, int num_targets);
+
+// BW spanning forest expansion (one iteration, reverse edges)
+// Includes inline cross-pivot uf_union for transitive pivot tree merging
+__global__ void bw_spanning_forest_iteration_kernel(
+    const edge_t* d_r_begin, const node_t* d_r_node_idx,
+    int* d_Color,
+    int* d_parent_bw, int* d_pivot_id_bw, int* d_tree_depth,
+    int* d_pivot_parent,
+    int* d_changed,
+    const int* d_targets, int num_targets);
+
+// SCC extraction from FW ∩ BW tree intersections
+// Uses uf_find() on pivot_parent to resolve merged pivot groups
+__global__ void extract_sccs_from_forest_kernel(
+    int* d_Color, int* d_SCC,
+    const int* d_parent_fw, const int* d_parent_bw,
+    const int* d_pivot_id_fw, const int* d_pivot_id_bw,
+    int* d_pivot_parent,
+    const int* d_pivots,
+    const int* d_targets, int num_targets,
+    int* d_scc_counter);
+
+// Mark pivot nodes as SCC roots
+__global__ void mark_scc_roots_kernel(
+    int* d_Color, int* d_SCC,
+    const int* d_parent_fw, const int* d_parent_bw,
+    const int* d_pivots, int num_pivots);
+
+// Mark remaining unassigned nodes as singleton SCCs
+__global__ void mark_remaining_sccs_kernel(
+    int* d_Color, int* d_SCC,
+    const int* d_targets, int num_targets,
+    int* d_count);
+
+// Host drivers
+int  run_spanning_forest_round(GPUState& st, const GPUGraph& g);
+int  run_spanning_forest_scc(GPUState& st, const GPUGraph& g);
+
 #endif
