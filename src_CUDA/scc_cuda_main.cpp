@@ -9,6 +9,7 @@
 #include <queue>
 #include <algorithm>
 #include <map>
+#include <set>
 
 using namespace std;
 
@@ -425,6 +426,15 @@ int main(int argc, char** argv)
         gettimeofday(&t_trim1, NULL);
         printf("[CUDA] Trimmed = %d\n", trimmed);
 
+        // DEBUG: count SCC roots after TRIM1
+        {
+            vector<int> h_tmp(N);
+            CUDA_CHECK(cudaMemcpy(h_tmp.data(), st.d_SCC, N * sizeof(int), cudaMemcpyDeviceToHost));
+            int cnt = 0;
+            for (int i = 0; i < N; i++) if (h_tmp[i] == i) cnt++;
+            printf("[DEBUG_SCC] After TRIM1: d_SCC[i]==i count = %d\n", cnt);
+        }
+
         int curr_count = N - trimmed;
         if (curr_count == 0) {
             printf("[CUDA] No remaining nodes after trim\n");
@@ -435,14 +445,27 @@ int main(int argc, char** argv)
             initialize_spanning_forest(N);
             
             // Run the full spanning forest SCC algorithm
-            // Returns number of SCCs found; remaining nodes stay in d_trim_targets
             run_spanning_forest_scc(st, gpuG);
+
+            // DEBUG: count SCC roots after spanning forest (before fallback)
+            {
+                vector<int> h_tmp(N);
+                CUDA_CHECK(cudaMemcpy(h_tmp.data(), st.d_SCC, N * sizeof(int), cudaMemcpyDeviceToHost));
+                int cnt = 0;
+                for (int i = 0; i < N; i++) if (h_tmp[i] == i) cnt++;
+                printf("[DEBUG_SCC] After spanning forest (before fallback): d_SCC[i]==i count = %d\n", cnt);
+                
+                // Also count unique non-self d_SCC values (the spanning forest groups)
+                std::set<int> unique_scc;
+                for (int i = 0; i < N; i++) {
+                    if (h_tmp[i] >= 0) unique_scc.insert(h_tmp[i]);
+                }
+                printf("[DEBUG_SCC] Unique d_SCC values (any): %zu\n", unique_scc.size());
+            }
             
             // ---------- Phase 6: Fallback for remaining nodes ----------
             // After spanning forest converges, any remaining unassigned nodes
             // are processed through the proven standard pipeline (trim12 + WCC + FB).
-            // This guarantees correctness even if spanning forest has boundary
-            // collisions between competing pivots in the same true SCC.
             {
                 create_trim1_compact(st, gpuG);
                 int remaining_count = d_trim_targets_count;
@@ -457,17 +480,18 @@ int main(int argc, char** argv)
                     // Trim12 on remaining nodes
                     int* d_fb_count;
                     CUDA_CHECK(cudaMalloc(&d_fb_count, sizeof(int)));
+                    int fb_met_algo = 2;
                     
                     CUDA_CHECK(cudaMemset(d_fb_count, 0, sizeof(int)));
                     repeat_global_trim1_compact(st, gpuG, d_fb_count,
-                        met_algo, flag11, da, d_count_trim_spec, 0);
+                        fb_met_algo, flag11, da, d_count_trim_spec, 0);
                     
                     CUDA_CHECK(cudaMemset(d_fb_count, 0, sizeof(int)));
                     do_global_trim2_new(st, gpuG, d_fb_count);
                     
                     CUDA_CHECK(cudaMemset(d_fb_count, 0, sizeof(int)));
                     repeat_global_trim1_compact(st, gpuG, d_fb_count,
-                        met_algo, flag11, da, d_count_trim_spec, 100);
+                        fb_met_algo, flag11, da, d_count_trim_spec, 100);
                     
                     CUDA_CHECK(cudaFree(d_fb_count));
                     
