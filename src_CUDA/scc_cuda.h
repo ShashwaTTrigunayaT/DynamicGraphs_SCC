@@ -535,22 +535,22 @@ __global__ void init_spanning_trees_kernel(
     int* d_Color);
 
 // FW spanning forest expansion (one iteration)
-// Includes inline cross-pivot uf_union for transitive pivot tree merging
+// Includes inline cross-pivot uf_union on d_pivot_parent_fw (FW-only merges)
 __global__ void fw_spanning_forest_iteration_kernel(
     const edge_t* d_begin, const node_t* d_node_idx,
     int* d_Color,
     int* d_parent_fw, int* d_pivot_id_fw, int* d_tree_depth,
-    int* d_pivot_parent,
+    int* d_pivot_parent_fw,
     int* d_changed,
     const int* d_targets, int num_targets);
 
 // BW spanning forest expansion (one iteration, reverse edges)
-// Includes inline cross-pivot uf_union for transitive pivot tree merging
+// Includes inline cross-pivot uf_union on d_pivot_parent_bw (BW-only merges)
 __global__ void bw_spanning_forest_iteration_kernel(
     const edge_t* d_r_begin, const node_t* d_r_node_idx,
     int* d_Color,
     int* d_parent_bw, int* d_pivot_id_bw, int* d_tree_depth,
-    int* d_pivot_parent,
+    int* d_pivot_parent_bw,
     int* d_changed,
     const int* d_targets, int num_targets);
 
