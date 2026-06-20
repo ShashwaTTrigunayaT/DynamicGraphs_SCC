@@ -31,8 +31,12 @@ static int* d_pivots         = NULL;  // [K_max] pivot NODE IDs
 static int* d_num_pivots     = NULL;  // [1] number of pivots (device)
 static int* d_pivot_degrees  = NULL;  // [K_max] degree of each pivot
 
-// Union-find for pivot tree merging (tiny — K=512 ints, ~2KB)
-static int* d_pivot_parent   = NULL;  // [K_max] union-find, indexed by pivot INDEX
+// Union-find for pivot tree merging (tiny — 2× K=512 ints, ~4KB total)
+// SEPARATE arrays for FW and BW — a merge in one direction must NOT
+// affect the other. Otherwise a single-direction edge (P→Q via FW)
+// makes Q appear merged in BOTH resolutions, causing false SCCs.
+static int* d_pivot_parent_fw = NULL; // [K_max] union-find, FW propagation merges only
+static int* d_pivot_parent_bw = NULL; // [K_max] union-find, BW propagation merges only
 
 static int  d_max_pivots = 512;
 static int  d_num_nodes = 0;
@@ -63,7 +67,8 @@ void initialize_spanning_forest(int num_nodes)
     alloc(d_pivots,          d_max_pivots);
     alloc(d_num_pivots,      1);
     alloc(d_pivot_degrees,   d_max_pivots);
-    alloc(d_pivot_parent,    d_max_pivots);
+    alloc(d_pivot_parent_fw, d_max_pivots);
+    alloc(d_pivot_parent_bw, d_max_pivots);
     alloc(d_scc_counter,     1);
     alloc(d_changed,         1);
 
@@ -81,7 +86,8 @@ void finalize_spanning_forest()
     sf(d_pivots);
     sf(d_num_pivots);
     sf(d_pivot_degrees);
-    sf(d_pivot_parent);
+    sf(d_pivot_parent_fw);
+    sf(d_pivot_parent_bw);
     sf(d_scc_counter);
     sf(d_changed);
     d_forest_initialized = 0;
@@ -185,6 +191,19 @@ __global__ void uf_compress_kernel(int* d_pivot_parent, int num_pivots)
 }
 
 // ======================================================================
+// Kernel: initialize union-find arrays for FW and BW separately
+// ======================================================================
+__global__ void init_pivot_union_find_both_kernel(
+    int* d_pivot_parent_fw, int* d_pivot_parent_bw, int num_pivots)
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid < num_pivots) {
+        d_pivot_parent_fw[tid] = tid;
+        d_pivot_parent_bw[tid] = tid;
+    }
+}
+
+// ======================================================================
 // Kernel: initialize spanning trees from pivots
 // ======================================================================
 __global__ void init_spanning_trees_kernel(
@@ -241,7 +260,7 @@ __global__ void fw_spanning_forest_iteration_kernel(
     const edge_t* d_begin, const node_t* d_node_idx,
     int* d_Color,
     int* d_parent_fw, int* d_pivot_id_fw, int* d_tree_depth,
-    int* d_pivot_parent,
+    int* d_pivot_parent_fw,
     int* d_changed,
     const int* d_targets, int num_targets)
 {
@@ -273,13 +292,15 @@ __global__ void fw_spanning_forest_iteration_kernel(
                 }
             }
 
-            // Step 2: Cross-pivot collision detection
-            // If BOTH n and k are in trees (possibly different pivots), union
+            // Step 2: Cross-pivot collision detection (FW only — uses d_pivot_parent_fw)
+            // A merge here means "P can reach Q via forward edges" — this only
+            // affects FW resolution, NOT BW resolution. Prevents false SCC counting
+            // when a one-directional edge crosses two pivot trees.
             if (old_parent != -1) {
                 int pid_n = d_pivot_id_fw[n];
                 int pid_k = d_pivot_id_fw[k];
                 if (pid_n != -1 && pid_k != -1 && pid_n != pid_k) {
-                    uf_union(d_pivot_parent, pid_n, pid_k, d_changed);
+                    uf_union(d_pivot_parent_fw, pid_n, pid_k, d_changed);
                 }
             }
         }
@@ -296,7 +317,7 @@ __global__ void bw_spanning_forest_iteration_kernel(
     const edge_t* d_r_begin, const node_t* d_r_node_idx,
     int* d_Color,
     int* d_parent_bw, int* d_pivot_id_bw, int* d_tree_depth,
-    int* d_pivot_parent,
+    int* d_pivot_parent_bw,
     int* d_changed,
     const int* d_targets, int num_targets)
 {
@@ -328,12 +349,14 @@ __global__ void bw_spanning_forest_iteration_kernel(
                 }
             }
 
-            // Step 2: Cross-pivot collision detection
+    // Step 2: Cross-pivot collision detection (BW only — uses d_pivot_parent_bw)
+            // A merge here means "Q can reach P via reverse edges" — this only
+            // affects BW resolution, NOT FW resolution.
             if (old_parent != -1) {
                 int pid_n = d_pivot_id_bw[n];
                 int pid_k = d_pivot_id_bw[k];
                 if (pid_n != -1 && pid_k != -1 && pid_n != pid_k) {
-                    uf_union(d_pivot_parent, pid_n, pid_k, d_changed);
+                    uf_union(d_pivot_parent_bw, pid_n, pid_k, d_changed);
                 }
             }
         }
@@ -343,20 +366,19 @@ __global__ void bw_spanning_forest_iteration_kernel(
 // ======================================================================
 // Kernel: extract SCCs from FW ∩ BW tree intersections
 //
-// For each node n in BOTH trees:
-//   resolved_fw = uf_find(d_pivot_parent, d_pivot_id_fw[n])
-//   resolved_bw = uf_find(d_pivot_parent, d_pivot_id_bw[n])
-//   If resolved_fw == resolved_bw: n is in that merged pivot's SCC ✅
+// Uses SEPARATE union-find arrays for FW and BW resolution.
+// A FW merge (P can reach Q via forward edges) only affects
+// resolved_fw, NOT resolved_bw. For a node to be counted as
+// SCC, BOTH independent resolutions must agree.
 //
-// After transitive union-find merging (handled inline during propagation),
-// pivots in the same true SCC will have the same union-find root,
-// so resolved_fw == resolved_bw for all nodes in that SCC.
+// This prevents false positives when a one-directional edge
+// crossing (P→Q via FW) merges pivots in FW but not in BW.
 // ======================================================================
 __global__ void extract_sccs_from_forest_kernel(
     int* d_Color, int* d_SCC,
     const int* d_parent_fw, const int* d_parent_bw,
     const int* d_pivot_id_fw, const int* d_pivot_id_bw,
-    int* d_pivot_parent,
+    int* d_pivot_parent_fw, int* d_pivot_parent_bw,
     const int* d_pivots,
     const int* d_targets, int num_targets,
     int* d_scc_counter)
@@ -376,13 +398,12 @@ __global__ void extract_sccs_from_forest_kernel(
         int pid_bw = d_pivot_id_bw[n];
         if (pid_fw == -1 || pid_bw == -1) continue;
 
-        // Resolve through union-find to get merged pivot group
-        int resolved_fw = uf_find(d_pivot_parent, pid_fw);
-        int resolved_bw = uf_find(d_pivot_parent, pid_bw);
+        // Resolve through SEPARATE union-find arrays
+        int resolved_fw = uf_find(d_pivot_parent_fw, pid_fw);
+        int resolved_bw = uf_find(d_pivot_parent_bw, pid_bw);
 
         if (resolved_fw == resolved_bw) {
             d_Color[n] = SCC_FOUND;
-            // Use the canonical pivot (node ID) as the SCC representative
             d_SCC[n] = d_pivots[resolved_fw];
             if (d_scc_counter) atomicAdd(d_scc_counter, 1);
         }
@@ -483,11 +504,11 @@ int run_spanning_forest_round(GPUState& st, const GPUGraph& g)
     if (h_num_pivots > d_max_pivots) h_num_pivots = d_max_pivots;
 
     // ---------------------------------------------------------------
-    // Phase 2: Initialize union-find (each pivot is its own root)
+    // Phase 2: Initialize union-find (each pivot is its own root in both arrays)
     // ---------------------------------------------------------------
     int uf_block_small = min(h_num_pivots, 256);
-    init_pivot_union_find_kernel<<<(h_num_pivots + uf_block_small - 1) / uf_block_small, uf_block_small>>>(
-        d_pivot_parent, h_num_pivots);
+    init_pivot_union_find_both_kernel<<<(h_num_pivots + uf_block_small - 1) / uf_block_small, uf_block_small>>>(
+        d_pivot_parent_fw, d_pivot_parent_bw, h_num_pivots);
     CUDA_CHECK(cudaDeviceSynchronize());
 
     // ---------------------------------------------------------------
@@ -519,7 +540,7 @@ int run_spanning_forest_round(GPUState& st, const GPUGraph& g)
             g.d_begin, g.d_node_idx,
             st.d_Color,
             d_parent_fw, d_pivot_id_fw, d_tree_depth,
-            d_pivot_parent,
+            d_pivot_parent_fw,
             d_changed,
             d_trim_targets, num_targets);
         CUDA_CHECK(cudaDeviceSynchronize());
@@ -530,11 +551,10 @@ int run_spanning_forest_round(GPUState& st, const GPUGraph& g)
     double fw_ms = (te_fw.tv_sec - ts_fw.tv_sec) * 1000.0 +
                    (te_fw.tv_usec - ts_fw.tv_usec) * 0.001;
 
-    // Compress union-find after FW (cheap: K=512, single block, log2(K) passes)
+    // Compress FW union-find (cheap: K=512, single block, log2(K) passes)
     CUDA_CHECK(cudaMemset(d_changed, 0, sizeof(int)));
-    // (reuse d_changed even though we don't read it — compression is unconditional)
     for (int pass = 0; pass < 10; pass++) {
-        uf_compress_kernel<<<1, min(h_num_pivots, 512)>>>(d_pivot_parent, h_num_pivots);
+        uf_compress_kernel<<<1, min(h_num_pivots, 512)>>>(d_pivot_parent_fw, h_num_pivots);
     }
     CUDA_CHECK(cudaDeviceSynchronize());
 
@@ -553,7 +573,7 @@ int run_spanning_forest_round(GPUState& st, const GPUGraph& g)
             g.d_r_begin, g.d_r_node_idx,
             st.d_Color,
             d_parent_bw, d_pivot_id_bw, d_tree_depth,
-            d_pivot_parent,
+            d_pivot_parent_bw,
             d_changed,
             d_trim_targets, num_targets);
         CUDA_CHECK(cudaDeviceSynchronize());
@@ -564,9 +584,10 @@ int run_spanning_forest_round(GPUState& st, const GPUGraph& g)
     double bw_ms = (te_bw.tv_sec - ts_bw.tv_sec) * 1000.0 +
                    (te_bw.tv_usec - ts_bw.tv_usec) * 0.001;
 
-    // Final union-find compression after BW
+    // Final union-find compression after BW (compress BOTH arrays independently)
     for (int pass = 0; pass < 10; pass++) {
-        uf_compress_kernel<<<1, min(h_num_pivots, 512)>>>(d_pivot_parent, h_num_pivots);
+        uf_compress_kernel<<<1, min(h_num_pivots, 512)>>>(d_pivot_parent_fw, h_num_pivots);
+        uf_compress_kernel<<<1, min(h_num_pivots, 512)>>>(d_pivot_parent_bw, h_num_pivots);
     }
     CUDA_CHECK(cudaDeviceSynchronize());
     gettimeofday(&te_compress, NULL);
@@ -593,7 +614,7 @@ int run_spanning_forest_round(GPUState& st, const GPUGraph& g)
         st.d_Color, st.d_SCC,
         d_parent_fw, d_parent_bw,
         d_pivot_id_fw, d_pivot_id_bw,
-        d_pivot_parent,
+        d_pivot_parent_fw, d_pivot_parent_bw,
         d_pivots,
         d_trim_targets, num_targets,
         d_scc_counter);

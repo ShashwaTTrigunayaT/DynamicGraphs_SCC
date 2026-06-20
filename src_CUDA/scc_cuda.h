@@ -521,6 +521,8 @@ __global__ void select_pivots_kernel(
 
 // Union-find init + compress
 __global__ void init_pivot_union_find_kernel(int* d_pivot_parent, int num_pivots);
+__global__ void init_pivot_union_find_both_kernel(
+    int* d_pivot_parent_fw, int* d_pivot_parent_bw, int num_pivots);
 __global__ void uf_compress_kernel(int* d_pivot_parent, int num_pivots);
 
 // Spanning tree initialization
@@ -553,12 +555,13 @@ __global__ void bw_spanning_forest_iteration_kernel(
     const int* d_targets, int num_targets);
 
 // SCC extraction from FW ∩ BW tree intersections
-// Uses uf_find() on pivot_parent to resolve merged pivot groups
+// Uses SEPARATE uf_find() on pivot_parent_fw and pivot_parent_bw
+// to prevent false SCCs from one-directional edge crossings
 __global__ void extract_sccs_from_forest_kernel(
     int* d_Color, int* d_SCC,
     const int* d_parent_fw, const int* d_parent_bw,
     const int* d_pivot_id_fw, const int* d_pivot_id_bw,
-    int* d_pivot_parent,
+    int* d_pivot_parent_fw, int* d_pivot_parent_bw,
     const int* d_pivots,
     const int* d_targets, int num_targets,
     int* d_scc_counter);
