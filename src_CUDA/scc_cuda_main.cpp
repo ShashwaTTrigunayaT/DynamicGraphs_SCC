@@ -464,54 +464,48 @@ int main(int argc, char** argv)
             }
             
             // ---------- Phase 6: Fallback for remaining nodes ----------
-            // The spanning forest marked ~94% of non-TRIM1 nodes as SCC_FOUND.
-            // These markers make remaining nodes' neighbors invisible to TRIM12
-            // and WCC — causing false singleton counting and WCC fragmentation.
+            // The spanning forest marks ~94% of non-TRIM1 nodes as SCC_FOUND.
+            // This prevents WCC from grouping remaining nodes correctly
+            // (neighbors in SCC_FOUND are invisible, fragmenting components).
             //
-            // Fix: reset d_Color for all SCC_FOUND nodes so the fallback sees
-            // the full graph connectivity. The d_SCC values from the spanning
-            // forest are preserved; TRIM12 re-identifies singletons quickly.
+            // Instead of WCC+FB, run FB directly on the remaining set as a
+            // single work item. FB naturally decomposes any set into SCCs
+            // using recursive FW-BW BFS — no WCC grouping needed.
             {
-                struct timeval fb_start, fb_end;
-                gettimeofday(&fb_start, NULL);
-                
-                // Reset d_Color so fallback sees the full graph
-                reset_forest_colors(st.d_Color, N);
-                
-                printf("[SPAN_FOREST] Running fallback pipeline (TRIM12 + WCC + FB)\n");
-                
-                // TRIM12 — re-identifies singletons and 2-node SCCs
                 create_trim1_compact(st, gpuG);
-                trimmed = repeat_global_trim1_compact(st, gpuG, d_count,
-                    met_algo, flag11, da, d_count_trim_spec, 0);
-                int trim_total = do_global_trim2_new(st, gpuG, d_count);
-                trim_total += repeat_global_trim1_compact(st, gpuG, d_count,
-                    met_algo, flag11, da, d_count_trim_spec, 100);
-                trimmed += trim_total;
-                
                 int remaining_count = d_trim_targets_count;
                 
                 if (remaining_count > 0) {
-                    // WCC — correctly groups remaining nodes (full graph visible)
-                    initialize_global_fb(N);
-                    do_global_wcc(st, gpuG);
-                    create_work_items_from_wcc(st, gpuG);
+                    struct timeval fb_start, fb_end;
+                    gettimeofday(&fb_start, NULL);
                     
-                    // FB on remaining components
-                    double fb_time = run_gpu_fb(st, gpuG, num_threads);
+                    printf("[SPAN_FOREST] Processing %d remaining nodes through FB-only fallback (no WCC)\n",
+                           remaining_count);
+                    
+                    initialize_global_fb(N);
+                    
+                    // Create a single work item with all remaining nodes
+                    CUDAMyWork* work = new CUDAMyWork();
+                    work->color       = COLOR_UNASSIGNED;
+                    work->count       = remaining_count;
+                    work->d_set_nodes = NULL;
+                    work->set_capacity = 0;
+                    work->depth       = 0;
+                    work->owns_set    = 0;
+                    work_q_put(0, work);
+                    
+                    // FB decomposes the set into SCCs directly
+                    // (uses d_trim_targets for node set, d_Color for BFS colors)
+                    double fb_time = start_workers_fw_bw_dfs_host(st, gpuG, num_threads);
                     if (fb_time < 0.0) fb_time = 0.0;
-                    if (!is_work_q_empty_from_seq_context()) {
-                        double host_time = start_workers_fw_bw_dfs_host(st, gpuG, num_threads);
-                        fb_time += host_time;
-                    }
                     
                     finalize_global_fb();
+                    
+                    gettimeofday(&fb_end, NULL);
+                    double fb_ms = (fb_end.tv_sec - fb_start.tv_sec) * 1000.0 +
+                                   (fb_end.tv_usec - fb_start.tv_usec) * 0.001;
+                    printf("[SPAN_FOREST] Fallback FB: %.2fms\n", fb_ms);
                 }
-                
-                gettimeofday(&fb_end, NULL);
-                double fb_ms = (fb_end.tv_sec - fb_start.tv_sec) * 1000.0 +
-                               (fb_end.tv_usec - fb_start.tv_usec) * 0.001;
-                printf("[SPAN_FOREST] Fallback pipeline: %.2fms\n", fb_ms);
             }
             
             gettimeofday(&t_forest, NULL);

@@ -572,10 +572,6 @@ __global__ void mark_scc_roots_kernel(
     const int* d_parent_fw, const int* d_parent_bw,
     const int* d_pivots, int* d_pivot_parent_fw, int num_pivots);
 
-// Reset d_Color from SCC_FOUND back to COLOR_UNASSIGNED (for fallback)
-// Host wrapper — defined in scc_cuda_spanning_forest.cu (compiled by nvcc)
-void reset_forest_colors(int* d_Color, int num_nodes);
-
 // Mark remaining unassigned nodes as singleton SCCs
 __global__ void mark_remaining_sccs_kernel(
     int* d_Color, int* d_SCC,

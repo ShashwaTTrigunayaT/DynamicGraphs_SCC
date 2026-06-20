@@ -650,40 +650,6 @@ int run_spanning_forest_round(GPUState& st, const GPUGraph& g)
 }
 
 // ======================================================================
-// Kernel: reset d_Color from SCC_FOUND back to COLOR_UNASSIGNED
-//
-// Called BEFORE the fallback pipeline so that TRIM12/WCC/FB see the
-// full graph connectivity. Without this, nodes marked SCC_FOUND by the
-// spanning forest are invisible to the fallback — remaining nodes that
-// connect through them appear disconnected, WCC fragments them into
-// tiny components, and FB within each fragment over-counts SCCs.
-//
-// Singletons from TRIM1 (d_SCC[i] == i) also get reset, but TRIM12
-// re-identifies them in one pass. d_SCC values are preserved.
-// ======================================================================
-__global__ void reset_d_colors_kernel(int* d_Color, int num_nodes)
-{
-    int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    int stride = blockDim.x * gridDim.x;
-    for (int i = tid; i < num_nodes; i += stride) {
-        if (d_Color[i] == SCC_FOUND) {
-            d_Color[i] = COLOR_UNASSIGNED;
-        }
-    }
-}
-
-// Host wrapper — called from main.cpp (compiled by g++, needs host function)
-void reset_forest_colors(int* d_Color, int num_nodes)
-{
-    if (num_nodes <= 0) return;
-    int block_size = 256;
-    int grid_size = (num_nodes + block_size - 1) / block_size;
-    grid_size = min(grid_size, 65535);
-    reset_d_colors_kernel<<<grid_size, block_size>>>(d_Color, num_nodes);
-    CUDA_CHECK(cudaDeviceSynchronize());
-}
-
-// ======================================================================
 // run_spanning_forest_scc() — Full host driver
 //
 // Iteratively applies spanning forest rounds until convergence.
