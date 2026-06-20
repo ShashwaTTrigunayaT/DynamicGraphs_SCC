@@ -13,18 +13,23 @@ sys.setrecursionlimit(1000000)
 
 
 def read_graph(filename):
-    """Return edges list [(u,v), ...] and number of nodes (max_id+1)."""
+    """Return edges list [(u,v), ...] and number of nodes (max_id+1).
+    Skips comment lines (starts with %). Handles 1-indexed node IDs.
+    """
     edges = []
     max_id = -1
     with open(filename) as f:
         for line in f:
             line = line.strip()
-            if not line:
+            if not line or line.startswith('%'):
                 continue
             parts = line.split()
             if len(parts) < 2:
                 continue
-            u, v = int(parts[0]), int(parts[1])
+            # Graph files use 1-indexed node IDs; convert to 0-indexed
+            u, v = int(parts[0]) - 1, int(parts[1]) - 1
+            if u < 0 or v < 0:
+                continue
             edges.append((u, v))
             max_id = max(max_id, u, v)
     return edges, max_id + 1
