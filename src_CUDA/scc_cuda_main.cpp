@@ -442,13 +442,24 @@ int main(int argc, char** argv)
         } else {
             // ---------- Phase 2-5: Spanning Forest SCC ----------
             // Initialize spanning forest state
-            initialize_spanning_forest(N);
+            {
+                struct timeval sf_init_start, sf_init_end;
+                gettimeofday(&sf_init_start, NULL);
+                initialize_spanning_forest(N);
+                gettimeofday(&sf_init_end, NULL);
+                double sf_init_ms = (sf_init_end.tv_sec - sf_init_start.tv_sec) * 1000.0 +
+                                    (sf_init_end.tv_usec - sf_init_start.tv_usec) * 0.001;
+                printf("[SPAN_FOREST] initialize_spanning_forest: %.2fms\n", sf_init_ms);
+            }
             
             // Run the full spanning forest SCC algorithm
             run_spanning_forest_scc(st, gpuG);
 
             // DEBUG: count SCC roots after spanning forest (before fallback)
             {
+                struct timeval debug_start, debug_end;
+                gettimeofday(&debug_start, NULL);
+                
                 vector<int> h_tmp(N);
                 CUDA_CHECK(cudaMemcpy(h_tmp.data(), st.d_SCC, N * sizeof(int), cudaMemcpyDeviceToHost));
                 int cnt = 0;
@@ -461,6 +472,11 @@ int main(int argc, char** argv)
                     if (h_tmp[i] >= 0) unique_scc.insert(h_tmp[i]);
                 }
                 printf("[DEBUG_SCC] Unique d_SCC values (any): %zu\n", unique_scc.size());
+                
+                gettimeofday(&debug_end, NULL);
+                double debug_ms = (debug_end.tv_sec - debug_start.tv_sec) * 1000.0 +
+                                  (debug_end.tv_usec - debug_start.tv_usec) * 0.001;
+                printf("[SPAN_FOREST] DEBUG_SCC download + counting: %.2fms\n", debug_ms);
             }
             
             // ---------- Phase 6: Fallback — WCC + FB on remaining nodes ----------
@@ -494,8 +510,16 @@ int main(int argc, char** argv)
                 }
             }
             
+            {
+                struct timeval fin_start, fin_end;
+                gettimeofday(&fin_start, NULL);
+                finalize_spanning_forest();
+                gettimeofday(&fin_end, NULL);
+                double fin_ms = (fin_end.tv_sec - fin_start.tv_sec) * 1000.0 +
+                                (fin_end.tv_usec - fin_start.tv_usec) * 0.001;
+                printf("[SPAN_FOREST] finalize_spanning_forest (12x cudaFree): %.2fms\n", fin_ms);
+            }
             gettimeofday(&t_forest, NULL);
-            finalize_spanning_forest();
         }
 
         gettimeofday(&t_end, NULL);

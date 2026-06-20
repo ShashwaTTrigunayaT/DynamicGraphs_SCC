@@ -13,8 +13,9 @@
 // Fix (per Claude's design):
 //   - Separate d_pivot_id_fw[n] and d_pivot_id_bw[n] arrays
 //     (current code's single d_pivot_id is overwritten by BW after FW!)
-//   - uf_find/uf_union on d_pivot_parent[K] (tiny — 512 ints)
-//   - Every edge crossing two pivot trees triggers a union
+//   - uf_find/uf_union on d_pivot_parent[K] (tiny — ≤1024 ints, ~4KB)
+//   - Every edge crossing two pivot trees triggers a union (FW and BW evidence
+//     merge into the SAME structure for a complete transitive picture)
 //   - Extraction resolves through find() on compressed union-find
 //
 // Replaces Phases 2-5 (GLOBAL_BFS + TRIM1/2 + WCC + FB).
@@ -684,7 +685,15 @@ int run_spanning_forest_scc(GPUState& st, const GPUGraph& g)
     while (round < MAX_ROUNDS) {
         round++;
 
-        create_trim1_compact(st, g);
+        {
+            struct timeval tc_start, tc_end;
+            gettimeofday(&tc_start, NULL);
+            create_trim1_compact(st, g);
+            gettimeofday(&tc_end, NULL);
+            double tc_ms = (tc_end.tv_sec - tc_start.tv_sec) * 1000.0 +
+                           (tc_end.tv_usec - tc_start.tv_usec) * 0.001;
+            printf("[SPAN_FOREST] Round %d pre: create_trim1_compact = %.3fms\n", round, tc_ms);
+        }
 
         int num_targets = d_trim_targets_count;
         if (num_targets == 0) {
