@@ -566,6 +566,9 @@ __global__ void extract_sccs_from_forest_kernel(
     const int* d_targets, int num_targets,
     int* d_scc_counter);
 
+// Reset d_Color from SCC_FOUND to COLOR_UNASSIGNED (for fallback FB)
+void reset_forest_colors(int* d_Color, int num_nodes);
+
 // Mark pivot nodes as SCC roots (only canonical FW group roots via uf_find)
 __global__ void mark_scc_roots_kernel(
     int* d_Color, int* d_SCC,

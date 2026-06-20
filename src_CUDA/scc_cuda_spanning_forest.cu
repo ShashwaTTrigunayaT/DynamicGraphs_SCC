@@ -650,6 +650,36 @@ int run_spanning_forest_round(GPUState& st, const GPUGraph& g)
 }
 
 // ======================================================================
+// Kernel: reset d_Color from SCC_FOUND back to COLOR_UNASSIGNED
+//
+// Called BEFORE the fallback so FB sees the full graph connectivity.
+// Without this reset, FB is limited to the unresolved work set and
+// can't see through spanning-forest-resolved nodes, causing false
+// singleton SCC assignments for remaining nodes.
+// ======================================================================
+__global__ void reset_d_colors_kernel(int* d_Color, int num_nodes)
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+    for (int i = tid; i < num_nodes; i += stride) {
+        if (d_Color[i] == SCC_FOUND) {
+            d_Color[i] = COLOR_UNASSIGNED;
+        }
+    }
+}
+
+// Host wrapper — called from main.cpp (compiled by g++, needs host function)
+void reset_forest_colors(int* d_Color, int num_nodes)
+{
+    if (num_nodes <= 0) return;
+    int block_size = 256;
+    int grid_size = (num_nodes + block_size - 1) / block_size;
+    grid_size = min(grid_size, 65535);
+    reset_d_colors_kernel<<<grid_size, block_size>>>(d_Color, num_nodes);
+    CUDA_CHECK(cudaDeviceSynchronize());
+}
+
+// ======================================================================
 // run_spanning_forest_scc() — Full host driver
 //
 // Iteratively applies spanning forest rounds until convergence.

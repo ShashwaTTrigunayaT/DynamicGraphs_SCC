@@ -463,55 +463,60 @@ int main(int argc, char** argv)
                 printf("[DEBUG_SCC] Unique d_SCC values (any): %zu\n", unique_scc.size());
             }
             
-            // ---------- Phase 6: Fallback for remaining nodes ----------
+            // ---------- Phase 6: Fallback — full FB on all nodes ----------
             // The spanning forest marks ~94% of non-TRIM1 nodes as SCC_FOUND.
-            // This prevents WCC from grouping remaining nodes correctly
-            // (neighbors in SCC_FOUND are invisible, fragmenting components).
+            // This prevents the fallback from seeing their connectivity:
+            // remaining nodes connected through resolved nodes appear
+            // disconnected, causing false singleton SCC counting.
             //
-            // Instead of WCC+FB, run FB directly on the remaining set as a
-            // single work item. FB naturally decomposes any set into SCCs
-            // using recursive FW-BW BFS — no WCC grouping needed.
+            // Fix: reset d_Color so the FB sees the FULL graph. Include
+            // ALL non-TRIM1 nodes in a single work item. FB natively
+            // decomposes any set into SCCs using FW-BW BFS.
             {
-                create_trim1_compact(st, gpuG);
-                int remaining_count = d_trim_targets_count;
+                struct timeval fb_start, fb_end;
+                gettimeofday(&fb_start, NULL);
                 
-                if (remaining_count > 0) {
-                    struct timeval fb_start, fb_end;
-                    gettimeofday(&fb_start, NULL);
-                    
-                    printf("[SPAN_FOREST] Processing %d remaining nodes through FB-only fallback (no WCC)\n",
-                           remaining_count);
-                    
+                printf("[SPAN_FOREST] Resetting d_Color, running full FB on all nodes\n");
+                
+                // Reset ALL d_Color (TRIM1 singletons + forest-resolved)
+                // to COLOR_UNASSIGNED so FB sees the full graph
+                reset_forest_colors(st.d_Color, N);
+                
+                // Build compact target list from ALL nodes
+                create_trim1_compact(st, gpuG);
+                int total_count = d_trim_targets_count;
+                
+                if (total_count > 0) {
                     initialize_global_fb(N);
                     
-                    // Allocate device copy of remaining nodes for the work item
-                    int* d_remaining = NULL;
-                    CUDA_CHECK(cudaMalloc(&d_remaining, remaining_count * sizeof(int)));
-                    CUDA_CHECK(cudaMemcpy(d_remaining, d_trim_targets,
-                                           remaining_count * sizeof(int),
+                    // Allocate device copy of ALL nodes for the work item
+                    int* d_all_nodes = NULL;
+                    CUDA_CHECK(cudaMalloc(&d_all_nodes, total_count * sizeof(int)));
+                    CUDA_CHECK(cudaMemcpy(d_all_nodes, d_trim_targets,
+                                           total_count * sizeof(int),
                                            cudaMemcpyDeviceToDevice));
                     
-                    // Create a single work item with all remaining nodes
+                    // Single work item containing ALL non-TRIM1 nodes
                     CUDAMyWork* work = new CUDAMyWork();
                     work->color       = COLOR_UNASSIGNED;
-                    work->count       = remaining_count;
-                    work->d_set_nodes = d_remaining;
-                    work->set_capacity = remaining_count;
-                    work->owns_set    = 1;  // FB will free this
+                    work->count       = total_count;
+                    work->d_set_nodes = d_all_nodes;
+                    work->set_capacity = total_count;
+                    work->owns_set    = 1;
                     work->depth       = 0;
                     work_q_put(0, work);
                     
-                    // FB decomposes the set into SCCs directly (no WCC needed)
+                    // FB processes the full graph and finds ALL SCCs correctly
                     double fb_time = start_workers_fw_bw_dfs_host(st, gpuG, num_threads);
                     if (fb_time < 0.0) fb_time = 0.0;
                     
                     finalize_global_fb();
-                    
-                    gettimeofday(&fb_end, NULL);
-                    double fb_ms = (fb_end.tv_sec - fb_start.tv_sec) * 1000.0 +
-                                   (fb_end.tv_usec - fb_start.tv_usec) * 0.001;
-                    printf("[SPAN_FOREST] Fallback FB: %.2fms\n", fb_ms);
                 }
+                
+                gettimeofday(&fb_end, NULL);
+                double fb_ms = (fb_end.tv_sec - fb_start.tv_sec) * 1000.0 +
+                               (fb_end.tv_usec - fb_start.tv_usec) * 0.001;
+                printf("[SPAN_FOREST] Fallback FB (full graph): %.2fms\n", fb_ms);
             }
             
             gettimeofday(&t_forest, NULL);
