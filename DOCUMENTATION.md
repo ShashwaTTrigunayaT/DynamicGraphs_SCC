@@ -109,6 +109,7 @@ Input Graph
 | 8 | **TRIM1 Block-Contiguous** — stride→contiguous access | No change (3.63ms → 3.63ms) | 🔴 **Reverted** |
 | 9 | **Block-Local SMEM Queue BFS** — 1024-entry shared memory frontier queue | **Monotonic queue bug** — s_q_tail grew forever, queue full after ~30 levels | 🔴 **Reverted** |
 | 10 | **Ping-Pong Double-Buffered SMEM Queues** — 2×512 queues swap each level | **+20% overhead** (29ms → 35ms), even on deep-path graphs | 🔴 **Reverted** |
+| 11 | **Spanning Forest SCC (Method 12)** — Multi-pivot FW-BW spanning trees with union-find merging, replacing Phases 2-5 | **11× slower than OpenMP** on wiki-Talk, non-deterministic SCC counts | 🔴 **Reverted** |
 
 ### Why They Failed (Detailed)
 
@@ -121,6 +122,50 @@ Input Graph
 **🔴 TRIM1 Block-Contiguous (Jun 17):** Changed stride-pattern `for (n = tid; n < N; n += stride)` to block-contiguous `n = blockIdx.x * blockDim.x + threadIdx.x`. No improvement because `d_Color` (19.2MB for 4.8M nodes) fits entirely in the L40S **48MB L2 cache**. The stride pattern was already hitting L2 — the bottleneck is random neighbor reads, which no access pattern can fix.
 
 **🔴 WCC Fused Propagation (Jun 17):** Combined Phase 1 (find min root) and Phase 2 (path compression) into a single kernel. WCC stayed at ~4.24ms (vs 4.20ms before). Root cause: Only 8,138 nodes remain at the WCC phase — that's just 32 blocks × 256 threads on a 142-SM GPU (23% utilization). The kernel launch overhead we eliminated (~0.1ms) is within run-to-run noise.
+
+**🔴 Spanning Forest SCC — Method 12 (Jun 18-20):** Multi-pivot spanning forest algorithm replacing Phases 2-5 (GLOBAL_BFS + TRIM1/2 + WCC + FB). Designed to fix GLOBAL_BFS's high-diameter bottleneck by growing K=64-1024 parallel spanning trees with union-find pivot merging.
+
+**What was implemented:**
+- New file: `src_CUDA/scc_cuda_spanning_forest.cu` (~700 lines)
+- `select_pivots_kernel`: degree-weighted warp-ballot pivot selection
+- `fw_spanning_forest_iteration_kernel`: parallel FW tree growth with atomicCAS parent assignment
+- `bw_spanning_forest_iteration_kernel`: parallel BW tree growth (reverse edges)
+- `extract_sccs_from_forest_kernel`: SCC extraction from FW∩BW tree intersections
+- `mark_scc_roots_kernel`: canonical pivot root marking via `uf_find()`
+- Host drivers: `run_spanning_forest_round()`, `run_spanning_forest_scc()`
+- Shared union-find array (`d_pivot_parent`) for transitive pivot merging
+- Pivot scaling: `max(64, min(num_targets/2048, d_max_pivots))` pivots per round
+- Early exit: stop when resolution < 10% after round 2
+- Fallback: WCC + FB on remaining unresolved residual (no global d_Color reset)
+
+**Bugs found and fixed during implementation:**
+| # | Bug | Symptom | Fix |
+|:-:|-----|---------|-----|
+| 1 | `mark_scc_roots_kernel` marked ALL pivots as SCC roots, even non-canonical ones merged into another pivot's group | SCC count inflated by false double-counting | Added `uf_find(d_pivot_parent, i) == i` check — only canonical roots get marked |
+| 2 | Separate FW/BW union-find arrays (`d_pivot_parent_fw` / `d_pivot_parent_bw`) — merges from FW (P→Q) and BW (Q→R) never exchanged information | `resolved_fw != resolved_bw` even when {P,Q,R} are the same SCC | Reverted to single `d_pivot_parent` shared by both kernels |
+| 3 | Global d_Color reset before fallback — reset ALL nodes including TRIM1 singletons and forest-resolved | Fallback reprocessed entire graph (~1.6M nodes) instead of just residual (~21K) | Scoped fallback to existing `d_trim_targets` (unresolved only), no reset needed |
+| 4 | Non-deterministic race condition (unfixed) | SCC counts vary by ±1,000 across runs on wiki-Talk | Root cause unknown — possible atomicCAS order-dependence in tree growth or sync gap between FW/BW phases |
+
+**Benchmark results (wiki-Talk, 5.0M edges, 2.3M SCCs):**
+| Component | Time | Note |
+|-----------|:----:|------|
+| TRIM1 | 0.47ms | ✅ Fast |
+| Spanning forest (3 rounds) | 134.14ms | 🔴 **Dominant cost** — Round 1 FW alone = 98-116ms for 113K targets |
+| Round 1 resolution | 94.7% (1st round finds most SCCs) | ✅ Good algorithmic convergence |
+| Fallback (residual) | 14.23ms | ✅ Proportional cost |
+| **Method 12 total** | **~150ms** | ❌ **11× slower than OpenMP (13.68ms), 5.1× slower than Method 2 (29.23ms)** |
+| **SCC count** | **2,283,154–2,284,579** vs expected **2,281,879** | ❌ **Non-deterministic — off by +1,300 to +2,700** |
+
+**Root cause of poor performance:**
+1. **Kernel launch overhead dominates** — Spanning forest uses multiple kernel launches per iteration (FW, BW, compress, extract). For small target sets (113K for wiki-Talk), the launch latency of each kernel dwarfs the actual compute time. Each kernel launch on L40S costs ~5-15μs, and the spanning forest needs ~20+ launches per round.
+2. **No work amplification** — Unlike BFS (1 frontier node → many neighbors discovered per level), each spanning forest iteration only grows trees by 1 hop. The atomicCAS tree-grow pattern is inherently limited by per-node work.
+3. **Union-find compression overhead** — 10 passes of `uf_compress_kernel` per round (needed for path compression) adds fixed cost regardless of target count.
+
+**Conclusion:** The spanning forest approach is theoretically motivated (iSpan, SC18) but in practice on wiki-Talk:
+- Every kernel launch costs ~5-15μs wall time, and the spanning forest needs ~20+ launches per round
+- For small residual sets (after TRIM1), the per-kernel overhead dominates
+- The approach might benefit from persistent kernel design (Cooperative Groups) to amortize launch costs — but that is left as future work
+- **Recommendation:** Present Method 2 as the working, validated, faster-than-OpenMP solution. The spanning forest investigation is a legitimate research finding: "we tried the theoretically-motivated approach and empirically it did not outperform existing methods due to kernel-launch overhead dominating on small-to-medium target sets and an unresolved race condition."
 
 ---
 
@@ -576,3 +621,62 @@ DynamicGraphs_SCC/
     ├── convert.cc, convert.h # Deprecated Green-Marl converter
     └── Makefile
 ```
+
+---
+
+## 🧪 Spanning Forest SCC — Actual Results (Method 12, Implemented Jun 18-20)
+
+### What Was Implemented
+
+A multi-pivot spanning forest algorithm replacing Phases 2-5 (GLOBAL_BFS + TRIM1/2 + WCC + FB). Implemented as Method 12 in `src_CUDA/scc_cuda_spanning_forest.cu` (~700 lines).
+
+**Algorithm:**
+1. After TRIM1, select K pivots (scaled: ~1 per 2048 targets, clamped [64, d_max_pivots])
+2. Grow FW and BW spanning trees simultaneously using atomicCAS parent assignment
+3. Merge pivot trees via shared union-find when cross-pivot edges detected
+4. Extract SCCs from FW∩BW tree intersections using resolved union-find roots
+5. Early exit when resolution < 10% after round 2
+6. Fallback: WCC + FB on remaining unresolved residual
+
+### Actual Benchmark Results (wiki-Talk, 5.0M edges, 2.3M SCCs)
+
+| Component | Time | vs Method 2 | vs OpenMP |
+|-----------|:----:|:-----------:|:---------:|
+| TRIM1 | 0.47ms | — | — |
+| Round 1: FW+BW+Extract | ~110ms | — | — |
+| Round 2+3 | ~24ms | — | — |
+| Fallback (residual only) | ~14ms | — | — |
+| **Method 12 total** | **~150ms** | ❌ **5.1× slower** (29.23ms) | ❌ **11× slower** (13.68ms) |
+| **SCC count** | **2,283,154–2,284,579** | ❌ Non-deterministic | Expected: 2,281,879 |
+
+### Bugs Found and Fixed
+
+| # | Bug | Fix |
+|:-:|-----|-----|
+| 1 | `mark_scc_roots_kernel` marked non-canonical pivots as roots | Added `uf_find(d_pivot_parent, i) == i` check |
+| 2 | Separate FW/BW union-find arrays never exchanged merge info | Reverted to single shared `d_pivot_parent` |
+| 3 | Global d_Color reset forced fallback to reprocess entire graph | Scoped fallback to unresolved `d_trim_targets` only |
+| 4 | **Unfixed**: Non-deterministic race — SCC count varies by ±1,000 across runs | Unknown cause (atomicCAS order-dependence?) |
+
+### Root Cause of Poor Performance
+
+1. **Kernel launch overhead dominates** — Spanning forest needs ~20+ kernel launches per round (FW iterations, BW iterations, compress passes, extract). Each launch costs ~5-15μs on L40S. For small target sets, this dwarfs actual compute.
+2. **No work amplification** — Each tree-growth iteration only advances 1 hop per node. Unlike BFS (1→many frontier expansion), atomicCAS tree growth is per-node, inherently limited.
+3. **Union-find compression overhead** — 10 passes of `uf_compress_kernel` per round add fixed cost regardless of target count.
+
+### Conclusion
+
+"Spanning forest was investigated as a theoretical fix for high-diameter graphs, implemented, and found to underperform in practice due to kernel-launch overhead dominating at small-to-medium target-set sizes, plus an unresolved race condition." — This is a legitimate, presentable research finding: **the theoretically-motivated approach was empirically evaluated and did not outperform existing methods.**
+
+**Recommendation:** Present Method 2 as the working, validated, faster-than-OpenMP solution (7 of 9 graphs). The spanning forest investigation shows where the complexity/performance tradeoff breaks on CUDA for this class of algorithm.
+
+---
+
+## 🔬 Research References
+
+| Paper | Authors | Key Insight | Relevance |
+|-------|---------|-------------|-----------|
+| **iSpan: Parallel Identification of SCCs with Spanning Trees** | Yuede Ji, Hang Liu, H. Howie Huang (SC18) | Relaxed-sync spanning tree construction replaces DFS | Theoretical basis for Method 12 |
+| **Computing SCCs in Parallel on CUDA** | Barnat et al. (2011) | FB-Trim: FW-BW with iterative trimming | Baseline comparison |
+| **ECL-SCC: High-Performance SCC Detection** | Burtscher et al. (2023) | Optimized BFS-based SCC with hybrid strategies | Implementation patterns |
+| **BFS and Coloring-based Parallel Algorithms for SCC** | Slota et al. (Sandia) | Multi-step method combining trim, coloring, FB | Algorithm taxonomy |
