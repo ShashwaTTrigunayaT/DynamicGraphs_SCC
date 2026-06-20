@@ -541,7 +541,7 @@ int run_spanning_forest_round(GPUState& st, const GPUGraph& g)
     // ---------------------------------------------------------------
     int fw_iters = 0;
     int h_changed = 1;
-    int MAX_ITERS = 50;
+    int MAX_ITERS = 100;  // deeper propagation for larger SCCs
 
     gettimeofday(&ts_fw, NULL);
     while (h_changed && fw_iters < MAX_ITERS) {
@@ -664,6 +664,7 @@ int run_spanning_forest_scc(GPUState& st, const GPUGraph& g)
     int total_sccs = 0;
     int round = 0;
     int MAX_ROUNDS = 100;
+    const double MIN_RESOLUTION_PCT = 10.0;  // Stop if <10% resolved (fragments too small)
 
     while (round < MAX_ROUNDS) {
         round++;
@@ -683,16 +684,25 @@ int run_spanning_forest_scc(GPUState& st, const GPUGraph& g)
         int resolved = before - after;
         total_sccs += scc_found;
 
+        double pct = (before > 0) ? 100.0 * resolved / before : 0.0;
         printf("[SPAN_FOREST] Round %d: resolved %d/%d nodes (%.1f%%), "
                "found %d SCCs, %d remain\n",
-               round, resolved, before,
-               (before > 0) ? 100.0 * resolved / before : 0.0,
+               round, resolved, before, pct,
                scc_found, after);
 
         if (scc_found == 0) {
             printf("[SPAN_FOREST] Converged after %d rounds (%d SCCs), "
                    "%d targets remain — returning for fallback\n",
                    round, total_sccs, after);
+            break;
+        }
+
+        // Early exit: if resolution rate drops below threshold, fragments
+        // are too small for effective spanning forest — let fallback handle them.
+        if (pct < MIN_RESOLUTION_PCT && round >= 2) {
+            printf("[SPAN_FOREST] Resolution %.1f%% below threshold %.0f%% after round %d, "
+                   "deferring %d remaining to fallback\n",
+                   pct, MIN_RESOLUTION_PCT, round, after);
             break;
         }
     }
