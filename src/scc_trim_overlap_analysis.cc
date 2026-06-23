@@ -522,7 +522,7 @@ int main(int argc, char** argv)
     printf("  %-20s | %10s | %10s | %10s | %10s | %10s | %12s |\n",
            "", "T_mod∩B", "T_mod", "(new)", "(direct)", "Exp1", "Time (ms)");
     printf("  ");
-    for (int c = 0; c < 84; c++) printf("-");
+    for (int c = 0; c < 104; c++) printf("-");
     printf("\n");
 
     for (int i = 0; i < num_batches; i++) {
@@ -545,7 +545,7 @@ int main(int argc, char** argv)
     }
 
     printf("  ");
-    for (int c = 0; c < 84; c++) printf("-");
+    for (int c = 0; c < 104; c++) printf("-");
     printf("\n");
     printf("\n");
     printf("  Exp1 = batch nodes trimmed on modified graph (T_mod ∩ B)\n");
