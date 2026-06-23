@@ -3,15 +3,19 @@
 //
 // Experiment: For each delete batch, count how many of its unique nodes
 // (from source and destination of each edge) are trimmed by TRIM1 on the
-// full original graph (no deletions).
+// MODIFIED graph (original graph with batch edges removed).
+//
+// This is the updated version: Experiment 1 now runs on the same modified
+// graph that Experiment 2 uses, so results can be directly compared.
 //
 // Process:
-//   1. Read original graph
-//   2. Run TRIM1 on full graph → record which nodes get trimmed
-//   3. For each batch file:
-//      a. Read all edges, collect unique node IDs
-//      b. Count how many of those unique nodes were trimmed by TRIM1
-//      c. Report
+//   1. Read original graph edges
+//   2. For each batch file:
+//      a. Read all edges, collect unique node IDs (B)
+//      b. Build graph = (original_edges - batch_edges)
+//      c. Run TRIM1 on modified graph → T_mod
+//      d. Count how many batch nodes are in T_mod (T_mod ∩ B)
+//      e. Report
 //
 // Build:
 //   g++ -O3 -I. -I../gm_graph/inc -fopenmp -std=gnu++0x \
@@ -22,9 +26,13 @@
 //   ./scc_batch_node_check <refined_edges.txt> <batch1> [batch2 ...]
 //
 // Example:
-//   ./scc_batch_node_check /hdd/thej_par_scc_datasets/soc-Pokec/refined_edges.txt \
-//       /hdd/thej_par_scc_datasets/soc-Pokec/0.01_delete_edges.txt \
-//       /hdd/thej_par_scc_datasets/soc-Pokec/0.03_delete_edges.txt
+//   ./scc_batch_node_check /hdd/thej_par_scc_datasets/ljournal-2008/refined_edges.txt \
+//       /hdd/thej_par_scc_datasets/ljournal-2008/0.01_delete_edges.txt \
+//       /hdd/thej_par_scc_datasets/ljournal-2008/0.03_delete_edges.txt \
+//       /hdd/thej_par_scc_datasets/ljournal-2008/0.05_delete_edges.txt \
+//       /hdd/thej_par_scc_datasets/ljournal-2008/0.07_delete_edges.txt \
+//       /hdd/thej_par_scc_datasets/ljournal-2008/0.1_delete_edges.txt \
+//       /hdd/thej_par_scc_datasets/ljournal-2008/0.15_delete_edges.txt
 // ==========================================================================
 
 #include <stdio.h>
@@ -91,13 +99,13 @@ static int read_edge_file(const std::string& filename,
 }
 
 // ==========================================================================
-// Read a delete batch file: return unique node IDs + edge count
+// Read a delete batch file: return unique node IDs + edges to delete
 // ==========================================================================
-static std::pair<std::unordered_set<int>, int>
-read_batch_nodes(const std::string& filename)
+static std::pair<std::unordered_set<int>, std::vector<std::pair<int,int>>>
+read_batch(const std::string& filename)
 {
     std::unordered_set<int> nodes;
-    int edge_count = 0;
+    std::vector<std::pair<int,int>> del_edges;
     std::ifstream fin(filename);
     if (!fin.is_open()) {
         fprintf(stderr, "ERROR: Cannot open %s\n", filename.c_str());
@@ -118,10 +126,10 @@ read_batch_nodes(const std::string& filename)
 
         nodes.insert(v1);
         nodes.insert(v2);
-        edge_count++;
+        del_edges.push_back({v1, v2});
     }
     fin.close();
-    return {nodes, edge_count};
+    return {nodes, del_edges};
 }
 
 // ==========================================================================
@@ -197,6 +205,39 @@ static int repeat_global_trim1(const gm_graph& G, int TRIM_STOP = 100)
 }
 
 // ==========================================================================
+// Build graph from edges (optionally excluding a set)
+// ==========================================================================
+static gm_graph build_graph(int num_nodes,
+                            const std::vector<std::pair<int,int>>& orig_edges,
+                            const std::set<std::pair<int,int>>& exclude = {})
+{
+    gm_graph G;
+    for (int i = 0; i < num_nodes; i++)
+        G.add_node();
+
+    for (const auto& e : orig_edges) {
+        if (exclude.find(e) == exclude.end()) {
+            G.add_edge(e.first, e.second);
+        }
+    }
+
+    G.make_reverse_edges();
+    return G;
+}
+
+// ==========================================================================
+// Initialize color arrays
+// ==========================================================================
+static void init_colors()
+{
+    #pragma omp parallel for
+    for (int i = 0; i < G_num_nodes; i++) {
+        G_Color[i] = COLOR_UNASSIGNED;
+        G_SCC[i]   = NIL_NODE;
+    }
+}
+
+// ==========================================================================
 // Main
 // ==========================================================================
 int main(int argc, char** argv)
@@ -204,8 +245,9 @@ int main(int argc, char** argv)
     if (argc < 3) {
         printf("Usage: %s <refined_edges.txt> <delete_batch_1> [delete_batch_2 ...]\n", argv[0]);
         printf("\n");
-        printf("For each batch, collects unique nodes from its edges and counts\n");
-        printf("how many of them were trimmed by TRIM1 on the full original graph.\n");
+        printf("For each batch, builds graph = (original - deleted edges),\n");
+        printf("runs TRIM1 on the MODIFIED graph, and counts how many batch\n");
+        printf("nodes (unique nodes from deleted edges) are trimmed.\n");
         return 1;
     }
 
@@ -215,53 +257,35 @@ int main(int argc, char** argv)
 
     int num_threads = omp_get_max_threads();
 
-    printf("================================================================================\n");
-    printf("  TRIM1 BATCH NODE CHECK EXPERIMENT\n");
-    printf("================================================================================\n");
+    printf("========================================================================\n");
+    printf("  TRIM1 BATCH NODE CHECK (on MODIFIED graph)\n");
+    printf("========================================================================\n");
     printf("  Graph file : %s\n", graph_file);
     printf("  Batches    : %d\n", num_batches);
     printf("  OpenMP threads: %d\n", num_threads);
-    printf("================================================================================\n\n");
+    printf("\n");
+    printf("  For each batch, builds graph = (original - deleted edges),\n");
+    printf("  runs TRIM1 on the MODIFIED graph, and reports how many of the\n");
+    printf("  unique nodes in the deleted edges are trimmed (T_mod ∩ B).\n");
+    printf("========================================================================\n\n");
 
-    // ---- Step 1: Read original graph ----
+    // ---- Step 1: Read original graph edges ----
     printf("[1] Reading original graph...\n");
     std::vector<std::pair<int,int>> orig_edges;
     int num_nodes = read_edge_file(graph_file, orig_edges);
     printf("    Nodes: %d, Edges: %zu\n\n", num_nodes, orig_edges.size());
 
-    // ---- Step 2: Build graph and run TRIM1 ----
-    printf("[2] Building graph and running TRIM1...\n");
-    gm_graph G;
-    for (int i = 0; i < num_nodes; i++)
-        G.add_node();
-    for (const auto& e : orig_edges)
-        G.add_edge(e.first, e.second);
-    G.make_reverse_edges();
-
-    G_num_nodes = G.num_nodes();
+    // Allocate global state (reused across batches)
+    G_num_nodes = num_nodes;
     G_Color = new int[G_num_nodes];
     G_SCC   = new int[G_num_nodes];
 
-    #pragma omp parallel for
-    for (int i = 0; i < G_num_nodes; i++) {
-        G_Color[i] = COLOR_UNASSIGNED;
-        G_SCC[i]   = NIL_NODE;
-    }
-
-    struct timeval t0, t1;
-    gettimeofday(&t0, NULL);
-    int total_trimmed = repeat_global_trim1(G);
-    gettimeofday(&t1, NULL);
-    double trim_ms = (t1.tv_sec - t0.tv_sec) * 1000.0 +
-                     (t1.tv_usec - t0.tv_usec) * 0.001;
-
-    printf("    Full graph nodes trimmed: %d (%.2f ms)\n\n", total_trimmed, trim_ms);
-
-    // ---- Step 3: For each batch, check how many of its nodes were trimmed ----
-    printf("================================================================================\n");
+    // ---- Step 2: For each batch, build modified graph and run TRIM1 ----
+    printf("========================================================================\n");
     printf("  Batch                                     | Edges in  | Nodes in  | Batch nodes\n");
-    printf("                                            | batch     | batch     | trimmed\n");
-    printf("================================================================================\n");
+    printf("                                            | batch     | batch     | trimmed (on\n");
+    printf("                                            |           |           | modified graph)\n");
+    printf("========================================================================\n");
 
     for (int i = 0; i < num_batches; i++) {
         std::string full_path = batch_files[i];
@@ -272,10 +296,28 @@ int main(int argc, char** argv)
                             ? full_path
                             : full_path.substr(slash + 1);
 
-        // Read unique nodes and edge count in one pass
-        auto [batch_nodes, edge_count] = read_batch_nodes(full_path);
+        printf("\n  --- Batch %d/%d: %s ---\n", i + 1, num_batches, fname.c_str());
 
-        // Count how many were trimmed
+        // Read batch: unique nodes + edges to delete
+        auto [batch_nodes, del_edges] = read_batch(full_path);
+        int edge_count = (int)del_edges.size();
+
+        // Build set of edges to exclude
+        std::set<std::pair<int,int>> exclude_set(del_edges.begin(), del_edges.end());
+
+        // Build graph = (original - deleted edges) and run TRIM1
+        struct timeval t0, t1;
+        gettimeofday(&t0, NULL);
+
+        gm_graph G_mod = build_graph(num_nodes, orig_edges, exclude_set);
+        init_colors();
+        int trimmed_mod = repeat_global_trim1(G_mod);
+
+        gettimeofday(&t1, NULL);
+        double time_ms = (t1.tv_sec - t0.tv_sec) * 1000.0 +
+                         (t1.tv_usec - t0.tv_usec) * 0.001;
+
+        // Count how many batch nodes are trimmed on the modified graph (T_mod ∩ B)
         int trimmed_in_batch = 0;
         for (int n : batch_nodes) {
             if (n < G_num_nodes && G_Color[n] == SCC_FOUND) {
@@ -285,14 +327,18 @@ int main(int argc, char** argv)
 
         printf("  %-42s | %-10d | %-10zu | %-12d\n",
                fname.c_str(), edge_count, batch_nodes.size(), trimmed_in_batch);
+        printf("  -> Total trimmed on modified graph: %d  (%.2f ms)\n", trimmed_mod, time_ms);
     }
 
-    printf("================================================================================\n");
+    printf("========================================================================\n");
     printf("\nExperiment complete!\n");
 
     // Cleanup
     delete[] G_Color;
     delete[] G_SCC;
 
+    // On very large graphs (wb-edu, it-2004), gm_graph destructor may cause
+    // "double free or corruption". Uncomment exit(0) to skip cleanup.
+    // fflush(stdout); fflush(stderr); exit(0);
     return 0;
 }
