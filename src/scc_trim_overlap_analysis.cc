@@ -1,31 +1,31 @@
 // ==========================================================================
 // scc_trim_overlap_analysis.cc
 //
-// Overlap analysis: For each delete batch, compute the intersection between
-// the nodes that become newly trimmable AFTER edge deletion (Δ) and the
-// unique nodes that appear in the deleted edges (batch nodes, B).
+// Combined analysis: Runs both Experiment 1 (new) and Experiment 2 on
+// the modified graph per batch, reporting:
+//
+//   Exp 1 (new): T_mod ∩ B  = batch nodes trimmed on MODIFIED graph
+//   Exp 2:       Δ           = newly trimmed after deletion (T_mod \ T_full)
+//   Overlap:     Δ ∩ B       = how many Δ nodes ARE batch nodes (direct effect)
+//   % Δ in Exp 1:            = how much of Δ is captured by Exp 1 (should be ~99.5%)
 //
 // This distinguishes two effects:
 //   Direct effect  → Δ ∩ B  : nodes whose last in/out edge was one we deleted
 //   Cascade effect → Δ \ B  : nodes that lost connectivity because a
 //                              neighbor (upstream/downstream) was affected
 //
-// IMPORTANT: Δ = T_mod \ T_full (newly trimmed). By definition, Δ has ZERO
-// overlap with T_full (nodes already trimmed on full graph). So the answer
-// to "how many of Δ are in the batch nodes that were already trimmed?" is
-// ALWAYS 0. The meaningful comparison is:
-//   - Δ ∩ B  = how many Δ nodes are batch nodes (any trim status)
-//   - Δ \ B  = how many Δ nodes are NOT batch nodes (cascade effect)
-//
 // Process:
 //   1. Read original graph
-//   2. Run TRIM1 on full graph → record T_full (set of trimmed nodes)
+//   2. Run TRIM1 on full graph → record T_full (baseline)
 //   3. For each batch file:
 //      a. Read delete edges, collect unique batch nodes B
-//      b. Build graph = (original_edges - delete_edges)
-//      c. Run TRIM1 → record T_mod
+//      b. Build graph = (original_edges - delete_edges), time it
+//      c. Run TRIM1 → record T_mod, time it
 //      d. Compute Δ = T_mod \ T_full  (newly trimmed after deletion)
-//      e. Report |Δ|, |Δ ∩ B|, |Δ \ B|, and percentages
+//      e. Compute T_mod ∩ B  (Exp 1: batch nodes trimmed on modified graph)
+//      f. Compute Δ ∩ B and Δ \ B (direct vs cascade)
+//      g. Report all metrics + execution times
+//   4. Print final summary table
 //
 // Build:
 //   g++ -O3 -I. -I../gm_graph/inc -fopenmp -std=gnu++0x \
@@ -40,9 +40,9 @@
 //   ./scc_overlap_analysis <refined_edges.txt> <batch1> [batch2 ...]
 //
 // Example:
-//   ./scc_overlap_analysis /data/soc-Pokec/refined_edges.txt \
-//       /data/soc-Pokec/0.01_delete_edges.txt \
-//       /data/soc-Pokec/0.03_delete_edges.txt
+//   ./scc_overlap_analysis /data/ljournal-2008/refined_edges.txt \
+//       /data/ljournal-2008/0.01_delete_edges.txt \
+//       /data/ljournal-2008/0.03_delete_edges.txt
 // ==========================================================================
 
 #include <stdio.h>
@@ -353,6 +353,14 @@ int main(int argc, char** argv)
     printf("    3. Of batch nodes NOT already trimmed, how many got newly trimmed?\n");
     printf("================================================================================\n\n");
 
+    // Storage for summary table
+    std::vector<int>    batch_exp1(num_batches, 0);
+    std::vector<int>    batch_tmod(num_batches, 0);
+    std::vector<int>    batch_delta(num_batches, 0);
+    std::vector<int>    batch_delta_and_batch(num_batches, 0);
+    std::vector<double> batch_pct_in_exp1(num_batches, 0.0);
+    std::vector<double> batch_time_ms(num_batches, 0.0);
+
     for (int i = 0; i < num_batches; i++) {
         std::string full_path = batch_files[i];
 
@@ -367,12 +375,21 @@ int main(int argc, char** argv)
         // Read batch data
         BatchData bd = read_batch(full_path, num_nodes);
 
-        // Build graph without deleted edges
+        // Build graph without deleted edges (timed)
+        struct timeval tb0, tb1, tt0, tt1;
+        gettimeofday(&tb0, NULL);
         gm_graph G_mod = build_graph(num_nodes, orig_edges, bd.del_edges);
+        gettimeofday(&tb1, NULL);
+        double build_ms = (tb1.tv_sec - tb0.tv_sec) * 1000.0 +
+                          (tb1.tv_usec - tb0.tv_usec) * 0.001;
 
-        // Run TRIM1 on modified graph
+        // Run TRIM1 on modified graph (timed)
         init_colors();
+        gettimeofday(&tt0, NULL);
         int trimmed_mod = repeat_global_trim1(G_mod);
+        gettimeofday(&tt1, NULL);
+        double trim_ms = (tt1.tv_sec - tt0.tv_sec) * 1000.0 +
+                         (tt1.tv_usec - tt0.tv_usec) * 0.001;
 
         // Record T_mod
         std::vector<bool> T_mod;
@@ -408,10 +425,16 @@ int main(int argc, char** argv)
             }
         }
 
-        // Compute: batch nodes already trimmed on full graph (= Experiment 1)
+        // Compute: batch nodes already trimmed on full graph (= original Experiment 1)
         int batch_already_trimmed = 0;
         for (int n : bd.batch_node_list) {
             if (T_full[n]) batch_already_trimmed++;
+        }
+
+        // Compute: T_mod ∩ B = batch nodes trimmed on modified graph (= NEW Experiment 1)
+        int batch_trimmed_on_mod = 0;
+        for (int n : bd.batch_node_list) {
+            if (T_mod[n]) batch_trimmed_on_mod++;
         }
 
         double direct_pct = (delta_count > 0)
@@ -422,15 +445,30 @@ int main(int argc, char** argv)
             ? (100.0 * batch_already_trimmed / bd.batch_node_list.size()) : 0.0;
         double batch_newly_pct = (batch_not_trimmed_full > 0)
             ? (100.0 * batch_newly_trimmed / batch_not_trimmed_full) : 0.0;
+        double pct_in_exp1 = (delta_count > 0)
+            ? (100.0 * delta_and_batch / delta_count) : 0.0;
+
+        // Store for summary table
+        batch_exp1[i] = batch_trimmed_on_mod;
+        batch_tmod[i] = trimmed_mod;
+        batch_delta[i] = delta_count;
+        batch_delta_and_batch[i] = delta_and_batch;
+        batch_pct_in_exp1[i] = pct_in_exp1;
+        batch_time_ms[i] = trim_ms;
 
         printf("\n");
         printf("  Results for %s:\n", fname.c_str());
         printf("  %-30s %10d\n", "Edges deleted:", bd.edge_count);
         printf("  %-30s %10d\n", "Unique batch nodes (B):", (int)bd.batch_node_list.size());
         printf("  %-30s %10d (%.1f%% of B)\n",
-               "Batch already trimmed (T_full∩B):",
+               "Batch trimmed on full graph:",
                batch_already_trimmed,
                batch_already_pct);
+        printf("  %-30s %10d (%.1f%% of B)\n",
+               "Batch trimmed on modified (Exp1):",
+               batch_trimmed_on_mod,
+               (bd.batch_node_list.size() > 0)
+                   ? (100.0 * batch_trimmed_on_mod / bd.batch_node_list.size()) : 0.0);
         if (batch_not_trimmed_full > 0) {
             printf("  %-30s %10d (%.1f%% of B\\T_full)\n",
                    "Batch newly trimmed (Δ∩B):",
@@ -442,6 +480,8 @@ int main(int argc, char** argv)
         }
         printf("  %-30s %10d\n", "Total trimmed on full graph:", trimmed_full);
         printf("  %-30s %10d\n", "Total trimmed after deletion:", trimmed_mod);
+        printf("  %-30s %10.1f ms\n", "Build time (modified graph):", build_ms);
+        printf("  %-30s %10.1f ms\n", "TRIM1 time (modified graph):", trim_ms);
         printf("  --------------------------------------------\n");
         printf("  %-30s %10d   (Δ = T_mod \\ T_full)\n", "Newly trimmed (Δ):", delta_count);
         printf("  %-30s %10d   (Δ ∩ B: direct effect)\n",
@@ -450,6 +490,8 @@ int main(int argc, char** argv)
                "  +-- Non-batch (cascade):", delta_not_batch);
         printf("  %-30s %10.1f%%\n", "Direct % of Δ:", direct_pct);
         printf("  %-30s %10.1f%%\n", "Cascade % of Δ:", cascade_pct);
+        printf("  %-30s %10.1f%%   (%% of Δ found by new Exp1)\n",
+               "Δ in Exp1 (batch nodes):", pct_in_exp1);
 
 #if 0   // Enable for detailed node dump
         if (delta_and_batch > 0) {
@@ -468,6 +510,50 @@ int main(int argc, char** argv)
         printf("\n");
     }
 
+    // ---- Step 4: Print combined summary table ----
+    printf("\n");
+    printf("================================================================================\n");
+    printf("  COMBINED SUMMARY: Exp 1 (new) vs Exp 2 overlap\n");
+    printf("================================================================================\n");
+    printf("  T_full (full graph trim): %d\n", trimmed_full);
+    printf("================================================================================\n");
+    printf("  %-20s | %10s | %10s | %10s | %10s | %10s | %12s |\n",
+           "Batch", "Exp1", "Exp2", "Exp2 Δ", "Δ∩B", "Δ% in", "Exp1");
+    printf("  %-20s | %10s | %10s | %10s | %10s | %10s | %12s |\n",
+           "", "T_mod∩B", "T_mod", "(new)", "(direct)", "Exp1", "Time (ms)");
+    printf("  ");
+    for (int c = 0; c < 84; c++) printf("-");
+    printf("\n");
+
+    for (int i = 0; i < num_batches; i++) {
+        std::string full_path = batch_files[i];
+        size_t slash = full_path.rfind('/');
+        std::string fname = (slash == std::string::npos)
+                            ? full_path
+                            : full_path.substr(slash + 1);
+        // Truncate filename to 20 chars for display
+        if (fname.length() > 20) fname = fname.substr(0, 17) + "...";
+
+        printf("  %-20s | %10d | %10d | %10d | %10d | %9.1f%% | %12.1f |\n",
+               fname.c_str(),
+               batch_exp1[i],       // T_mod ∩ B
+               batch_tmod[i],        // T_mod
+               batch_delta[i],       // Δ
+               batch_delta_and_batch[i], // Δ ∩ B
+               batch_pct_in_exp1[i], // % of Δ in Exp 1
+               batch_time_ms[i]);    // Exp 1 execution time (ms)
+    }
+
+    printf("  ");
+    for (int c = 0; c < 84; c++) printf("-");
+    printf("\n");
+    printf("\n");
+    printf("  Exp1 = batch nodes trimmed on modified graph (T_mod ∩ B)\n");
+    printf("  Exp2 = total nodes trimmed on modified graph (T_mod)\n");
+    printf("  Exp2 Δ = newly trimmed after deletion (T_mod \\ T_full)\n");
+    printf("  Δ∩B   = how many Δ nodes are batch nodes (direct effect)\n");
+    printf("  Δ%% in Exp1 = percentage of Δ nodes that Exp1 'finds' (should be ~99.5%%)\n");
+    printf("  Exp1 Time = time (ms) for TRIM1 on modified graph (the Exp 1 work)\n");
     printf("================================================================================\n");
     printf("\nExperiment complete!\n");
 
