@@ -16,6 +16,7 @@
 // ======================================================================
 
 #define GPU_FB_MAX_SMEM_NODES 2048
+#define GPU_FB_HASH_SIZE     4096   // power of 2, 2× load factor for 2048 nodes
 
 static int* d_fb_color_counter = NULL;
 
@@ -80,6 +81,7 @@ __global__ void gpu_fb_batch_kernel(
     char* smem_fw_flag  = (char*)(smem_next + GPU_FB_MAX_SMEM_NODES);
     char* smem_bw_flag  = smem_fw_flag + GPU_FB_MAX_SMEM_NODES;
     int*  smem_shared   = (int*)(smem_bw_flag + GPU_FB_MAX_SMEM_NODES);
+    int*  smem_hash     = smem_shared + (5 + 32 * 3);  // after scalars + warp_sums
     volatile int& smem_fsize     = smem_shared[0];
     volatile int& smem_pivot_pos = smem_shared[1];
     volatile int& smem_fw_color  = smem_shared[2];
@@ -96,6 +98,24 @@ __global__ void gpu_fb_batch_kernel(
         smem_bw_flag[i] = 0;
     }
     if (tid == 0) { smem_fsize = 0; smem_pivot_pos = -1; smem_ncount = 0; }
+    __syncthreads();
+
+    // ---- Build hash table: node_id → position ----
+    for (int i = tid; i < GPU_FB_HASH_SIZE; i += stride) {
+        smem_hash[i] = -1;
+    }
+    __syncthreads();
+
+    for (int i = tid; i < comp_size; i += stride) {
+        int key = smem_nodes[i];
+        // Fibonacci hash: multiply by golden ratio, take top bits
+        unsigned h = (unsigned)key * 2654435761u;
+        int slot = (int)(h >> 20) & (GPU_FB_HASH_SIZE - 1);
+        // Linear probing with atomicCAS for concurrent threads
+        while (atomicCAS(&smem_hash[slot], -1, i) != -1) {
+            slot = (slot + 1) & (GPU_FB_HASH_SIZE - 1);
+        }
+    }
     __syncthreads();
 
     // ---- Handle single-node component ----
@@ -158,13 +178,19 @@ __global__ void gpu_fb_batch_kernel(
                 int old = atomicCAS(&d_Color[k], base_color, fw_color);
                 if (old == base_color) {
                     // Find position in shared memory
-                    for (int j = 0; j < comp_size; j++) {
-                        if (smem_nodes[j] == k) {
-                            smem_fw_flag[j] = 1;
+                    // Hash lookup: O(1) instead of O(comp_size) linear search
+                    unsigned hk = (unsigned)k * 2654435761u;
+                    int slot = (int)(hk >> 20) & (GPU_FB_HASH_SIZE - 1);
+                    while (1) {
+                        int pos = smem_hash[slot];
+                        if (pos < 0) break;  // not found (shouldn't happen for valid k)
+                        if (smem_nodes[pos] == k) {
+                            smem_fw_flag[pos] = 1;
                             int np = atomicAdd((int*)&smem_ncount, 1);
-                            if (np < GPU_FB_MAX_SMEM_NODES) smem_next[np] = j;
+                            if (np < GPU_FB_MAX_SMEM_NODES) smem_next[np] = pos;
                             break;
                         }
+                        slot = (slot + 1) & (GPU_FB_HASH_SIZE - 1);
                     }
                 }
             }
@@ -219,25 +245,37 @@ __global__ void gpu_fb_batch_kernel(
                 int old = atomicCAS(&d_Color[k], fw_color, SCC_FOUND);
                 if (old == fw_color) {
                     d_SCC[k] = smem_nodes[pivot_pos];
-                    for (int j = 0; j < comp_size; j++) {
-                        if (smem_nodes[j] == k) {
-                            smem_bw_flag[j] = 1;
+                    // Hash lookup: O(1) instead of O(comp_size) linear search
+                    unsigned hk = (unsigned)k * 2654435761u;
+                    int slot = (int)(hk >> 20) & (GPU_FB_HASH_SIZE - 1);
+                    while (1) {
+                        int pos = smem_hash[slot];
+                        if (pos < 0) break;
+                        if (smem_nodes[pos] == k) {
+                            smem_bw_flag[pos] = 1;
                             int np = atomicAdd((int*)&smem_ncount, 1);
-                            if (np < GPU_FB_MAX_SMEM_NODES) smem_next[np] = j;
+                            if (np < GPU_FB_MAX_SMEM_NODES) smem_next[np] = pos;
                             break;
                         }
+                        slot = (slot + 1) & (GPU_FB_HASH_SIZE - 1);
                     }
                 } else {
                     // Second try: claim base_color node as bw_color
                     old = atomicCAS(&d_Color[k], base_color, bw_color);
                     if (old == base_color) {
-                        for (int j = 0; j < comp_size; j++) {
-                            if (smem_nodes[j] == k) {
-                                smem_bw_flag[j] = 1;
+                        // Hash lookup: O(1) instead of O(comp_size) linear search
+                        unsigned hk = (unsigned)k * 2654435761u;
+                        int slot = (int)(hk >> 20) & (GPU_FB_HASH_SIZE - 1);
+                        while (1) {
+                            int pos = smem_hash[slot];
+                            if (pos < 0) break;
+                            if (smem_nodes[pos] == k) {
+                                smem_bw_flag[pos] = 1;
                                 int np = atomicAdd((int*)&smem_ncount, 1);
-                                if (np < GPU_FB_MAX_SMEM_NODES) smem_next[np] = j;
+                                if (np < GPU_FB_MAX_SMEM_NODES) smem_next[np] = pos;
                                 break;
                             }
+                            slot = (slot + 1) & (GPU_FB_HASH_SIZE - 1);
                         }
                     }
                     // else: already claimed by another thread, or SCC_FOUND — skip
@@ -491,8 +529,9 @@ double run_gpu_fb(GPUState& st, const GPUGraph& g, int num_threads)
     // smem_shared: 5 scalars + warp_sums (up to 32 warps × 3 counters = 96 ints max)
     int smem_shared_ints = 5 + 32 * 3;  // max possible warps for safety
     int smem_size = GPU_FB_MAX_SMEM_NODES * (3 * sizeof(int) + 2 * sizeof(char))
-                  + smem_shared_ints * sizeof(int);
-    // = 2048*(12+2) + (5+96)*4 = 28672 + 404 = 29076 bytes < 48KB ✓
+                  + smem_shared_ints * sizeof(int)
+                  + GPU_FB_HASH_SIZE * sizeof(int);
+    // = 2048*(12+2) + (5+96)*4 + 4096*4 = 28672 + 404 + 16384 = 45460 bytes < 48KB ✓
 
     // ---- Iterative processing ----
     int total_levels = 0;
