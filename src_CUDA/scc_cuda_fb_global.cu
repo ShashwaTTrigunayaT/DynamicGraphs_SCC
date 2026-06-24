@@ -670,8 +670,10 @@ __global__ void persistent_fw_bfs_kernel(
                         d_Color[k] = fw_color;
                         staged[staged_cnt++] = k;
                         if (staged_cnt == STAGE_SIZE) {
-                            // Check spill flag early to avoid unnecessary work
-                            if (s_spilled) break;
+                            // Don't break on spill here — we must process ALL neighbors of the
+                            // current frontier node before breaking. If we break early, remaining
+                            // neighbors of this node are never visited (not in visited bitmap,
+                            // not in frontier), causing undercounted FW sets.
                             PERSISTENT_FLUSH(s_next, s_ncount);
                         }
                     }
@@ -855,7 +857,8 @@ __global__ void persistent_bw_bfs_kernel(
                         }
                         staged[staged_cnt++] = k;
                         if (staged_cnt == STAGE_SIZE) {
-                            if (s_spilled) break;
+                            // Don't break on spill here — we must process ALL reverse neighbors
+                            // of the current frontier node before breaking. Same logic as FW kernel.
                             PERSISTENT_BW_FLUSH(s_next, s_ncount);
                         }
                     }
