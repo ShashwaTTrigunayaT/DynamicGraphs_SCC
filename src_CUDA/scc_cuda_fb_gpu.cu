@@ -428,8 +428,8 @@ double run_gpu_fb(GPUState& st, const GPUGraph& g, int num_threads)
     if (!d_fb_color_counter) {
         CUDA_CHECK(cudaMalloc(&d_fb_color_counter, sizeof(int)));
     }
-    CUDA_CHECK(cudaMemcpy(d_fb_color_counter, &_cuda_the_color, sizeof(int),
-                           cudaMemcpyHostToDevice));
+    CUDA_TIMED_MEMCPY(d_fb_color_counter, &_cuda_the_color, sizeof(int),
+                           cudaMemcpyHostToDevice);
 
     // ---- Drain WCC work queue ----
     std::vector<CUDAMyWork*> all_works;
@@ -471,8 +471,8 @@ double run_gpu_fb(GPUState& st, const GPUGraph& g, int num_threads)
 
         if (w->d_set_nodes) {
             std::vector<int> tmp(w->count);
-            CUDA_CHECK(cudaMemcpy(tmp.data(), w->d_set_nodes,
-                                   w->count * sizeof(int), cudaMemcpyDeviceToHost));
+            CUDA_TIMED_MEMCPY(tmp.data(), w->d_set_nodes,
+                                   w->count * sizeof(int), cudaMemcpyDeviceToHost);
             cur.nodes.insert(cur.nodes.end(), tmp.begin(), tmp.end());
             if (w->owns_set) cudaFree(w->d_set_nodes);
         }
@@ -553,14 +553,14 @@ double run_gpu_fb(GPUState& st, const GPUGraph& g, int num_threads)
         struct timeval ts, te;
 
         // ---- Upload to device ----
-        CUDA_CHECK(cudaMemcpy(d_in_nodes, cur.nodes.data(),
-                               cur.nodes.size() * sizeof(int), cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpy(d_in_comp_start, cur.starts.data(),
-                               cur_comps * sizeof(int), cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpy(d_in_comp_size, cur.sizes.data(),
-                               cur_comps * sizeof(int), cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpy(d_in_comp_color, cur.colors.data(),
-                               cur_comps * sizeof(int), cudaMemcpyHostToDevice));
+        CUDA_TIMED_MEMCPY(d_in_nodes, cur.nodes.data(),
+                               cur.nodes.size() * sizeof(int), cudaMemcpyHostToDevice);
+        CUDA_TIMED_MEMCPY(d_in_comp_start, cur.starts.data(),
+                               cur_comps * sizeof(int), cudaMemcpyHostToDevice);
+        CUDA_TIMED_MEMCPY(d_in_comp_size, cur.sizes.data(),
+                               cur_comps * sizeof(int), cudaMemcpyHostToDevice);
+        CUDA_TIMED_MEMCPY(d_in_comp_color, cur.colors.data(),
+                               cur_comps * sizeof(int), cudaMemcpyHostToDevice);
         CUDA_CHECK(cudaMemset(d_num_out, 0, sizeof(int)));
 
         // ---- Launch batch kernel ----
@@ -588,17 +588,17 @@ double run_gpu_fb(GPUState& st, const GPUGraph& g, int num_threads)
 
         // ---- Read back results ----
         int h_num_out = 0;
-        CUDA_CHECK(cudaMemcpy(&h_num_out, d_num_out, sizeof(int), cudaMemcpyDeviceToHost));
+        CUDA_TIMED_MEMCPY(&h_num_out, d_num_out, sizeof(int), cudaMemcpyDeviceToHost);
 
         if (h_num_out == 0) break;  // all done
 
         // ---- Build next batch via bulk scatter (single cudaMemcpy) ----
         std::vector<int> h_out_sizes(h_num_out);
         std::vector<int> h_out_colors(h_num_out);
-        CUDA_CHECK(cudaMemcpy(h_out_sizes.data(), d_out_sizes,
-                               h_num_out * sizeof(int), cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaMemcpy(h_out_colors.data(), d_out_colors,
-                               h_num_out * sizeof(int), cudaMemcpyDeviceToHost));
+        CUDA_TIMED_MEMCPY(h_out_sizes.data(), d_out_sizes,
+                               h_num_out * sizeof(int), cudaMemcpyDeviceToHost);
+        CUDA_TIMED_MEMCPY(h_out_colors.data(), d_out_colors,
+                               h_num_out * sizeof(int), cudaMemcpyDeviceToHost);
 
         gettimeofday(&ts, NULL);
 
@@ -625,8 +625,8 @@ double run_gpu_fb(GPUState& st, const GPUGraph& g, int num_threads)
         }
 
         // Upload offsets to device
-        CUDA_CHECK(cudaMemcpy(d_bulk_off, h_bulk_offsets.data(),
-                               (h_num_out + 1) * sizeof(int), cudaMemcpyHostToDevice));
+        CUDA_TIMED_MEMCPY(d_bulk_off, h_bulk_offsets.data(),
+                               (h_num_out + 1) * sizeof(int), cudaMemcpyHostToDevice);
 
         // Launch bulk scatter: one block per sub-component, chunked for max grid
         int scatter_max_grid = 65535;
@@ -643,8 +643,8 @@ double run_gpu_fb(GPUState& st, const GPUGraph& g, int num_threads)
 
         // ONE cudaMemcpy for ALL sub-components
         std::vector<int> host_bulk(total_sz);
-        CUDA_CHECK(cudaMemcpy(host_bulk.data(), d_bulk_buf,
-                               total_sz * sizeof(int), cudaMemcpyDeviceToHost));
+        CUDA_TIMED_MEMCPY(host_bulk.data(), d_bulk_buf,
+                               total_sz * sizeof(int), cudaMemcpyDeviceToHost);
 
         // Unpack on host using prefix sums
         CompData next;

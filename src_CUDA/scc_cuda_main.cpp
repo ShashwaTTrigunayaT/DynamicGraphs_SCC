@@ -13,6 +13,22 @@
 
 using namespace std;
 
+// ---- Algorithm Time tracking globals ----
+double      g_algo_memcpy_ms  = 0;
+cudaEvent_t g_algo_ev_start   = NULL;
+cudaEvent_t g_algo_ev_end     = NULL;
+
+void algo_memcpy_init() {
+    cudaEventCreate(&g_algo_ev_start);
+    cudaEventCreate(&g_algo_ev_end);
+}
+void algo_memcpy_finalize() {
+    if (g_algo_ev_start) cudaEventDestroy(g_algo_ev_start);
+    if (g_algo_ev_end)   cudaEventDestroy(g_algo_ev_end);
+    g_algo_ev_start = NULL;
+    g_algo_ev_end   = NULL;
+}
+
 // Host-side CSR arrays (shared with scc_cuda_fb_seq2.cu for host-side FB processing)
 const edge_t* g_h_begin = NULL;
 const node_t* g_h_node_idx = NULL;
@@ -283,6 +299,9 @@ int main(int argc, char** argv)
     initialize_trim2(N);
     initialize_WCC(N);
     work_q_init(num_threads);
+
+    // Initialize algo timer (tracks H2D/D2H time for ALGO_TIME computation)
+    algo_memcpy_init();
 
     // Device counter
     int* d_count;
@@ -577,6 +596,13 @@ int main(int argc, char** argv)
         graph_free(gpuG);
         return 0;
     }
+    // Compute and print Algorithm Time: CUDA_RUNTIME - H2D/D2H transfer time
+    double algo_time = (runtime_ms + insert_runtime) - g_algo_memcpy_ms;
+    if (algo_time < 0) algo_time = 0;
+    printf(">>>>ALGO_TIME: %.2fms (CUDA runtime %.2fms - H2D/D2H %.2fms)\n",
+           algo_time, runtime_ms + insert_runtime, g_algo_memcpy_ms);
+    fprintf(stderr, "[ALGO_TIME] algo=%.2f runtime=%.2f memcpy=%.2f\n",
+            algo_time, runtime_ms + insert_runtime, g_algo_memcpy_ms);
 
     printf("[CUDA]running_time(ms)=%lf\n", runtime_ms + insert_runtime);
 
@@ -632,6 +658,9 @@ int main(int argc, char** argv)
     // ---------------------------------------------------------------
     // Cleanup
     // ---------------------------------------------------------------
+    // Finalize algo timer
+    algo_memcpy_finalize();
+
     fprintf(stderr, "[DEBUG] cleanup: cudaFree(d_count)\n");
     cudaFree(d_count);
     if (d_count_trim_spec) { fprintf(stderr, "[DEBUG] cleanup: cudaFree(d_count_trim_spec)\n"); cudaFree(d_count_trim_spec); }

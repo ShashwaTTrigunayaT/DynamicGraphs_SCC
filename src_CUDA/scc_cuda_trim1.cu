@@ -295,7 +295,7 @@ int do_global_trim1(GPUState& st, const GPUGraph& g,
     CUDA_CHECK(cudaDeviceSynchronize());
 
     int count;
-    CUDA_CHECK(cudaMemcpy(&count, d_count, sizeof(int), cudaMemcpyDeviceToHost));
+    CUDA_TIMED_MEMCPY(&count, d_count, sizeof(int), cudaMemcpyDeviceToHost);
     return count;
 }
 
@@ -326,7 +326,7 @@ int do_global_trim1_compact(GPUState& st, const GPUGraph& g,
     CUDA_CHECK(cudaDeviceSynchronize());
 
     int count;
-    CUDA_CHECK(cudaMemcpy(&count, d_count, sizeof(int), cudaMemcpyDeviceToHost));
+    CUDA_TIMED_MEMCPY(&count, d_count, sizeof(int), cudaMemcpyDeviceToHost);
     return count;
 }
 
@@ -385,8 +385,9 @@ int do_local_trim1(GPUState& st, const GPUGraph& g,
             w->d_set_nodes, w->count,
             w->d_set_nodes, d_compact_prefix);
         CUDA_CHECK(cudaDeviceSynchronize());
-        CUDA_CHECK(cudaMemcpy(&w->count, d_compact_prefix, sizeof(int),
-                               cudaMemcpyDeviceToHost));
+            CUDA_TIMED_MEMCPY(&w->count, d_compact_prefix, sizeof(int),
+                                  cudaMemcpyDeviceToHost);
+        }
     } else {
         // --- Mirror: no set — scan all nodes matching w->color ---
         // OpenMP: for(n=0; n<N; n++) if(G_Color[n]==curr_color) trim_once_node(...)
@@ -401,8 +402,8 @@ int do_local_trim1(GPUState& st, const GPUGraph& g,
             CUDA_CHECK(cudaDeviceSynchronize());
             
             int set_size;
-            CUDA_CHECK(cudaMemcpy(&set_size, d_compact_prefix, sizeof(int),
-                                  cudaMemcpyDeviceToHost));
+            CUDA_TIMED_MEMCPY(&set_size, d_compact_prefix, sizeof(int),
+                                  cudaMemcpyDeviceToHost);
             w->d_set_nodes = d_compact_scratch;  // use separate scratch buffer (not shared d_trim_targets)
             w->owns_set = 0;                      // don't own it — shared scratch buffer
             w->count = set_size;
@@ -425,13 +426,13 @@ int do_local_trim1(GPUState& st, const GPUGraph& g,
                 st.d_Color, w->d_set_nodes, set_size,
                 w->d_set_nodes, d_compact_prefix);
             CUDA_CHECK(cudaDeviceSynchronize());
-            CUDA_CHECK(cudaMemcpy(&w->count, d_compact_prefix, sizeof(int),
-                                  cudaMemcpyDeviceToHost));
+            CUDA_TIMED_MEMCPY(&w->count, d_compact_prefix, sizeof(int),
+                                  cudaMemcpyDeviceToHost);
         }
     }
 
     int count;
-    CUDA_CHECK(cudaMemcpy(&count, d_count, sizeof(int), cudaMemcpyDeviceToHost));
+    CUDA_TIMED_MEMCPY(&count, d_count, sizeof(int), cudaMemcpyDeviceToHost);
     w->count -= count;
     return count;
 }
@@ -572,8 +573,8 @@ static void create_trim1_compact_1(GPUState& st, const GPUGraph& g)
     build_compact_from_all_kernel<<<grid_size, block_size>>>(
         st.d_Color, d_trim_targets, d_compact_prefix, N);
     CUDA_CHECK(cudaDeviceSynchronize());
-    CUDA_CHECK(cudaMemcpy(&d_trim_targets_count, d_compact_prefix,
-                          sizeof(int), cudaMemcpyDeviceToHost));
+    CUDA_TIMED_MEMCPY(&d_trim_targets_count, d_compact_prefix,
+                          sizeof(int), cudaMemcpyDeviceToHost);
 }
 
 static void create_trim1_compact_1b(GPUState& st, const GPUGraph& g)
@@ -587,8 +588,8 @@ static void create_trim1_compact_1b(GPUState& st, const GPUGraph& g)
         d_trim_targets, num_src,
         d_trim_targets, d_compact_prefix);
     CUDA_CHECK(cudaDeviceSynchronize());
-    CUDA_CHECK(cudaMemcpy(&d_trim_targets_count, d_compact_prefix,
-                          sizeof(int), cudaMemcpyDeviceToHost));
+    CUDA_TIMED_MEMCPY(&d_trim_targets_count, d_compact_prefix,
+                          sizeof(int), cudaMemcpyDeviceToHost);
 }
 
 static void create_trim1_compact_2()

@@ -531,7 +531,7 @@ int do_global_fw_bw_main(GPUState& st, const GPUGraph& g,
     // ---------------------------------------------------------------
     int h_pivot = -1;
     int PIVOT_NONE = 0x7FFFFFFF;
-    CUDA_CHECK(cudaMemcpy(d_pivot_scratch, &PIVOT_NONE, sizeof(int), cudaMemcpyHostToDevice));
+    CUDA_TIMED_MEMCPY(d_pivot_scratch, &PIVOT_NONE, sizeof(int), cudaMemcpyHostToDevice);
 
     // OpenMP: if((met_algo==6 || met_algo==11) && G_Color[good_init_pivot]!=-2)
     //            pivot=good_init_pivot;
@@ -544,12 +544,12 @@ int do_global_fw_bw_main(GPUState& st, const GPUGraph& g,
     if (good_init_pivot >= 0) {
         // CPU: check G_Color[good_init_pivot] != -2
         int h_color;
-        CUDA_CHECK(cudaMemcpy(&h_color, &st.d_Color[good_init_pivot],
-                               sizeof(int), cudaMemcpyDeviceToHost));
+        CUDA_TIMED_MEMCPY(&h_color, &st.d_Color[good_init_pivot],
+                               sizeof(int), cudaMemcpyDeviceToHost);
         if (h_color != SCC_FOUND) {                       // CPU: != -2
             h_pivot = good_init_pivot;
-            CUDA_CHECK(cudaMemcpy(d_pivot_scratch, &h_pivot, sizeof(int),
-                                   cudaMemcpyHostToDevice));
+            CUDA_TIMED_MEMCPY(d_pivot_scratch, &h_pivot, sizeof(int),
+                                   cudaMemcpyHostToDevice);
         }
     }
 
@@ -558,7 +558,7 @@ int do_global_fw_bw_main(GPUState& st, const GPUGraph& g,
         pick_pivot_kernel<<<grid_size, block_size>>>(
             st.d_Color, d_pivot_scratch, d_trim_targets, num_targets, base_color);
         CUDA_CHECK(cudaDeviceSynchronize());
-        CUDA_CHECK(cudaMemcpy(&h_pivot, d_pivot_scratch, sizeof(int), cudaMemcpyDeviceToHost));
+        CUDA_TIMED_MEMCPY(&h_pivot, d_pivot_scratch, sizeof(int), cudaMemcpyDeviceToHost);
     }
 
     // CPU: assert(pivot != gm_graph::NIL_NODE);
@@ -579,15 +579,15 @@ int do_global_fw_bw_main(GPUState& st, const GPUGraph& g,
     CUDA_CHECK(cudaDeviceSynchronize());
 
     int remain_count;
-    CUDA_CHECK(cudaMemcpy(&remain_count, d_remain_scratch, sizeof(int), cudaMemcpyDeviceToHost));
+    CUDA_TIMED_MEMCPY(&remain_count, d_remain_scratch, sizeof(int), cudaMemcpyDeviceToHost);
 
     if (remain_count <= 1) {
         if (remain_count == 1) {
             // OpenMP: G_Color[pivot] = -2; G_SCC[pivot] = pivot;
-            { int _scc_val = SCC_FOUND; CUDA_CHECK(cudaMemcpy(&st.d_Color[h_pivot], &_scc_val, sizeof(int),
-                                   cudaMemcpyHostToDevice)); }
-            CUDA_CHECK(cudaMemcpy(&st.d_SCC[h_pivot], &h_pivot, sizeof(int),
-                                   cudaMemcpyHostToDevice));
+            { int _scc_val = SCC_FOUND; CUDA_TIMED_MEMCPY(&st.d_Color[h_pivot], &_scc_val, sizeof(int),
+                                   cudaMemcpyHostToDevice); }
+            CUDA_TIMED_MEMCPY(&st.d_SCC[h_pivot], &h_pivot, sizeof(int),
+                                   cudaMemcpyHostToDevice);
         }
         return remain_count;
     }
@@ -713,8 +713,8 @@ int do_global_fw_bw_main(GPUState& st, const GPUGraph& g,
     // Read final SCC / BW counts
     int h_scc;
     int h_bw;
-    CUDA_CHECK(cudaMemcpy(&h_scc, d_bfs_scc_count, sizeof(int), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(&h_bw, d_bfs_bw_count, sizeof(int), cudaMemcpyDeviceToHost));
+    CUDA_TIMED_MEMCPY(&h_scc, d_bfs_scc_count, sizeof(int), cudaMemcpyDeviceToHost);
+    CUDA_TIMED_MEMCPY(&h_bw, d_bfs_bw_count, sizeof(int), cudaMemcpyDeviceToHost);
     scc_count += h_scc;
     int bw_count = h_bw;
 

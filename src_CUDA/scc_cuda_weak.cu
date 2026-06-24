@@ -453,8 +453,8 @@ void propagate_color(GPUState& st, const GPUGraph& g, int num_targets,
             d_trim_targets, num_targets);
         CUDA_CHECK(cudaDeviceSynchronize());
 
-        CUDA_CHECK(cudaMemcpy(&h_changed, d_changed, sizeof(int),
-                               cudaMemcpyDeviceToHost));
+        CUDA_TIMED_MEMCPY(&h_changed, d_changed, sizeof(int),
+                               cudaMemcpyDeviceToHost);
     }
     cuda_iters = iter;
     CUDA_CHECK(cudaFree(d_changed));
@@ -533,15 +533,14 @@ void do_global_wcc(GPUState& st, const GPUGraph& g)
         d_root_list, d_num_roots);
     CUDA_CHECK(cudaDeviceSynchronize());
 
-    int h_num_roots = 0;
-    CUDA_CHECK(cudaMemcpy(&h_num_roots, d_num_roots, sizeof(int),
-                           cudaMemcpyDeviceToHost));
+    int h_num_roots = 0;    CUDA_TIMED_MEMCPY(&h_num_roots, d_num_roots, sizeof(int),
+                            cudaMemcpyDeviceToHost);
 
     if (h_num_roots > 0) {
         // Download compact root list (~h_num_roots * 4 bytes = ~756 bytes)
         int* h_root_list = new int[h_num_roots];
-        CUDA_CHECK(cudaMemcpy(h_root_list, d_root_list,
-                               h_num_roots * sizeof(int), cudaMemcpyDeviceToHost));
+        CUDA_TIMED_MEMCPY(h_root_list, d_root_list,
+                               h_num_roots * sizeof(int), cudaMemcpyDeviceToHost);
 
         // Assign colors on host (fast — ~189 iterations on CPU)
         std::vector<int> h_root_colors(h_num_roots);
@@ -555,8 +554,8 @@ void do_global_wcc(GPUState& st, const GPUGraph& g)
         // Batch upload all root colors (single H2D cudaMemcpy + scatter kernel)
         int* d_color_values = NULL;
         CUDA_CHECK(cudaMalloc(&d_color_values, h_num_roots * sizeof(int)));
-        CUDA_CHECK(cudaMemcpy(d_color_values, h_root_colors.data(),
-                               h_num_roots * sizeof(int), cudaMemcpyHostToDevice));
+        CUDA_TIMED_MEMCPY(d_color_values, h_root_colors.data(),
+                               h_num_roots * sizeof(int), cudaMemcpyHostToDevice);
 
         // reuse scatter_scc_kernel: d_Color[root_list[i]] = color_values[i]
         scatter_scc_kernel<<<grid_size, block_size>>>(
@@ -638,8 +637,8 @@ void create_work_items_from_wcc(GPUState& st, const GPUGraph& g)
     // Upload root list to device (for gather kernel)
     int* d_root_list = NULL;
     CUDA_CHECK(cudaMalloc(&d_root_list, num_roots * sizeof(int)));
-    CUDA_CHECK(cudaMemcpy(d_root_list, root_list.data(),
-                           num_roots * sizeof(int), cudaMemcpyHostToDevice));
+    CUDA_TIMED_MEMCPY(d_root_list, root_list.data(),
+                           num_roots * sizeof(int), cudaMemcpyHostToDevice);
 
     // Count members per root (GPU kernel — same as before)
     int* d_root_counts = NULL;
@@ -662,8 +661,8 @@ void create_work_items_from_wcc(GPUState& st, const GPUGraph& g)
 
     // Download compact root counts (~num_roots * 4 bytes = ~756 bytes)
     int* h_root_counts = new int[num_roots];
-    CUDA_CHECK(cudaMemcpy(h_root_counts, d_root_counts_out,
-                           num_roots * sizeof(int), cudaMemcpyDeviceToHost));
+    CUDA_TIMED_MEMCPY(h_root_counts, d_root_counts_out,
+                           num_roots * sizeof(int), cudaMemcpyDeviceToHost);
 
     // Build offsets using compact root list
     std::vector<int> offsets;

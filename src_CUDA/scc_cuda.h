@@ -282,6 +282,30 @@ int do_global_trim2_new(GPUState& st, const GPUGraph& g, int* d_count);
 int repeat_global_trim2_new(GPUState& st, const GPUGraph& g,
     int* d_count, int exit_count);
 
+// ---- Algorithm Time tracking ----
+// Tracks H2D/D2H transfer time to compute ALGO_TIME = CUDA_RUNTIME - transfer_time.
+// This gives a fair comparison vs OpenMP (which has no explicit transfers).
+extern double      g_algo_memcpy_ms;
+extern cudaEvent_t g_algo_ev_start;
+extern cudaEvent_t g_algo_ev_end;
+
+void algo_memcpy_init();
+void algo_memcpy_finalize();
+
+#define CUDA_TIMED_MEMCPY(dst, src, count, kind) do {                              \
+    cudaEventRecord(g_algo_ev_start);                                               \
+    cudaError_t _err = cudaMemcpy(dst, src, count, kind);                           \
+    cudaEventRecord(g_algo_ev_end);                                                 \
+    cudaEventSynchronize(g_algo_ev_end);                                            \
+    if (_err != cudaSuccess) {                                                      \
+        fprintf(stderr, "CUDA err %s:%d: %s\n", __FILE__, __LINE__,                 \
+                cudaGetErrorString(_err)); exit(1);                                 \
+    }                                                                               \
+    float _ms = 0;                                                                  \
+    cudaEventElapsedTime(&_ms, g_algo_ev_start, g_algo_ev_end);                    \
+    g_algo_memcpy_ms += _ms;                                                        \
+} while(0)
+
 // ---- scc_cuda_fb_global.cu (mirrors scc_fb_global.cc) ----
 
 // BFS queue buffers shared with fb_seq.cu / fb_seq2.cu
