@@ -752,83 +752,9 @@ __global__ void trim_once_node_compact_persistent_kernel(
 }
 
 // ======================================================================
-// repeat_global_trim1_compact() — uses persistent kernel internally
+// repeat_global_trim1_compact() — host-side loop (proven stable)
 // ======================================================================
 int repeat_global_trim1_compact(GPUState& st, const GPUGraph& g,
-    int* d_count, int met_algo, int flag11,
-    const DynamicArrays& da, int* d_count_trim_spec,
-    int TRIM_STOP)
-{
-    create_trim1_compact(st, g);
-    if (d_trim_targets_count == 0) return 0;
-
-    CUDA_CHECK(cudaMemset(d_count, 0, sizeof(int)));
-
-    // Use d_compact_prefix as device-side state buffer
-    // [0] = num_targets  [1] = compact_counter  [2] = pass_trimmed
-    int* d_device_state = d_compact_prefix;
-
-    // Copy initial target count to device state
-    CUDA_CHECK(cudaMemcpy(&d_device_state[0], &d_trim_targets_count,
-                          sizeof(int), cudaMemcpyHostToDevice));
-
-    // Determine grid size for cooperative launch
-    int block_size = 256;
-    int grid_size = (d_trim_targets_count + block_size - 1) / block_size;
-    if (grid_size > 64) grid_size = 64;
-
-    int max_blocks;
-    CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-        &max_blocks,
-        trim_once_node_compact_persistent_kernel,
-        block_size, 0));
-    int num_sms;
-    CUDA_CHECK(cudaDeviceGetAttribute(&num_sms,
-        cudaDevAttrMultiProcessorCount, 0));
-    int max_cooperative_blocks = max_blocks * num_sms;
-    if (grid_size > max_cooperative_blocks)
-        grid_size = max_cooperative_blocks;
-    if (grid_size == 0) grid_size = 1;
-
-    // Build kernel args and launch cooperatively
-    // (explicit void* casts required by nvcc C++ type checking)
-    void* kernel_args[] = {
-        (void*)&g.d_begin, (void*)&g.d_node_idx,
-        (void*)&g.d_r_begin, (void*)&g.d_r_node_idx,
-        (void*)&st.d_Color, (void*)&st.d_SCC,
-        (void*)&d_count,
-        (void*)&d_trim_targets,
-        (void*)&d_trim_targets_count,
-        (void*)&d_device_state,
-        (void*)&met_algo, (void*)&flag11,
-        (void*)&da.d_scc_list, (void*)&da.d_vec_scc_count,
-        (void*)&da.d_level_ver, (void*)&da.d_affect_level,
-        (void*)&d_count_trim_spec,
-        (void*)&TRIM_STOP
-    };
-
-    CUDA_CHECK(cudaLaunchCooperativeKernel(
-        (const void*)trim_once_node_compact_persistent_kernel,
-        grid_size, block_size, kernel_args, 0, NULL));
-    CUDA_CHECK(cudaDeviceSynchronize());
-
-    // Read total trimmed count
-    int total_count = 0;
-    CUDA_CHECK(cudaMemcpy(&total_count, d_count,
-                          sizeof(int), cudaMemcpyDeviceToHost));
-
-    // Read final compact count
-    CUDA_CHECK(cudaMemcpy(&d_trim_targets_count,
-                          &d_device_state[0],
-                          sizeof(int), cudaMemcpyDeviceToHost));
-
-    return total_count;
-}
-
-// ======================================================================
-// repeat_global_trim1_compact_hostloop() — fallback: host-side loop
-// ======================================================================
-int repeat_global_trim1_compact_hostloop(GPUState& st, const GPUGraph& g,
     int* d_count, int met_algo, int flag11,
     const DynamicArrays& da, int* d_count_trim_spec,
     int TRIM_STOP)
