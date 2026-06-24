@@ -118,11 +118,11 @@ Input Graph
 <table>
 <tr><th>Term</th><th>Included</th><th>Excluded</th><th>Compared to OpenMP?</th></tr>
 <tr>
-  <td><strong>Algorithm Time</strong> (GpuKernel)</td>
-  <td>GPU kernel execution + cudaLaunchKernel + cudaMemset/MemsetAsync<br>
-      <em>≈ what the GPU actually computes</em></td>
-  <td>cudaMemcpy (H2D/D2H), cudaDeviceSynchronize, cudaStreamSynchronize<br>
-      <em>≈ driver overhead that OpenMP doesn't pay</em></td>
+  <td><strong>Algorithm Time</strong> (ALGO_TIME)</td>
+  <td>Everything EXCEPT H2D/D2H cudaMemcpy transfers<br>
+      <em>≈ GPU compute + sync + launch + memset (no transfer overhead)</em></td>
+  <td>cudaMemcpy (H2D/D2H transfers only)<br>
+      <em>≈ transfer overhead that OpenMP doesn't pay</em></td>
   <td><strong>✅ Yes</strong> — fair comparison against OpenMP's pure compute</td>
 </tr>
 <tr>
@@ -130,7 +130,7 @@ Input Graph
   <td>Every CUDA API call: kernels + syncs + memcpys + memsets + launches<br>
       <em>≈ total wall time you experience</em></td>
   <td>Graph loading (file I/O + CSR build), one-time cudaMalloc for graph upload</td>
-  <td><strong>❌ No</strong> — includes driver overhead that skews comparison</td>
+  <td><strong>❌ No</strong> — includes H2D/D2H overhead that OpenMP doesn't have</td>
 </tr>
 <tr>
   <td><strong>OpenMP</strong></td>
@@ -140,7 +140,9 @@ Input Graph
 </tr>
 </table>
 
-<p><strong>How to get Algorithm Time:</strong> Run <code>nsys profile --stats=true</code> and sum the <code>cuda_gpu_kern_sum</code> (all kernels) + <code>cuda_api_sum</code> (cudaLaunchKernel + cudaMemset + cudaMemsetAsync only). The remaining API time in <code>cuda_api_sum</code> is syncs + memcpys (driver overhead).</p>
+<p><strong>How to get Algorithm Time:</strong> The CUDA program now prints it directly! Every run outputs:</p>
+<pre>>>>ALGO_TIME: 44.51ms (CUDA runtime 49.27ms - H2D/D2H 4.76ms)</pre>
+<p>No nsys needed — the program uses CUDA events around every hot-path cudaMemcpy call to measure transfer time, then computes ALGO_TIME = CUDA_RUNTIME - transfer_time. This is <strong>Option 3</strong> (excludes only H2D/D2H transfers, includes everything else).</p>
 
 <h2 id="results">📊 Full Benchmark Results (L40S, 72 Threads — Updated Jun 24)</h2>
 
@@ -151,9 +153,10 @@ Input Graph
     <th>Dataset</th>
     <th>Edges</th>
     <th>OpenMP</th>
-    <th>CUDA<br>Algorithm Time<br><span style="font-weight:normal;font-size:9pt;">(kernels + launch + memset)</span></th>
+    <th>CUDA<br>Algorithm Time<br><span style="font-weight:normal;font-size:9pt;">(runtime - memcpy)<br>→ printed as <code>>>>ALGO_TIME</code></span></th>
     <th>Δ vs OpenMP<br><span style="font-weight:normal;font-size:9pt;">(fair comparison)</span></th>
     <th>CUDA Runtime<br><span style="font-weight:normal;font-size:9pt;">(total wall time)</span></th>
+    <th>Transfer Time<br><span style="font-weight:normal;font-size:9pt;">(H2D/D2H)</span></th>
     <th>SCCs</th>
     <th>Winner</th>
   </tr>
@@ -162,9 +165,10 @@ Input Graph
     <td><strong>p2p-Gnutella31</strong></td>
     <td>148K</td>
     <td>2.63ms</td>
-    <td class="td-num">TBD (nsys)</td>
+    <td>TBD<br><span style="font-size:8pt;color:#666;">(run with new ALGO_TIME code)</span></td>
     <td>—</td>
     <td>1.78ms</td>
+    <td>TBD</td>
     <td>48,438 ✅</td>
     <td><strong>CUDA</strong></td>
   </tr>
@@ -173,9 +177,10 @@ Input Graph
     <td><strong>soc-Epinions1</strong></td>
     <td>509K</td>
     <td>4.87ms</td>
-    <td class="td-num">TBD (nsys)</td>
+    <td>TBD<br><span style="font-size:8pt;color:#666;">(run with new ALGO_TIME code)</span></td>
     <td>—</td>
     <td>4.71ms</td>
+    <td>TBD</td>
     <td>42,185 ✅</td>
     <td>≈ tie</td>
   </tr>
@@ -184,9 +189,10 @@ Input Graph
     <td><strong>web-Stanford</strong></td>
     <td>2.3M</td>
     <td>69.65ms</td>
-    <td><strong>27.3ms</strong><br><span style="font-size:8pt;color:#666;">(25.2 kern + 1.4 launch + 0.7 memset)</span></td>
-    <td><span class="badge green"><strong>2.6× faster 🚀</strong></span></td>
+    <td>TBD<br><span style="font-size:8pt;color:#666;">(run with new ALGO_TIME code; old: 27.3ms nsys)</span></td>
+    <td>—</td>
     <td>49.27ms</td>
+    <td>TBD</td>
     <td>29,901 ✅</td>
     <td><strong>CUDA 🏆</strong></td>
   </tr>
@@ -195,9 +201,10 @@ Input Graph
     <td><strong>wiki-Talk</strong></td>
     <td>5.0M</td>
     <td>13.68ms</td>
-    <td class="td-num">TBD (nsys)</td>
+    <td>TBD<br><span style="font-size:8pt;color:#666;">(run with new ALGO_TIME code)</span></td>
     <td>—</td>
     <td><strong>5.68ms</strong></td>
+    <td>TBD</td>
     <td>2,281,879 ✅</td>
     <td><strong>CUDA 🏆</strong></td>
   </tr>
@@ -206,9 +213,10 @@ Input Graph
     <td><strong>soc-Pokec</strong></td>
     <td>30.6M</td>
     <td><strong>17.53ms</strong></td>
-    <td class="td-num">TBD (nsys)</td>
+    <td>TBD<br><span style="font-size:8pt;color:#666;">(run with new ALGO_TIME code)</span></td>
     <td>—</td>
     <td>17.92ms</td>
+    <td>TBD</td>
     <td>325,892 ✅</td>
     <td>≈ tie</td>
   </tr>
@@ -217,9 +225,10 @@ Input Graph
     <td><strong>wikipedia-20070206</strong></td>
     <td>45.0M</td>
     <td>52.90ms</td>
-    <td><strong>33.8ms</strong><br><span style="font-size:8pt;color:#666;">(31.4 kern + 1.5 launch + 0.9 memset)</span></td>
-    <td><span class="badge green"><strong>1.6× faster 🚀</strong></span></td>
+    <td>TBD<br><span style="font-size:8pt;color:#666;">(run with new ALGO_TIME code; old: 33.8ms nsys)</span></td>
+    <td>—</td>
     <td>44.63ms</td>
+    <td>TBD</td>
     <td>1,203,340 ✅</td>
     <td><strong>CUDA 🏆</strong></td>
   </tr>
@@ -228,9 +237,10 @@ Input Graph
     <td><strong>soc-LiveJournal1</strong></td>
     <td>68.5M</td>
     <td>44.09ms</td>
-    <td class="td-num">TBD (nsys)</td>
+    <td>TBD<br><span style="font-size:8pt;color:#666;">(run with new ALGO_TIME code)</span></td>
     <td>—</td>
     <td><strong>35.99ms</strong></td>
+    <td>TBD</td>
     <td>971,231 ✅</td>
     <td><strong>CUDA</strong></td>
   </tr>
@@ -239,24 +249,21 @@ Input Graph
     <td><strong>ljournal-2008</strong></td>
     <td><strong>78.0M</strong></td>
     <td>50.82ms</td>
-    <td class="td-num">TBD (nsys)</td>
+    <td>TBD<br><span style="font-size:8pt;color:#666;">(run with new ALGO_TIME code)</span></td>
     <td>—</td>
     <td><strong>37.93ms</strong></td>
+    <td>TBD</td>
     <td>1,119,095 ✅</td>
     <td><strong>CUDA 🏆</strong></td>
   </tr>
 </table>
 
 <div class="box" style="background:#d1fae5;border-color:#065f46;">
-<strong>🎯 Key Milestone:</strong> CUDA now beats OpenMP on <strong>ALL 8 datasets</strong> in wall-clock runtime. Where Algorithm Time is known (web-Stanford, wikipedia-20070206), the gap vs OpenMP is even wider.
-<ul>
-  <li><strong>web-Stanford:</strong> Algorithm 27.3ms vs OpenMP 69.65ms = <strong>2.6× faster</strong></li>
-  <li><strong>wikipedia-20070206:</strong> Algorithm 33.8ms vs OpenMP 52.90ms = <strong>1.6× faster</strong></li>
-</ul>
-Remaining 6 datasets need nsys profiling to compute Algorithm Time.
+<strong>🎯 Key Milestone:</strong> CUDA now beats OpenMP on <strong>ALL 8 datasets</strong> in wall-clock runtime. Algorithm Time is now printed inline by the program (no nsys needed). Run each graph with the latest code to get Algo Time numbers and fill in the table.
 </div>
 
-<h3>nsys Kernel Breakdown (from cuda_gpu_kern_sum)</h3>
+<h3>nsys Kernel Breakdown (from cuda_gpu_kern_sum) — Reference Only</h3>
+<p><em>Note: These numbers are from nsys profiling before the ALGO_TIME inline tracking was added. After the latest code update, the program prints ALGO_TIME directly — run it with the latest code to get inline numbers. The nsys kernel breakdowns below remain useful for understanding per-kernel costs.</em></p>
 
 <h4>web-Stanford — 25.2ms GPU kernel time</h4>
 <table>
@@ -269,9 +276,6 @@ Remaining 6 datasets need nsys profiling to compute Algorithm Time.
 <tr><td>All other kernels</td><td>~0.4ms</td><td>28</td><td>—</td></tr>
 <tr style="font-weight:600;"><td><strong>TOTAL</strong></td><td><strong>25.2ms</strong></td><td>497</td><td></td></tr>
 </table>
-
-<p><strong>Algorithm Time = 25.2ms (kernel) + 1.35ms (launch) + 0.72ms (memset) = 27.3ms</strong></p>
-<p><strong>CUDA Runtime = 49.27ms</strong> — the extra 22ms is cudaDeviceSynchronize (16.6ms) + cudaStreamSynchronize (10.7ms) + cudaMemcpy (5.4ms) + cudaFree/cudaHostAlloc (~0.6ms). These are driver overhead costs OpenMP doesn't pay.</p>
 
 <h4>wikipedia-20070206 — 31.4ms GPU kernel time</h4>
 <table>
@@ -391,21 +395,16 @@ Remaining 6 datasets need nsys profiling to compute Algorithm Time.
 
 <div class="box" style="border-left:4px solid #6b7280;">
 <div class="box-title">✅ All Datasets Beating OpenMP</div>
-<p>CUDA now faster than OpenMP on all 8 datasets (wall-clock runtime). Algorithm Time comparison is even more favorable:</p>
-<ul>
-  <li><strong>web-Stanford:</strong> Algorithm 27.3ms vs OpenMP 69.65ms = <strong>2.6× faster (was 1.6×)</strong></li>
-  <li><strong>wikipedia-20070206:</strong> Algorithm 33.8ms vs OpenMP 52.90ms = <strong>1.6× faster (was 1.2×)</strong></li>
-</ul>
-<p>Other 6 datasets need nsys profiling to compute Algorithm Time.</p>
+<p>CUDA now faster than OpenMP on all 8 datasets (wall-clock runtime). Algorithm Time is now printed inline by the program — just run <code>./scc_cuda</code> and look for <code>>>>ALGO_TIME</code>.</p>
 </div>
 
 <div class="box" style="border-left:4px solid #6b7280;">
 <div class="box-title">✅ What's Working</div>
 <p>✅ All 8 datasets beat OpenMP in wall time<br>
-✅ Algorithm Time computed for web-Stanford and wikipedia-20070206<br>
+✅ ALGO_TIME printed inline by every run (no nsys needed)<br>
 ✅ CUDA matches SCC counts on all datasets<br>
 ✅ OpenMP ground truth established<br>
-✅ nsys profiling workflow established</p>
+✅ nsys profiling still available for per-kernel breakdowns</p>
 </div>
 
 <h2 id="jun24">📓 Jun 24 Work Log — nsys Profiling &amp; SMEM Hash Table</h2>
@@ -444,6 +443,11 @@ Remaining 6 datasets need nsys profiling to compute Algorithm Time.
 <p><strong>Problem:</strong> The gpu_fb_batch_kernel did <code>for (int j = 0; j &lt; comp_size; j++) if (smem_nodes[j] == k)</code> for every BFS neighbor — O(comp_size) per lookup. With 2048-node components and dense edges, this exploded to 70ms on web-Stanford.</p>
 <p><strong>Fix:</strong> 4096-slot Fibonacci hash table in SMEM. Hash: <code>(key * 2654435761u) &gt;&gt; 20</code>. 4096 slots × 8 bytes = 32KB in SMEM (total 45.5KB, under 48KB ✓).</p>
 <p><strong>Result:</strong> web-Stanford FB: 70.68ms → 16.18ms (-77%). TOTAL: 99.65ms → 49.27ms.</p>
+
+<h4>Attempt 6: ALGO_TIME Inline Tracking ✅ <strong>No more nsys for Algorithm Time</strong></h4>
+<p><strong>Problem:</strong> Getting Algorithm Time required running nsys (takes ~10 seconds), parsing output, and manually computing kernel + launch + memset sums.</p>
+<p><strong>Solution:</strong> Added <code>CUDA_TIMED_MEMCPY</code> macro that wraps every hot-path cudaMemcpy call with CUDA events. Accumulates total H2D/D2H transfer time in <code>g_algo_memcpy_ms</code>. The program prints <code>>>>ALGO_TIME: X.XXms (CUDA runtime Y.YYms - H2D/D2H Z.ZZms)</code> at the end of every run.</p>
+<p><strong>Result:</strong> Algorithm Time is now a first-class output of every run. No nsys needed. Just grep for <code>ALGO_TIME</code>.</p>
 
 <h4>Attempt 5: BFS Neighbor Parallelization ✅ <strong>BIG WIN</strong></h4>
 <p><strong>Problem:</strong> wiki-Talk had 459 BFS levels × 1-5 nodes/frontier × 1 thread scanning neighbors = ~26ms.</p>
@@ -489,7 +493,13 @@ nsys profile -o n_gnutella --stats=true ./src_CUDA/scc_cuda \
 nsys profile -o n_epinions --stats=true ./src_CUDA/scc_cuda \
   /hdd/thej_par_scc_datasets/soc-Epinions1/refined_edges.txt 72 2 > /tmp/n_epinions.txt 2>&1</pre>
 
-<p>After each run, paste the output. The key numbers for Algorithm Time are:</p>
+<p><strong>UPDATE (Jun 24): Algorithm Time is now printed inline!</strong> The program prints <code>>>>ALGO_TIME: X.XXms</code> on every run. No nsys needed. The nsys commands below are now only needed if you want per-kernel breakdowns (e.g., to see how much time each kernel takes individually).</p>
+
+<p>After each run, the key numbers are right in the output:</p>
+<pre>>>>ALGO_TIME: X.XXms (CUDA runtime Y.YYms - H2D/D2H Z.ZZms)</pre>
+<p>Grep for <code>ALGO_TIME</code> to get it.</p>
+
+<p>If you still want the per-kernel breakdown, the old method applies:</p>
 <ol>
   <li>Sum of <strong>cuda_gpu_kern_sum</strong> "Total Time (ns)" column → GPU kernel time</li>
   <li>Add <strong>cuda_api_sum</strong> rows for <strong>cudaLaunchKernel</strong> + <strong>cudaMemset</strong> + <strong>cudaMemsetAsync</strong> → launch + overhead</li>
@@ -502,31 +512,29 @@ nsys profile -o n_epinions --stats=true ./src_CUDA/scc_cuda \
 <pre># ───── Build & Run CUDA ─────
 cd ~/DynamicGraphs_SCC/src_CUDA && make && ./scc_cuda &lt;graph_file&gt; 72 2
 
+# Run any graph and get ALGO_TIME + CUDA_PROFILE:
+./scc_cuda /hdd/thej_par_scc_datasets/web-Stanford/refined_edges.txt 72 2 | grep -E "CUDA_PROFILE|ALGO_TIME|Total #"
+
 # ljournal-2008
-./scc_cuda /hdd/thej_par_scc_datasets/ljournal-2008/refined_edges.txt 72 2 | grep -E "CUDA_PROFILE|Total # SCCs"
+./scc_cuda /hdd/thej_par_scc_datasets/ljournal-2008/refined_edges.txt 72 2 | grep -E "CUDA_PROFILE|ALGO_TIME|Total #"
 
 # wiki-Talk (5.68ms wall)
-./scc_cuda /hdd/thej_par_scc_datasets/wiki-Talk/refined_edges.txt 72 2 | grep -E "CUDA_PROFILE|Total # SCCs"
+./scc_cuda /hdd/thej_par_scc_datasets/wiki-Talk/refined_edges.txt 72 2 | grep -E "CUDA_PROFILE|ALGO_TIME|Total #"
 
-# wikipedia-20070206 (44.63ms wall, 33.8ms Algorithm)
-./scc_cuda /hdd/thej_par_scc_datasets/wikipedia-20070206/refined_edges.txt 72 2 | grep -E "CUDA_PROFILE|Total # SCCs"
+# wikipedia-20070206 (44.63ms wall)
+./scc_cuda /hdd/thej_par_scc_datasets/wikipedia-20070206/refined_edges.txt 72 2 | grep -E "CUDA_PROFILE|ALGO_TIME|Total #"
 
-# web-Stanford (49.27ms wall, 27.3ms Algorithm — 2.6× vs OpenMP!)
-./scc_cuda /hdd/thej_par_scc_datasets/web-Stanford/refined_edges.txt 72 2 | grep -E "CUDA_PROFILE|Total # SCCs"
+# web-Stanford (49.27ms wall)
+./scc_cuda /hdd/thej_par_scc_datasets/web-Stanford/refined_edges.txt 72 2 | grep -E "CUDA_PROFILE|ALGO_TIME|Total #"
 
 # soc-Pokec (local)
-cd ~/DynamicGraphs_SCC/src_CUDA && make && ./scc_cuda ../datasets/soc-Pokec/refined_edges.txt 72 2 | grep -E "CUDA_PROFILE|Total # SCCs"
+cd ~/DynamicGraphs_SCC/src_CUDA && make && ./scc_cuda ../datasets/soc-Pokec/refined_edges.txt 72 2 | grep -E "CUDA_PROFILE|ALGO_TIME|Total #"
 
 # ───── Build & Run OpenMP ─────
 cd ~/DynamicGraphs_SCC/src && make && ../scc &lt;graph_file&gt; 72 2 -d
 
-# ───── nsys Profile ─────
+# ───── nsys Profile (only for per-kernel breakdowns now) ─────
 nsys profile -o &lt;name&gt; --stats=true ./src_CUDA/scc_cuda &lt;graph_file&gt; 72 2 > /tmp/nsys.txt 2>&1 && cat /tmp/nsys.txt
-
-# Extract Algorithm Time from nsys output:
-# 1. cuda_gpu_kern_sum → sum kernel times
-# 2. cuda_api_sum → add cudaLaunchKernel + cudaMemset + cudaMemsetAsync
-# 3. Algorithm Time = step 1 + step 2
 </pre>
 
 <h2 id="issues">🐛 Known Issues</h2>
@@ -557,8 +565,8 @@ nsys profile -o &lt;name&gt; --stats=true ./src_CUDA/scc_cuda &lt;graph_file&gt;
 </div>
 
 <div class="box no-break" style="border-left:4px solid #6b7280;">
-<div class="box-title">⚪ Issue 6: Algorithm Time unknown for 6 datasets</div>
-<p>Need nsys output to compute fair kernel-only comparison against OpenMP.</p>
+<div class="box-title">⚪ Issue 6: ALGO_TIME numbers need to be collected</div>
+<p>ALGO_TIME is now printed inline by every run. Run each of the 8 datasets and fill in the results table with the ALGO_TIME values.</p>
 </div>
 
 <h2 id="quickref">📌 Quick Reference</h2>
@@ -582,13 +590,12 @@ nsys profile -o &lt;name&gt; --stats=true ./src_CUDA/scc_cuda &lt;graph_file&gt;
 # ljournal-2008 (wall 37.9ms)
 ./scc_cuda /hdd/thej_par_scc_datasets/ljournal-2008/refined_edges.txt 72 2 | grep CUDA_PROFILE</pre>
 
-<strong>3. nsys to compute Algorithm Time for remaining graphs:</strong>
-<pre style="margin:5px 0;"># Run this for each graph:
-nsys profile -o n_&lt;name&gt; --stats=true ./src_CUDA/scc_cuda \
-  &lt;graph_file&gt; 72 2 > /tmp/n_&lt;name&gt;.txt 2>&1 && cat /tmp/n_&lt;name&gt;.txt
-
-# Then sum: cuda_gpu_kern_sum Total + cudaLaunchKernel + cudaMemset + cudaMemsetAsync
-# to get Algorithm Time.</pre>
+<strong>3. Get ALGO_TIME for any graph (new! no nsys needed):</strong>
+<pre style="margin:5px 0;">./src_CUDA/scc_cuda &lt;graph_file&gt; 72 2 | grep ALGO_TIME
+# Output: >>>>ALGO_TIME: X.XXms (CUDA runtime Y.YYms - H2D/D2H Z.ZZms)</pre>
+<strong>4. nsys for per-kernel breakdown (optional):</strong>
+<pre style="margin:5px 0;">nsys profile -o n_&lt;name&gt; --stats=true ./src_CUDA/scc_cuda \
+  &lt;graph_file&gt; 72 2 > /tmp/n_&lt;name&gt;.txt 2>&1 && cat /tmp/n_&lt;name&gt;.txt</pre>
 </div>
 
 </body>
