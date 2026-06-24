@@ -51,12 +51,13 @@ int* d_remain_scratch   = NULL;  // [1] temp for remaining count
 // For deep-narrow graphs (wiki-Talk: 1-5 nodes/level), this is always sufficient.
 // If the frontier grows beyond this, the kernel spills to global and the host
 // takes over (host loop handles broad frontiers efficiently).
-#define MAX_SMEM_FRONTIER 2048
+#define MAX_SMEM_FRONTIER 4096
+// SMEM budget: 2*4096*4 + 12 = 32780 bytes (67% of 48KB)
 
 // Instrumentation: log frontier sizes per level for tuning MAX_SMEM_FRONTIER.
 // Set to 1 to collect data on Pokec/ljournal-2008 frontier distributions.
 // Collected data is printed to stderr on finalize_global_fb().
-#define ENABLE_FRONTIER_LOG 1
+#define ENABLE_FRONTIER_LOG 0
 
 #if ENABLE_FRONTIER_LOG
 // Ring buffer of frontier sizes, one per level (max 10000 levels)
