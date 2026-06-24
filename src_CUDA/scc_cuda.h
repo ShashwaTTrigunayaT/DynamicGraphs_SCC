@@ -495,6 +495,46 @@ void start_workers_fw_bw_dfs(GPUState& st, const GPUGraph& g, int N);
 // Returns: CPU processing time in ms (excludes D2H/H2D transfer overhead)
 double start_workers_fw_bw_dfs_host(GPUState& st, const GPUGraph& g, int N);
 
+// ---- scc_cuda_fb_global.cu (persistent kernel helpers) ----
+// Block-local persistent FB BFS kernels that loop levels in shared memory
+// via __syncthreads(), eliminating per-level kernel launch overhead.
+// Spill to global if frontier exceeds MAX_SMEM_FRONTIER (2048).
+
+// Persistent FW BFS kernel — single block, loops levels in SMEM
+__global__ void persistent_fw_bfs_kernel(
+    const edge_t* d_begin, const node_t* d_node_idx,
+    int* d_Color,
+    int pivot, int base_color, int fw_color,
+    int* d_bfs_queue,
+    int* d_bfs_next_queue,
+    int* d_bfs_next_count,
+    uint32_t* d_visited_bits,
+    int* d_spill_flag,
+    int* d_level_counter);
+
+// Persistent BW BFS kernel — same pattern for reverse traversal
+__global__ void persistent_bw_bfs_kernel(
+    const edge_t* d_r_begin, const node_t* d_r_node_idx,
+    int* d_Color, int* d_SCC,
+    int pivot, int base_color, int fw_color, int bw_color,
+    int* d_bfs_queue,
+    int* d_bfs_next_queue,
+    int* d_bfs_next_count,
+    int* d_bfs_scc_count,
+    int* d_bfs_bw_count,
+    uint32_t* d_visited_bits,
+    int* d_spill_flag,
+    int* d_level_counter);
+
+// Host helper: launches persistent FW BFS kernel, handles spill detection
+int run_persistent_bfs_fw(GPUState& st, const GPUGraph& g,
+    int pivot, int base_color, int fw_color);
+
+// Host helper: launches persistent BW BFS kernel, handles spill detection
+int run_persistent_bfs_bw(GPUState& st, const GPUGraph& g,
+    int pivot, int base_color, int fw_color, int bw_color,
+    int& out_bw_count, int& out_scc_count);
+
 // ---- scc_cuda_fb_gpu.cu (batch GPU FB for many-SCC graphs) ----
 // GPU-accelerated FB that processes all WCC components in parallel on GPU.
 // Replaces start_workers_fw_bw_dfs_host() for graphs with many components

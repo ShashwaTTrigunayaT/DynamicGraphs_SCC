@@ -41,12 +41,46 @@ int d_bfs_visited_words = 0;
 int* d_pivot_scratch    = NULL;  // [1] temp for pivot selection
 int* d_remain_scratch   = NULL;  // [1] temp for remaining count
 
+// ---- Block-local persistent kernel state ----
+// The persistent kernel replaces the host-level loop for high-diameter graphs.
+// It keeps the BFS resident on a single block, looping levels via __syncthreads()
+// instead of launching a new kernel per level.
+// Spills to global if the frontier exceeds MAX_SMEM_FRONTIER.
+
+// Maximum frontier size that fits in shared memory (matched to gpu_fb_batch_kernel)
+// For deep-narrow graphs (wiki-Talk: 1-5 nodes/level), this is always sufficient.
+// If the frontier grows beyond this, the kernel spills to global and the host
+// takes over (host loop handles broad frontiers efficiently).
+#define MAX_SMEM_FRONTIER 2048
+
+// Instrumentation: log frontier sizes per level for tuning MAX_SMEM_FRONTIER.
+// Set to 1 to collect data on Pokec/ljournal-2008 frontier distributions.
+// Collected data is printed to stderr on finalize_global_fb().
+#define ENABLE_FRONTIER_LOG 0
+
+#if ENABLE_FRONTIER_LOG
+// Ring buffer of frontier sizes, one per level (max 10000 levels)
+static int* d_frontier_log  = NULL;
+static int* d_frontier_pos  = NULL;  // [1] atomic position in log
+static int* h_frontier_log  = NULL;  // host side after download
+static int  g_frontier_log_cap = 10000;
+#endif
+
+// Spill flag for persistent kernel:
+//   -1 = BFS completed without spill (all done)
+//    0 = kernel not yet launched
+//    1 = spill occurred, host must continue from d_bfs_next_queue
+static int* d_spill_flag     = NULL;
+
 // Pinned host memory + stream for async BFS level loop
 // Pinned memory enables faster D2H transfers (avoids staging buffer)
 cudaStream_t bfs_stream        = NULL;
 int*         h_pinned_next_count = NULL;  // pinned: next frontier size
 int*         h_pinned_scc_count  = NULL;  // pinned: SCC count
 int*         h_pinned_bw_count   = NULL;  // pinned: BW count
+
+// Host-side persistent kernel control
+int g_persistent_kernel_attempts = 0;  // stats counter
 
 static int init_fw_color;
 static int init_bw_color;
@@ -127,6 +161,9 @@ void initialize_global_fb(int num_nodes)
     if (!d_pivot_scratch)  CUDA_CHECK(cudaMalloc(&d_pivot_scratch,  sizeof(int)));
     if (!d_remain_scratch) CUDA_CHECK(cudaMalloc(&d_remain_scratch, sizeof(int)));
 
+    // Allocate spill flag for persistent kernel (0 = no spill, -1 = done, 1 = spill)
+    if (!d_spill_flag) CUDA_CHECK(cudaMalloc(&d_spill_flag, sizeof(int)));
+
     // Allocate pinned host memory for async D2H copies (faster D2H, no staging)
     if (!h_pinned_next_count) CUDA_CHECK(cudaMallocHost(&h_pinned_next_count, sizeof(int)));
     if (!h_pinned_scc_count)  CUDA_CHECK(cudaMallocHost(&h_pinned_scc_count,  sizeof(int)));
@@ -134,6 +171,17 @@ void initialize_global_fb(int num_nodes)
 
     // Create stream for async kernel launches + memcpy
     if (!bfs_stream) CUDA_CHECK(cudaStreamCreate(&bfs_stream));
+
+#if ENABLE_FRONTIER_LOG
+    // Allocate frontier logging buffers
+    if (!d_frontier_log) CUDA_CHECK(cudaMalloc(&d_frontier_log, g_frontier_log_cap * sizeof(int)));
+    if (!d_frontier_pos) CUDA_CHECK(cudaMalloc(&d_frontier_pos, sizeof(int)));
+    if (!h_frontier_log) h_frontier_log = new int[g_frontier_log_cap];
+    CUDA_CHECK(cudaMemset(d_frontier_pos, 0, sizeof(int)));
+#endif
+
+    // Reset stats
+    g_persistent_kernel_attempts = 0;
 
     init_fw_color = 0;
     init_bw_color = 0;
@@ -161,11 +209,35 @@ void finalize_global_fb()
     if (d_pivot_scratch)  { cudaFree(d_pivot_scratch);  d_pivot_scratch = NULL; }
     if (d_remain_scratch) { cudaFree(d_remain_scratch); d_remain_scratch = NULL; }
 
+    // Free spill flag
+    if (d_spill_flag)     { cudaFree(d_spill_flag);     d_spill_flag = NULL; }
+
     // Free pinned memory and destroy stream
     if (h_pinned_next_count) { cudaFreeHost(h_pinned_next_count); h_pinned_next_count = NULL; }
     if (h_pinned_scc_count)  { cudaFreeHost(h_pinned_scc_count); h_pinned_scc_count = NULL; }
     if (h_pinned_bw_count)   { cudaFreeHost(h_pinned_bw_count);  h_pinned_bw_count = NULL; }
     if (bfs_stream)          { cudaStreamDestroy(bfs_stream);     bfs_stream = NULL; }
+
+#if ENABLE_FRONTIER_LOG
+    // Print frontier size log and clean up
+    if (h_frontier_log) {
+        int count;
+        CUDA_CHECK(cudaMemcpy(&count, d_frontier_pos, sizeof(int), cudaMemcpyDeviceToHost));
+        if (count > g_frontier_log_cap) count = g_frontier_log_cap;
+        CUDA_CHECK(cudaMemcpy(h_frontier_log, d_frontier_log,
+                               count * sizeof(int), cudaMemcpyDeviceToHost));
+        fprintf(stderr, "[FRONTIER_LOG] %d levels:\n", count);
+        for (int i = 0; i < count && i < 1000; i++) {
+            fprintf(stderr, "%d%s", h_frontier_log[i],
+                    (i + 1) % 50 == 0 ? "\n" : " ");
+        }
+        if (count > 1000) fprintf(stderr, "... (%d more)\n", count - 1000);
+        fprintf(stderr, "\n");
+        delete[] h_frontier_log; h_frontier_log = NULL;
+    }
+    if (d_frontier_log) { cudaFree(d_frontier_log); d_frontier_log = NULL; }
+    if (d_frontier_pos) { cudaFree(d_frontier_pos); d_frontier_pos = NULL; }
+#endif
 }
 
 // ======================================================================
@@ -483,6 +555,517 @@ __global__ void count_by_colors_kernel(
 }
 
 // ======================================================================
+// persistent_fw_bfs_kernel
+//
+// Block-local persistent FW BFS that loops levels via __syncthreads()
+// instead of re-launching a kernel per level. Designed for deep-narrow
+// BFS frontiers (1-5 nodes/level) where kernel launch overhead dominates.
+//
+// SMEM layout per block:
+//   [0..max_f-1]        : s_queue (int)     — current frontier
+//   [max_f..2*max_f-1]  : s_next (int)      — next frontier
+//   [2*max_f]           : s_qsize (int)     — current frontier size
+//   [2*max_f+1]         : s_ncount (int)    — next frontier count
+//   [2*max_f+2]         : s_spilled (int)   — 1 if overflow occurred
+//
+// Layout bytes = 2*max_f*4 + 3*4 = 8*max_f + 12
+// For MAX=2048: 16384 + 12 = 16396 bytes < 48KB ✓
+//
+// Spill behavior:
+//   If the next frontier exceeds MAX_SMEM_FRONTIER nodes, the kernel
+//   writes all overflow nodes to global d_bfs_next_queue and sets
+//   d_spill_flag = 1. The host can then continue the BFS from the
+//   spilled frontier using the existing per-level kernel loop.
+//
+// Output: d_bfs_next_count contains the number of nodes in the spilled
+//         frontier (0 if BFS completed). d_spill_flag = -1 (done) or 1 (spill).
+// ======================================================================
+__global__ void persistent_fw_bfs_kernel(
+    const edge_t* d_begin, const node_t* d_node_idx,
+    int* d_Color,
+    int pivot, int base_color, int fw_color,
+    int* d_bfs_queue,          // [N] global queue buffer (for spill)
+    int* d_bfs_next_queue,     // [N] global next queue buffer (for spill)
+    int* d_bfs_next_count,     // [1] global next count (for spill)
+    uint32_t* d_visited_bits,  // global visited bitmap
+    int* d_spill_flag,         // [1] output: -1 done, 1 spilled
+    int* d_level_counter)      // [1] output: number of levels processed (for stats)
+{
+    // Only one block needed — sequential BFS on a single component
+    if (blockIdx.x > 0) return;
+
+    extern __shared__ int smem[];
+    int* s_queue   = &smem[0];
+    int* s_next    = &smem[MAX_SMEM_FRONTIER];
+    volatile int& s_qsize   = smem[2 * MAX_SMEM_FRONTIER];
+    volatile int& s_ncount  = smem[2 * MAX_SMEM_FRONTIER + 1];
+    volatile int& s_spilled = smem[2 * MAX_SMEM_FRONTIER + 2];
+
+    int tid = threadIdx.x;
+    int stride = blockDim.x;
+    const int STAGE_SIZE = 4;
+
+    // ---- Initialize: pivot is the first frontier ----
+    if (tid == 0) {
+        s_queue[0] = pivot;
+        s_qsize = 1;
+        s_spilled = 0;
+        *d_bfs_next_count = 0;  // reset spill count
+    }
+    __syncthreads();
+
+    int total_levels = 0;
+    int local_levels = 0;
+
+    int qsize = s_qsize;  // declared outside while for scope in report section
+
+    // ---- Main loop: one BFS level per iteration ----
+    // Safety cap at 100000 levels to prevent hangs on corrupted state.
+    while (s_qsize > 0 && s_spilled == 0 && local_levels < 100000) {
+        qsize = s_qsize;
+        if (tid == 0) s_ncount = 0;
+        __syncthreads();
+
+#if ENABLE_FRONTIER_LOG
+        // Log frontier size for this level
+        if (tid == 0) {
+            int pos = atomicAdd(d_level_counter, 1);
+            if (pos < 10000) d_bfs_next_queue[pos] = qsize;  // reuse buffer for log
+        }
+#endif
+
+        // Per-thread staging buffer for claimed nodes
+        int staged[STAGE_SIZE];
+        int staged_cnt = 0;
+
+#define PERSISTENT_FLUSH(to_queue, count_var) do {                         \
+    if (staged_cnt > 0) {                                                  \
+        int base = atomicAdd(&count_var, staged_cnt);                      \
+        for (int _j = 0; _j < staged_cnt; _j++) {                          \
+            if (base + _j < MAX_SMEM_FRONTIER) {                           \
+                to_queue[base + _j] = staged[_j];                          \
+            } else {                                                        \
+                /* Spill to global */                                       \
+                int gpos = atomicAdd(d_bfs_next_count, 1);                  \
+                d_bfs_next_queue[gpos] = staged[_j];                        \
+                if (tid == 0) s_spilled = 1;                                 \
+            }                                                               \
+        }                                                                    \
+        staged_cnt = 0;                                                      \
+    }                                                                        \
+} while(0)
+
+        for (int fi = tid; fi < qsize; fi += stride) {
+            node_t t = s_queue[fi];
+            for (edge_t nx = d_begin[t]; nx < d_begin[t + 1]; nx++) {
+                node_t k = d_node_idx[nx];
+                // Navigate: check if k has base_color
+                if (d_Color[k] == base_color) {
+                    // Claim via visited bitmap (atomicOr on 200KB L2-resident bitmap)
+                    int word = k >> 5;
+                    uint32_t bit = 1u << (k & 31);
+                    uint32_t old = atomicOr(&d_visited_bits[word], bit);
+                    if ((old & bit) == 0) {
+                        // Claimed! Write color with simple store
+                        d_Color[k] = fw_color;
+                        staged[staged_cnt++] = k;
+                        if (staged_cnt == STAGE_SIZE) {
+                            // Check spill flag early to avoid unnecessary work
+                            if (s_spilled) break;
+                            PERSISTENT_FLUSH(s_next, s_ncount);
+                        }
+                    }
+                }
+            }
+            if (s_spilled) break;
+        }
+
+        // Flush remaining staging buffer
+        if (!s_spilled || staged_cnt > 0) {
+            PERSISTENT_FLUSH(s_next, s_ncount);
+        }
+#undef PERSISTENT_FLUSH
+
+        __syncthreads();
+
+        if (s_spilled) {
+            // *** BUG FIX: Flush SMEM nodes from s_next to global before breaking ***
+            // When PERSISTENT_FLUSH overflowed, some nodes were written to s_next
+            // (shared memory) by other threads before the spill flag was set.
+            // Those nodes are lost when this kernel exits unless we copy them to
+            // global d_bfs_next_queue here, appended after the already-spilled
+            // overflow nodes. Without this, the host's spill recovery only sees
+            // the overflow nodes — nodes only reachable through the s_next nodes
+            // would never be visited, causing undercounted frontiers.
+            int ncnt = s_ncount;
+            if (ncnt > MAX_SMEM_FRONTIER) ncnt = MAX_SMEM_FRONTIER;
+            for (int i = tid; i < ncnt; i += stride) {
+                int gpos = atomicAdd(d_bfs_next_count, 1);
+                d_bfs_next_queue[gpos] = s_next[i];
+            }
+            __syncthreads();
+            break;
+        }
+
+        // Swap frontiers: copy s_next → s_queue
+        int ncnt = s_ncount;
+        if (ncnt > MAX_SMEM_FRONTIER) ncnt = MAX_SMEM_FRONTIER;
+        for (int i = tid; i < ncnt; i += stride) {
+            s_queue[i] = s_next[i];
+        }
+        if (tid == 0) s_qsize = ncnt;
+        __syncthreads();
+
+        local_levels++;
+        total_levels++;
+    }        // ---- Report results ----
+    // Note: use s_qsize, not qsize. qsize holds the last iteration's frontier
+    // size (always > 0 if work was done), while s_qsize is set to ncnt at the
+    // end of each iteration and is 0 when BFS genuinely completed.
+    if (tid == 0) {
+        if (s_qsize == 0 && s_spilled == 0) {
+            // BFS completed successfully
+            *d_spill_flag = -1;  // done
+        } else if (s_spilled) {
+            // Spill occurred — host continues from d_bfs_next_queue
+            *d_spill_flag = 1;
+        } else {
+            // Safety exit (hit 100K levels) — shouldn't happen
+            *d_spill_flag = -1;
+        }
+        *d_level_counter = total_levels;
+    }
+}
+
+// ======================================================================
+// persistent_bw_bfs_kernel
+//
+// Block-local persistent BW BFS. Same pattern as persistent_fw_bfs_kernel
+// but processes reverse edges. For each visited node:
+//   - If d_Color[k] == fw_color → intersection: mark as SCC, set d_SCC[k] = pivot
+//   - If d_Color[k] == base_color → BW set: mark as bw_color
+//
+// SMEM layout: same as FW version.
+//
+// Output: d_bfs_next_count contains spilled frontier size (0 if done).
+//         d_bfs_scc_count / d_bfs_bw_count contain final counts.
+//         d_spill_flag = -1 (done) or 1 (spill).
+// ======================================================================
+__global__ void persistent_bw_bfs_kernel(
+    const edge_t* d_r_begin, const node_t* d_r_node_idx,
+    int* d_Color, int* d_SCC,
+    int pivot, int base_color, int fw_color, int bw_color,
+    int* d_bfs_queue,          // [N] global queue buffer (for spill)
+    int* d_bfs_next_queue,     // [N] global next queue buffer (for spill)
+    int* d_bfs_next_count,     // [1] global next count (for spill)
+    int* d_bfs_scc_count,      // [1] total SCC count
+    int* d_bfs_bw_count,       // [1] total bw count
+    uint32_t* d_visited_bits,  // global visited bitmap
+    int* d_spill_flag,         // [1] output: -1 done, 1 spilled
+    int* d_level_counter)      // [1] output: number of levels processed (for stats)
+{
+    // Only one block needed
+    if (blockIdx.x > 0) return;
+
+    extern __shared__ int smem[];
+    int* s_queue   = &smem[0];
+    int* s_next    = &smem[MAX_SMEM_FRONTIER];
+    volatile int& s_qsize   = smem[2 * MAX_SMEM_FRONTIER];
+    volatile int& s_ncount  = smem[2 * MAX_SMEM_FRONTIER + 1];
+    volatile int& s_spilled = smem[2 * MAX_SMEM_FRONTIER + 2];
+
+    int tid = threadIdx.x;
+    int stride = blockDim.x;
+    const int STAGE_SIZE = 4;
+
+    // ---- Initialize: pivot is the first frontier ----
+    // Pivot is always at the intersection, so mark it as SCC immediately.
+    if (tid == 0) {
+        d_Color[pivot] = SCC_FOUND;
+        d_SCC[pivot] = pivot;
+        s_queue[0] = pivot;
+        s_qsize = 1;
+        s_spilled = 0;
+        *d_bfs_next_count = 0;
+        *d_bfs_scc_count = 1;  // count pivot
+        *d_bfs_bw_count = 0;
+    }
+    __syncthreads();
+
+    int local_levels = 0;
+
+    // ---- Main loop ----
+    while (s_qsize > 0 && s_spilled == 0 && local_levels < 100000) {
+        int qsize = s_qsize;
+        if (tid == 0) s_ncount = 0;
+        __syncthreads();
+
+#if ENABLE_FRONTIER_LOG
+        if (tid == 0) {
+            // Use d_bfs_queue as temp log buffer (safe here — not used during kernel)
+            int pos = atomicAdd(d_level_counter, 1);
+            if (pos < 10000) d_bfs_queue[pos] = qsize;
+        }
+#endif
+
+        int staged[STAGE_SIZE];
+        int staged_cnt = 0;
+        int local_scc = 0;
+        int local_bw = 0;
+
+#define PERSISTENT_BW_FLUSH(to_queue, count_var) do {                      \
+    if (staged_cnt > 0) {                                                  \
+        int base = atomicAdd(&count_var, staged_cnt);                      \
+        for (int _j = 0; _j < staged_cnt; _j++) {                          \
+            if (base + _j < MAX_SMEM_FRONTIER) {                           \
+                to_queue[base + _j] = staged[_j];                          \
+            } else {                                                        \
+                int gpos = atomicAdd(d_bfs_next_count, 1);                  \
+                d_bfs_next_queue[gpos] = staged[_j];                        \
+                if (tid == 0) s_spilled = 1;                                 \
+            }                                                               \
+        }                                                                    \
+        staged_cnt = 0;                                                      \
+    }                                                                        \
+} while(0)
+
+        for (int fi = tid; fi < qsize; fi += stride) {
+            node_t t = s_queue[fi];
+            for (edge_t nx = d_r_begin[t]; nx < d_r_begin[t + 1]; nx++) {
+                node_t k = d_r_node_idx[nx];
+                // Single read of d_Color[k] for TOCTOU safety
+                int k_color = d_Color[k];
+
+                // Navigate: check if k is in fw_set (intersection) or base_set
+                if (k_color == fw_color || k_color == base_color) {
+                    // Claim via visited bitmap
+                    int word = k >> 5;
+                    uint32_t bit = 1u << (k & 31);
+                    uint32_t old = atomicOr(&d_visited_bits[word], bit);
+                    if ((old & bit) == 0) {
+                        if (k_color == fw_color) {
+                            // Intersection: mark as SCC
+                            d_Color[k] = SCC_FOUND;
+                            d_SCC[k] = pivot;
+                            local_scc++;
+                        } else {
+                            // BW-set
+                            d_Color[k] = bw_color;
+                            local_bw++;
+                        }
+                        staged[staged_cnt++] = k;
+                        if (staged_cnt == STAGE_SIZE) {
+                            if (s_spilled) break;
+                            PERSISTENT_BW_FLUSH(s_next, s_ncount);
+                        }
+                    }
+                }
+            }
+            if (s_spilled) break;
+        }
+
+        if (!s_spilled || staged_cnt > 0) {
+            PERSISTENT_BW_FLUSH(s_next, s_ncount);
+        }
+#undef PERSISTENT_BW_FLUSH
+
+        // Flush local SCC / BW counters BEFORE the break check
+        // This ensures spill-case nodes are counted even when s_spilled is set
+        // by PERSISTENT_BW_FLUSH (overflow nodes are already in d_bfs_next_queue
+        // and correctly counted here — no double counting).
+        if (local_scc > 0) atomicAdd(d_bfs_scc_count, local_scc);
+        if (local_bw > 0) atomicAdd(d_bfs_bw_count, local_bw);
+
+        __syncthreads();
+
+        if (s_spilled) {
+            // *** BUG FIX: Flush SMEM nodes from s_next to global before breaking ***
+            int ncnt = s_ncount;
+            if (ncnt > MAX_SMEM_FRONTIER) ncnt = MAX_SMEM_FRONTIER;
+            for (int i = tid; i < ncnt; i += stride) {
+                int gpos = atomicAdd(d_bfs_next_count, 1);
+                d_bfs_next_queue[gpos] = s_next[i];
+            }
+            __syncthreads();
+            break;
+        }
+
+        // Swap frontiers
+        int ncnt = s_ncount;
+        if (ncnt > MAX_SMEM_FRONTIER) ncnt = MAX_SMEM_FRONTIER;
+        for (int i = tid; i < ncnt; i += stride) {
+            s_queue[i] = s_next[i];
+        }
+        if (tid == 0) s_qsize = ncnt;
+        __syncthreads();
+
+        local_levels++;
+    }
+
+    // ---- Report results ----
+    if (tid == 0) {
+        if (!s_spilled && s_qsize == 0) {
+            *d_spill_flag = -1;  // done
+        } else if (s_spilled) {
+            *d_spill_flag = 1;
+        } else {
+            *d_spill_flag = -1;
+        }
+        *d_level_counter = local_levels;
+    }
+}
+
+// ======================================================================
+// run_persistent_bfs_fw() — host helper
+//
+// Launches the persistent FW BFS kernel for a given pivot, base_color,
+// fw_color. If the kernel completes without spill (d_spill_flag == -1),
+// returns the total number of FW nodes reachable.
+// If spill occurs (d_spill_flag == 1), returns the count of nodes in
+// the spilled frontier so the caller can continue from there.
+// ======================================================================
+int run_persistent_bfs_fw(GPUState& st, const GPUGraph& g,
+    int pivot, int base_color, int fw_color)
+{
+    g_persistent_kernel_attempts++;
+
+    // ---- Set initial pivot state ----
+    CUDA_CHECK(cudaMemcpy(d_bfs_queue, &pivot, sizeof(int),
+                           cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(&st.d_Color[pivot], &fw_color, sizeof(int),
+                           cudaMemcpyHostToDevice));
+
+    // ---- Reset spill flag ----
+    int spill_init = 0;
+    CUDA_CHECK(cudaMemcpy(d_spill_flag, &spill_init, sizeof(int),
+                           cudaMemcpyHostToDevice));
+
+    // ---- SMEM size ----
+    int smem_size = 2 * MAX_SMEM_FRONTIER * sizeof(int) + 3 * sizeof(int);
+    int block_size = 256;
+
+    // ---- Launch persistent kernel ----
+    persistent_fw_bfs_kernel<<<1, block_size, smem_size>>>(
+        g.d_begin, g.d_node_idx,
+        st.d_Color,
+        pivot, base_color, fw_color,
+        d_bfs_queue, d_bfs_next_queue, d_bfs_next_count,
+        d_bfs_visited_bits,
+        d_spill_flag,
+        d_pivot_scratch);  // reuse d_pivot_scratch as level counter
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    // ---- Check result ----
+    int h_spill_flag;
+    CUDA_CHECK(cudaMemcpy(&h_spill_flag, d_spill_flag, sizeof(int),
+                           cudaMemcpyDeviceToHost));
+
+    if (h_spill_flag == -1) {
+        // BFS completed — count visited nodes
+        // Count number of nodes marked with fw_color via a kernel
+        int* d_fw_count = d_remain_scratch;
+        CUDA_CHECK(cudaMemset(d_fw_count, 0, sizeof(int)));
+
+        // Use compact scan to count fw_color nodes from trim_targets
+        if (d_trim_targets_count > 0) {
+            int bs = 256;
+            int gs = (d_trim_targets_count + bs - 1) / bs;
+            count_remaining_kernel<<<gs, bs>>>(
+                st.d_Color, d_fw_count,
+                d_trim_targets, d_trim_targets_count, fw_color);
+            CUDA_CHECK(cudaDeviceSynchronize());
+        }
+
+        int fw_count;
+        CUDA_CHECK(cudaMemcpy(&fw_count, d_fw_count, sizeof(int),
+                               cudaMemcpyDeviceToHost));
+        return fw_count;
+    }
+
+    // ---- Spill occurred: host must continue ----
+    // d_bfs_next_count contains the number of nodes in the spilled frontier.
+    int spill_count;
+    CUDA_CHECK(cudaMemcpy(&spill_count, d_bfs_next_count, sizeof(int),
+                           cudaMemcpyDeviceToHost));
+    // The nodes the persistent kernel visited before spilling are already colored
+    // fw_color. The host loop will process nodes from the spilled frontier only.
+    // Return negative spill count so the caller can continue the host loop.
+    // The caller should run count_remaining_kernel after the host loop finishes
+    // to get the accurate total fw_count (includes all SMEM-level nodes + host-loop nodes).
+    return -spill_count;  // negative = spill occurred, magnitude = spill count
+}
+
+// ======================================================================
+// run_persistent_bfs_bw() — host helper for BW BFS
+//
+// Same pattern as run_persistent_bfs_fw but for backward BFS.
+// Returns: positive = scc_count (BFS completed without spill)
+//          negative = -(spill_count) if spill occurred
+// ======================================================================
+int run_persistent_bfs_bw(GPUState& st, const GPUGraph& g,
+    int pivot, int base_color, int fw_color, int bw_color,
+    int& out_bw_count, int& out_scc_count)
+{
+    // ---- Mark pivot as SCC ----
+    int scc_val = SCC_FOUND;
+    CUDA_CHECK(cudaMemcpy(d_bfs_queue, &pivot, sizeof(int),
+                           cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(&st.d_Color[pivot], &scc_val, sizeof(int),
+                           cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(&st.d_SCC[pivot], &pivot, sizeof(int),
+                           cudaMemcpyHostToDevice));
+
+    // ---- Initialize SCC and BW counters ----
+    CUDA_CHECK(cudaMemset(d_bfs_scc_count, 0, sizeof(int)));
+    CUDA_CHECK(cudaMemset(d_bfs_bw_count, 0, sizeof(int)));
+
+    // ---- Reset spill flag ----
+    int spill_init = 0;
+    CUDA_CHECK(cudaMemcpy(d_spill_flag, &spill_init, sizeof(int),
+                           cudaMemcpyHostToDevice));
+
+    // ---- SMEM size ----
+    int smem_size = 2 * MAX_SMEM_FRONTIER * sizeof(int) + 3 * sizeof(int);
+    int block_size = 256;
+
+    // ---- Launch persistent BW kernel ----
+    persistent_bw_bfs_kernel<<<1, block_size, smem_size>>>(
+        g.d_r_begin, g.d_r_node_idx,
+        st.d_Color, st.d_SCC,
+        pivot, base_color, fw_color, bw_color,
+        d_bfs_queue, d_bfs_next_queue, d_bfs_next_count,
+        d_bfs_scc_count, d_bfs_bw_count,
+        d_bfs_visited_bits,
+        d_spill_flag,
+        d_pivot_scratch);
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    // ---- Read results ----
+    int h_scc_count, h_bw_count;
+    CUDA_CHECK(cudaMemcpy(&h_scc_count, d_bfs_scc_count, sizeof(int),
+                           cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(&h_bw_count, d_bfs_bw_count, sizeof(int),
+                           cudaMemcpyDeviceToHost));
+    out_scc_count = h_scc_count;
+    out_bw_count = h_bw_count;
+
+    int h_spill_flag;
+    CUDA_CHECK(cudaMemcpy(&h_spill_flag, d_spill_flag, sizeof(int),
+                           cudaMemcpyDeviceToHost));
+
+    if (h_spill_flag == -1) {
+        // BFS completed
+        return out_scc_count;
+    }
+
+    // ---- Spill occurred ----
+    int spill_count;
+    CUDA_CHECK(cudaMemcpy(&spill_count, d_bfs_next_count, sizeof(int),
+                           cudaMemcpyDeviceToHost));
+    return -spill_count;
+}
+
+// ======================================================================
 // do_global_fw_bw_main()
 // Mirrors OpenMP:
 //   int do_fw_bw_global_main(gm_graph& G, int curr_color, int count,
@@ -591,52 +1174,85 @@ int do_global_fw_bw_main(GPUState& st, const GPUGraph& g,
     int bw_color = cuda_get_new_color();
 
     // ---------------------------------------------------------------
-    // Forward BFS
+    // Forward BFS (with persistent kernel optimization for high-diameter)
     // OpenMP:
     //   fw_trim_global FW_BFS(G, base_color, fw_color);
     //   FW_BFS.prepare(pivot, gm_rt_get_num_threads());
     //   FW_BFS.do_bfs_forward();
     //   int fw_count = FW_BFS.get_fw_count();
+    //
+    // Strategy:
+    //   1. Try block-local persistent kernel (keeps BFS resident, loops
+    //      levels via __syncthreads(), avoids per-level launch overhead)
+    //   2. If persistent kernel spills (frontier exceeds MAX_SMEM_FRONTIER),
+    //      fall back to existing per-level host loop from the spilled frontier
     // ---------------------------------------------------------------
-    int queue_size = 1;
-    CUDA_CHECK(cudaMemcpyAsync(d_bfs_queue, &h_pivot, sizeof(int),
-                                cudaMemcpyHostToDevice, bfs_stream));
-    CUDA_CHECK(cudaMemcpyAsync(&st.d_Color[h_pivot], &fw_color, sizeof(int),
-                                cudaMemcpyHostToDevice, bfs_stream));
-    CUDA_CHECK(cudaStreamSynchronize(bfs_stream));
-
     int total_fw = 1;  // pivot counted
+    int fw_count;
 
-    while (queue_size > 0) {
-        CUDA_CHECK(cudaMemsetAsync(d_bfs_next_count, 0, sizeof(int), bfs_stream));
+    // Always try persistent kernel first — it's a single block launch (~5-15μs)
+    // even if it spills immediately. On deep-narrow graphs (wiki-Talk),
+    // it eliminates ~100+ kernel launches.
+    int fw_result = run_persistent_bfs_fw(st, g, h_pivot, base_color, fw_color);
 
-        int grid = (queue_size + block_size - 1) / block_size;
+    if (fw_result >= 0) {
+        // Persistent kernel completed the entire FW BFS without spill
+        fw_count = fw_result;
+    } else {
+        // Spill occurred: host loop picks up from spilled frontier
+        int spill_count = -fw_result;
+        int queue_size = spill_count;
+        total_fw += spill_count;
 
-        fw_bfs_level_kernel<<<grid, block_size, 0, bfs_stream>>>(
-            g.d_begin, g.d_node_idx,
-            st.d_Color,
-            d_bfs_queue, queue_size,
-            d_bfs_next_queue, d_bfs_next_count,
-            fw_color, base_color,
-            d_bfs_visited_bits);
+        // Swap buffers so d_bfs_queue holds the spilled frontier
+        // The persistent kernel wrote to d_bfs_next_queue; copy to d_bfs_queue
+        if (spill_count > 0) {
+            CUDA_CHECK(cudaMemcpyAsync(d_bfs_queue, d_bfs_next_queue,
+                                       spill_count * sizeof(int),
+                                       cudaMemcpyDeviceToDevice, bfs_stream));
+            CUDA_CHECK(cudaStreamSynchronize(bfs_stream));
+        }
 
-        // Async D2H copy — starts as soon as kernel completes on stream
-        CUDA_CHECK(cudaMemcpyAsync(h_pinned_next_count, d_bfs_next_count,
-                                    sizeof(int), cudaMemcpyDeviceToHost, bfs_stream));
+        // Continue BFS with existing per-level kernel loop
+        while (queue_size > 0) {
+            CUDA_CHECK(cudaMemsetAsync(d_bfs_next_count, 0, sizeof(int), bfs_stream));
 
-        // Single sync point instead of DeviceSynchronize + blocking Memcpy
-        CUDA_CHECK(cudaStreamSynchronize(bfs_stream));
+            int grid = (queue_size + block_size - 1) / block_size;
 
-        int* tmp = d_bfs_queue;
-        d_bfs_queue = d_bfs_next_queue;
-        d_bfs_next_queue = tmp;
+            fw_bfs_level_kernel<<<grid, block_size, 0, bfs_stream>>>(
+                g.d_begin, g.d_node_idx,
+                st.d_Color,
+                d_bfs_queue, queue_size,
+                d_bfs_next_queue, d_bfs_next_count,
+                fw_color, base_color,
+                d_bfs_visited_bits);
 
-        queue_size = *h_pinned_next_count;
-        total_fw += queue_size;
+            CUDA_CHECK(cudaMemcpyAsync(h_pinned_next_count, d_bfs_next_count,
+                                        sizeof(int), cudaMemcpyDeviceToHost, bfs_stream));
+            CUDA_CHECK(cudaStreamSynchronize(bfs_stream));
+
+            int* tmp = d_bfs_queue;
+            d_bfs_queue = d_bfs_next_queue;
+            d_bfs_next_queue = tmp;
+
+            queue_size = *h_pinned_next_count;
+            total_fw += queue_size;
+        }
+
+        // Accurate count: count all fw_color nodes (includes SMEM levels + host loop)
+        // The persistent kernel's SMEM-level visits are already in d_Color as fw_color,
+        // so count_remaining_kernel gives the true total.
+        CUDA_CHECK(cudaMemset(d_remain_scratch, 0, sizeof(int)));
+        count_remaining_kernel<<<grid_size, block_size>>>(
+            st.d_Color, d_remain_scratch,
+            d_trim_targets, d_trim_targets_count, fw_color);
+        CUDA_CHECK(cudaDeviceSynchronize());
+        CUDA_CHECK(cudaMemcpy(&fw_count, d_remain_scratch, sizeof(int),
+                               cudaMemcpyDeviceToHost));
     }
 
-    // OpenMP: int fw_count = FW_BFS.get_fw_count();
-    int fw_count = total_fw;
+    printf("[PERSISTENT_KERNEL] FW BFS: used=%s fw_count=%d\n",
+           fw_result >= 0 ? "persistent" : "spill+host", fw_count);
 
     // ---------------------------------------------------------------
     // Reset visited bitmap between FW and BW BFS
@@ -649,7 +1265,7 @@ int do_global_fw_bw_main(GPUState& st, const GPUGraph& g,
     CUDA_CHECK(cudaStreamSynchronize(bfs_stream));
 
     // ---------------------------------------------------------------
-    // Backward BFS
+    // Backward BFS (with persistent kernel optimization)
     // OpenMP:
     //   bw_trim_global BW_BFS(G, base_color, fw_color, bw_color, pivot);
     //   BW_BFS.prepare(pivot, gm_rt_get_num_threads());
@@ -661,53 +1277,67 @@ int do_global_fw_bw_main(GPUState& st, const GPUGraph& g,
     //   fw_count = fw_count - scc_count;
     //   base_count = base_count - fw_count - bw_count - scc_count;
     // ---------------------------------------------------------------
-    // Mark pivot itself as SCC (always in intersection)
-    { int _scc_val = SCC_FOUND; CUDA_CHECK(cudaMemcpyAsync(&st.d_Color[h_pivot], &_scc_val, sizeof(int),
-                                   cudaMemcpyHostToDevice, bfs_stream)); }
-    CUDA_CHECK(cudaMemcpyAsync(&st.d_SCC[h_pivot], &h_pivot, sizeof(int),
-                                cudaMemcpyHostToDevice, bfs_stream));
-    CUDA_CHECK(cudaMemcpyAsync(d_bfs_queue, &h_pivot, sizeof(int),
-                                cudaMemcpyHostToDevice, bfs_stream));
-    CUDA_CHECK(cudaMemsetAsync(d_bfs_scc_count, 0, sizeof(int), bfs_stream));
-    CUDA_CHECK(cudaMemsetAsync(d_bfs_bw_count, 0, sizeof(int), bfs_stream));
-    CUDA_CHECK(cudaStreamSynchronize(bfs_stream));
-    queue_size = 1;
-    int scc_count = 1;
+    int out_bw_count = 0;
+    int out_scc_count = 0;
 
-    while (queue_size > 0) {
-        CUDA_CHECK(cudaMemsetAsync(d_bfs_next_count, 0, sizeof(int), bfs_stream));
+    int bw_result = run_persistent_bfs_bw(st, g, h_pivot, base_color, fw_color, bw_color,
+                                           out_bw_count, out_scc_count);
 
-        int grid = (queue_size + block_size - 1) / block_size;
+    if (bw_result >= 0) {
+        // Persistent kernel completed entire BW BFS without spill
+    } else {
+        // Spill occurred: host loop continues from spilled frontier
+        int spill_count = -bw_result;
+        int queue_size = spill_count;
 
-        bw_bfs_level_kernel<<<grid, block_size, 0, bfs_stream>>>(
-            g.d_r_begin, g.d_r_node_idx,
-            st.d_Color, st.d_SCC,
-            d_bfs_queue, queue_size,
-            d_bfs_next_queue, d_bfs_next_count,
-            fw_color, bw_color, base_color, h_pivot,
-            d_bfs_scc_count, d_bfs_bw_count,
-            d_bfs_visited_bits);
+        // Copy spilled frontier to d_bfs_queue
+        if (spill_count > 0) {
+            CUDA_CHECK(cudaMemcpyAsync(d_bfs_queue, d_bfs_next_queue,
+                                       spill_count * sizeof(int),
+                                       cudaMemcpyDeviceToDevice, bfs_stream));
+            CUDA_CHECK(cudaStreamSynchronize(bfs_stream));
+        }
 
-        // Async D2H — starts after kernel on stream
-        CUDA_CHECK(cudaMemcpyAsync(h_pinned_next_count, d_bfs_next_count,
-                                    sizeof(int), cudaMemcpyDeviceToHost, bfs_stream));
+        while (queue_size > 0) {
+            CUDA_CHECK(cudaMemsetAsync(d_bfs_next_count, 0, sizeof(int), bfs_stream));
 
+            int grid = (queue_size + block_size - 1) / block_size;
+
+            bw_bfs_level_kernel<<<grid, block_size, 0, bfs_stream>>>(
+                g.d_r_begin, g.d_r_node_idx,
+                st.d_Color, st.d_SCC,
+                d_bfs_queue, queue_size,
+                d_bfs_next_queue, d_bfs_next_count,
+                fw_color, bw_color, base_color, h_pivot,
+                d_bfs_scc_count, d_bfs_bw_count,
+                d_bfs_visited_bits);
+
+            CUDA_CHECK(cudaMemcpyAsync(h_pinned_next_count, d_bfs_next_count,
+                                        sizeof(int), cudaMemcpyDeviceToHost, bfs_stream));
+            CUDA_CHECK(cudaStreamSynchronize(bfs_stream));
+
+            int* tmp = d_bfs_queue;
+            d_bfs_queue = d_bfs_next_queue;
+            d_bfs_next_queue = tmp;
+
+            queue_size = *h_pinned_next_count;
+        }
+
+        // Read final SCC / BW counts from spill path
+        CUDA_CHECK(cudaMemcpyAsync(h_pinned_scc_count, d_bfs_scc_count, sizeof(int),
+                                    cudaMemcpyDeviceToHost, bfs_stream));
+        CUDA_CHECK(cudaMemcpyAsync(h_pinned_bw_count, d_bfs_bw_count, sizeof(int),
+                                    cudaMemcpyDeviceToHost, bfs_stream));
         CUDA_CHECK(cudaStreamSynchronize(bfs_stream));
-
-        int* tmp = d_bfs_queue;
-        d_bfs_queue = d_bfs_next_queue;
-        d_bfs_next_queue = tmp;
-
-        queue_size = *h_pinned_next_count;
+        out_scc_count += *h_pinned_scc_count;
+        out_bw_count += *h_pinned_bw_count;
     }
 
-    // Read final SCC / BW counts
-    int h_scc;
-    int h_bw;
-    CUDA_CHECK(cudaMemcpy(&h_scc, d_bfs_scc_count, sizeof(int), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(&h_bw, d_bfs_bw_count, sizeof(int), cudaMemcpyDeviceToHost));
-    scc_count += h_scc;
-    int bw_count = h_bw;
+    int scc_count = out_scc_count;
+    int bw_count = out_bw_count;
+
+    printf("[PERSISTENT_KERNEL] BW BFS: used=%s scc=%d bw=%d\n",
+           bw_result >= 0 ? "persistent" : "spill+host", scc_count, bw_count);
 
     // OpenMP: compute counts for each partition
     //   int bw_count = BW_BFS.get_bw_count();
