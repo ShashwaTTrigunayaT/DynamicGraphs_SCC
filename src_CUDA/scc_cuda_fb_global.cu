@@ -629,8 +629,10 @@ __global__ void persistent_fw_bfs_kernel(
 #if ENABLE_FRONTIER_LOG
         // Log frontier size for this level
         if (tid == 0) {
-            int pos = atomicAdd(d_level_counter, 1);
-            if (pos < 10000) d_bfs_next_queue[pos] = qsize;  // reuse buffer for log
+            extern int* d_frontier_log;
+            extern int* d_frontier_pos;
+            int pos = atomicAdd(d_frontier_pos, 1);
+            if (pos < 10000) d_frontier_log[pos] = qsize;
         }
 #endif
 
@@ -804,9 +806,10 @@ __global__ void persistent_bw_bfs_kernel(
 
 #if ENABLE_FRONTIER_LOG
         if (tid == 0) {
-            // Use d_bfs_queue as temp log buffer (safe here — not used during kernel)
-            int pos = atomicAdd(d_level_counter, 1);
-            if (pos < 10000) d_bfs_queue[pos] = qsize;
+            extern int* d_frontier_log;
+            extern int* d_frontier_pos;
+            int pos = atomicAdd(d_frontier_pos, 1);
+            if (pos < 10000) d_frontier_log[pos] = qsize;
         }
 #endif
 
