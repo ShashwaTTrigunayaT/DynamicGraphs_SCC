@@ -625,12 +625,7 @@ int repeat_global_trim1_compact(GPUState& st, const GPUGraph& g,
         count = do_global_trim1_compact(st, g, d_count, met_algo, flag11,
                                         da, d_count_trim_spec);
         total_count += count;
-        // Rebuild compact list to filter out SCC_FOUND nodes
-        // This shrinks the scan set progressively, reducing work in later passes.
-        // Without this, every pass scans the full 1.6M nodes even though most
-        // are already trimmed and early-exit at the d_Color[n]==SCC_FOUND check.
-        if (count > 0)
-            create_trim1_compact(st, g);
+
     } while (count > TRIM_STOP);
     return total_count;
 }
