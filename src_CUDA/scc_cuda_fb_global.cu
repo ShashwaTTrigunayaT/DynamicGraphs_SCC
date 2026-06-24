@@ -640,7 +640,7 @@ __global__ void persistent_fw_bfs_kernel(
 
 #define PERSISTENT_FLUSH(to_queue, count_var) do {                         \
     if (staged_cnt > 0) {                                                  \
-        int base = atomicAdd(&count_var, staged_cnt);                      \
+        int base = atomicAdd((int*)&count_var, staged_cnt);                \
         for (int _j = 0; _j < staged_cnt; _j++) {                          \
             if (base + _j < MAX_SMEM_FRONTIER) {                           \
                 to_queue[base + _j] = staged[_j];                          \
@@ -815,7 +815,7 @@ __global__ void persistent_bw_bfs_kernel(
 
 #define PERSISTENT_BW_FLUSH(to_queue, count_var) do {                      \
     if (staged_cnt > 0) {                                                  \
-        int base = atomicAdd(&count_var, staged_cnt);                      \
+        int base = atomicAdd((int*)&count_var, staged_cnt);                \
         for (int _j = 0; _j < staged_cnt; _j++) {                          \
             if (base + _j < MAX_SMEM_FRONTIER) {                           \
                 to_queue[base + _j] = staged[_j];                          \
