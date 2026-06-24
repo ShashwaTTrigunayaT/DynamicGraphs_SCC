@@ -56,7 +56,7 @@ int* d_remain_scratch   = NULL;  // [1] temp for remaining count
 // Instrumentation: log frontier sizes per level for tuning MAX_SMEM_FRONTIER.
 // Set to 1 to collect data on Pokec/ljournal-2008 frontier distributions.
 // Collected data is printed to stderr on finalize_global_fb().
-#define ENABLE_FRONTIER_LOG 0
+#define ENABLE_FRONTIER_LOG 1
 
 #if ENABLE_FRONTIER_LOG
 // Ring buffer of frontier sizes, one per level (max 10000 levels)
