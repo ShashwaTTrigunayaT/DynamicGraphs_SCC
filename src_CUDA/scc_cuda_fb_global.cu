@@ -589,6 +589,10 @@ __global__ void persistent_fw_bfs_kernel(
     int* d_bfs_next_count,     // [1] global next count (for spill)
     uint32_t* d_visited_bits,  // global visited bitmap
     int* d_spill_flag,         // [1] output: -1 done, 1 spilled
+#if ENABLE_FRONTIER_LOG
+    int* d_frontier_log_param, // [cap] frontier size log buffer
+    int* d_frontier_pos_param, // [1] atomic position in log
+#endif
     int* d_level_counter)      // [1] output: number of levels processed (for stats)
 {
     // Only one block needed — sequential BFS on a single component
@@ -629,10 +633,8 @@ __global__ void persistent_fw_bfs_kernel(
 #if ENABLE_FRONTIER_LOG
         // Log frontier size for this level
         if (tid == 0) {
-            extern int* d_frontier_log;
-            extern int* d_frontier_pos;
-            int pos = atomicAdd(d_frontier_pos, 1);
-            if (pos < 10000) d_frontier_log[pos] = qsize;
+            int pos = atomicAdd(d_frontier_pos_param, 1);
+            if (pos < 10000) d_frontier_log_param[pos] = qsize;
         }
 #endif
 
@@ -766,6 +768,10 @@ __global__ void persistent_bw_bfs_kernel(
     int* d_bfs_bw_count,       // [1] total bw count
     uint32_t* d_visited_bits,  // global visited bitmap
     int* d_spill_flag,         // [1] output: -1 done, 1 spilled
+#if ENABLE_FRONTIER_LOG
+    int* d_frontier_log_param, // [cap] frontier size log buffer
+    int* d_frontier_pos_param, // [1] atomic position in log
+#endif
     int* d_level_counter)      // [1] output: number of levels processed (for stats)
 {
     // Only one block needed
@@ -806,10 +812,8 @@ __global__ void persistent_bw_bfs_kernel(
 
 #if ENABLE_FRONTIER_LOG
         if (tid == 0) {
-            extern int* d_frontier_log;
-            extern int* d_frontier_pos;
-            int pos = atomicAdd(d_frontier_pos, 1);
-            if (pos < 10000) d_frontier_log[pos] = qsize;
+            int pos = atomicAdd(d_frontier_pos_param, 1);
+            if (pos < 10000) d_frontier_log_param[pos] = qsize;
         }
 #endif
 
@@ -958,6 +962,9 @@ int run_persistent_bfs_fw(GPUState& st, const GPUGraph& g,
         d_bfs_queue, d_bfs_next_queue, d_bfs_next_count,
         d_bfs_visited_bits,
         d_spill_flag,
+#if ENABLE_FRONTIER_LOG
+        d_frontier_log, d_frontier_pos,
+#endif
         d_pivot_scratch);  // reuse d_pivot_scratch as level counter
     CUDA_CHECK(cudaDeviceSynchronize());
 
@@ -1043,6 +1050,9 @@ int run_persistent_bfs_bw(GPUState& st, const GPUGraph& g,
         d_bfs_scc_count, d_bfs_bw_count,
         d_bfs_visited_bits,
         d_spill_flag,
+#if ENABLE_FRONTIER_LOG
+        d_frontier_log, d_frontier_pos,
+#endif
         d_pivot_scratch);
     CUDA_CHECK(cudaDeviceSynchronize());
 
