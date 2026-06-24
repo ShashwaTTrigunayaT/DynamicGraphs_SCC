@@ -385,9 +385,8 @@ int do_local_trim1(GPUState& st, const GPUGraph& g,
             w->d_set_nodes, w->count,
             w->d_set_nodes, d_compact_prefix);
         CUDA_CHECK(cudaDeviceSynchronize());
-            CUDA_TIMED_MEMCPY(&w->count, d_compact_prefix, sizeof(int),
-                                  cudaMemcpyDeviceToHost);
-        }
+        CUDA_TIMED_MEMCPY(&w->count, d_compact_prefix, sizeof(int),
+                              cudaMemcpyDeviceToHost);
     } else {
         // --- Mirror: no set — scan all nodes matching w->color ---
         // OpenMP: for(n=0; n<N; n++) if(G_Color[n]==curr_color) trim_once_node(...)
