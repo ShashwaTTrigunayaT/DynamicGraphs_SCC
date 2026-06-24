@@ -1324,13 +1324,15 @@ int do_global_fw_bw_main(GPUState& st, const GPUGraph& g,
         }
 
         // Read final SCC / BW counts from spill path
+        // Note: d_bfs_scc_count already contains (persistent kernel's count) + (host loop's additions),
+        // so we assign (=) not add (+=) to avoid double-counting the persistent kernel's SCCs.
         CUDA_CHECK(cudaMemcpyAsync(h_pinned_scc_count, d_bfs_scc_count, sizeof(int),
                                     cudaMemcpyDeviceToHost, bfs_stream));
         CUDA_CHECK(cudaMemcpyAsync(h_pinned_bw_count, d_bfs_bw_count, sizeof(int),
                                     cudaMemcpyDeviceToHost, bfs_stream));
         CUDA_CHECK(cudaStreamSynchronize(bfs_stream));
-        out_scc_count += *h_pinned_scc_count;
-        out_bw_count += *h_pinned_bw_count;
+        out_scc_count = *h_pinned_scc_count;
+        out_bw_count = *h_pinned_bw_count;
     }
 
     int scc_count = out_scc_count;
