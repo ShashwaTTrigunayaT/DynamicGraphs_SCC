@@ -245,9 +245,14 @@ __global__ void fw_bfs_level_kernel(
     }                                                                    \
 } while(0)
 
-    for (int i = tid; i < queue_size; i += stride) {
-        node_t t = d_queue[i];
-        for (edge_t nx = d_begin[t]; nx < d_begin[t + 1]; nx++) {
+    // Distribute frontier nodes across blocks, then neighbors across threads in each block.
+    // This ensures all threads participate even when there's only 1 frontier node
+    // (e.g., first BFS level from the pivot with thousands of neighbors).
+    for (int bi = blockIdx.x; bi < queue_size; bi += gridDim.x) {
+        node_t t = d_queue[bi];
+        edge_t start = d_begin[t];
+        edge_t end = d_begin[t + 1];
+        for (edge_t nx = start + threadIdx.x; nx < end; nx += blockDim.x) {
             node_t k = d_node_idx[nx];
             // Navigate: check if node has base_color (d_Color stays in L2 because
             // we don't CAS it — only write with simple store after claiming)
@@ -372,9 +377,13 @@ __global__ void bw_bfs_level_kernel(
     }                                                                    \
 } while(0)
 
-    for (int i = tid; i < queue_size; i += stride) {
-        node_t t = d_queue[i];
-        for (edge_t nx = d_r_begin[t]; nx < d_r_begin[t + 1]; nx++) {
+    // Distribute frontier nodes across blocks, then neighbors across threads in each block.
+    // Same approach as FW kernel: ensures full parallelism even with 1 frontier node.
+    for (int bi = blockIdx.x; bi < queue_size; bi += gridDim.x) {
+        node_t t = d_queue[bi];
+        edge_t start = d_r_begin[t];
+        edge_t end = d_r_begin[t + 1];
+        for (edge_t nx = start + threadIdx.x; nx < end; nx += blockDim.x) {
             node_t k = d_r_node_idx[nx];
             // Single read of d_Color[k] for TOCTOU safety
             int k_color = d_Color[k];
