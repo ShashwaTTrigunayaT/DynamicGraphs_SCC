@@ -13,6 +13,8 @@
 
 // Forward declarations for functions defined in separate .cu files
 // (fb_gpu — declared here to avoid include order issues)
+struct GPUState;
+struct GPUGraph;
 double run_gpu_fb(GPUState& st, const GPUGraph& g, int num_threads);
 void finalize_fb_gpu();
 
