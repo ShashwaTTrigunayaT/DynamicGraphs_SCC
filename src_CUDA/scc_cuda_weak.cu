@@ -434,7 +434,7 @@ void propagate_color(GPUState& st, const GPUGraph& g, int num_targets,
     int* d_changed = NULL;
     CUDA_CHECK(cudaMalloc(&d_changed, sizeof(int)));
 
-    int max_iterations = 100;  // safety limit
+    int max_iterations = 500;  // safety limit (was 100 — web-Stanford needs more to converge)
     int iter = 0;
     int h_changed = 1;
 
