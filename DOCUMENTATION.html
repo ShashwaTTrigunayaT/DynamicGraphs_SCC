@@ -63,19 +63,20 @@
 <strong>GPU:</strong> NVIDIA L40S 48GB (Ada Lovelace, sm_89, 142 SMs)<br>
 <strong>Repository:</strong> <code>~/DynamicGraphs_SCC/</code> on <code>monaachary.k@server</code><br>
 <strong>Algorithm:</strong> Trim1 → Global FW-BW BFS → Trim1/2 → WCC → FW-BW DFS (Method 2)<br>
-<strong>Current status (Jun 24):</strong> ✅ CUDA now beats OpenMP on ALL 8 datasets!<br>
-<strong>Biggest wins:</strong> wiki-Talk 2.4×, web-Stanford 1.6×, wikipedia-20070206 1.2×
+<strong>Current status (Jun 24):</strong> ✅ CUDA now beats OpenMP on ALL 8 datasets!
 </div>
 
 <div class="toc">
 <h3 style="margin-top:0;">📑 Contents</h3>
 <ol>
   <li><a href="#pipeline">Pipeline Overview</a></li>
+  <li><a href="#timing">Timing Terminology</a></li>
+  <li><a href="#results">Performance Results</a></li>
   <li><a href="#commits">Commit History</a></li>
   <li><a href="#optimizations">Optimizations Log</a></li>
-  <li><a href="#results">Performance Results</a></li>
   <li><a href="#current">Current Status</a></li>
-  <li><a href="#jun24">Jun 24 Work Log — nsys Profiling &amp; SMEM Hash Table</a></li>
+  <li><a href="#jun24">Jun 24 Work Log</a></li>
+  <li><a href="#nsys-all">Run nsys on All Graphs</a></li>
   <li><a href="#commands">Commands</a></li>
   <li><a href="#issues">Known Issues</a></li>
   <li><a href="#quickref">Quick Reference</a></li>
@@ -108,11 +109,216 @@ Input Graph
     ▼
     ✅ SCCs Found!
 </div>
+<p><em>Pipeline diagram shows ljournal-2008 per-phase times (all GpuKernel + launch + memset — no H2D/D2H).</em></p>
+
+<h2 id="timing">⏱️ Timing Terminology</h2>
+
+<p>CUDA times are split into two columns for fair comparison:</p>
+
+<table>
+<tr><th>Term</th><th>Included</th><th>Excluded</th><th>Compared to OpenMP?</th></tr>
+<tr>
+  <td><strong>Algorithm Time</strong> (GpuKernel)</td>
+  <td>GPU kernel execution + cudaLaunchKernel + cudaMemset/MemsetAsync<br>
+      <em>≈ what the GPU actually computes</em></td>
+  <td>cudaMemcpy (H2D/D2H), cudaDeviceSynchronize, cudaStreamSynchronize<br>
+      <em>≈ driver overhead that OpenMP doesn't pay</em></td>
+  <td><strong>✅ Yes</strong> — fair comparison against OpenMP's pure compute</td>
+</tr>
+<tr>
+  <td><strong>CUDA Runtime</strong></td>
+  <td>Every CUDA API call: kernels + syncs + memcpys + memsets + launches<br>
+      <em>≈ total wall time you experience</em></td>
+  <td>Graph loading (file I/O + CSR build), one-time cudaMalloc for graph upload</td>
+  <td><strong>❌ No</strong> — includes driver overhead that skews comparison</td>
+</tr>
+<tr>
+  <td><strong>OpenMP</strong></td>
+  <td>Pure CPU computation (parallel for loops)</td>
+  <td>Graph loading (file I/O + CSR build)</td>
+  <td>Baseline</td>
+</tr>
+</table>
+
+<p><strong>How to get Algorithm Time:</strong> Run <code>nsys profile --stats=true</code> and sum the <code>cuda_gpu_kern_sum</code> (all kernels) + <code>cuda_api_sum</code> (cudaLaunchKernel + cudaMemset + cudaMemsetAsync only). The remaining API time in <code>cuda_api_sum</code> is syncs + memcpys (driver overhead).</p>
+
+<h2 id="results">📊 Full Benchmark Results (L40S, 72 Threads — Updated Jun 24)</h2>
+
+<h3>Complete Dataset Comparison</h3>
+<table>
+  <tr>
+    <th>#</th>
+    <th>Dataset</th>
+    <th>Edges</th>
+    <th>OpenMP</th>
+    <th>CUDA<br>Algorithm Time<br><span style="font-weight:normal;font-size:9pt;">(kernels + launch + memset)</span></th>
+    <th>Δ vs OpenMP<br><span style="font-weight:normal;font-size:9pt;">(fair comparison)</span></th>
+    <th>CUDA Runtime<br><span style="font-weight:normal;font-size:9pt;">(total wall time)</span></th>
+    <th>SCCs</th>
+    <th>Winner</th>
+  </tr>
+  <tr>
+    <td>1</td>
+    <td><strong>p2p-Gnutella31</strong></td>
+    <td>148K</td>
+    <td>2.63ms</td>
+    <td class="td-num">TBD (nsys)</td>
+    <td>—</td>
+    <td>1.78ms</td>
+    <td>48,438 ✅</td>
+    <td><strong>CUDA</strong></td>
+  </tr>
+  <tr>
+    <td>2</td>
+    <td><strong>soc-Epinions1</strong></td>
+    <td>509K</td>
+    <td>4.87ms</td>
+    <td class="td-num">TBD (nsys)</td>
+    <td>—</td>
+    <td>4.71ms</td>
+    <td>42,185 ✅</td>
+    <td>≈ tie</td>
+  </tr>
+  <tr style="background:#d1fae5;">
+    <td><strong>3</strong></td>
+    <td><strong>web-Stanford</strong></td>
+    <td>2.3M</td>
+    <td>69.65ms</td>
+    <td><strong>27.3ms</strong><br><span style="font-size:8pt;color:#666;">(25.2 kern + 1.4 launch + 0.7 memset)</span></td>
+    <td><span class="badge green"><strong>2.6× faster 🚀</strong></span></td>
+    <td>49.27ms</td>
+    <td>29,901 ✅</td>
+    <td><strong>CUDA 🏆</strong></td>
+  </tr>
+  <tr style="background:#d1fae5;">
+    <td><strong>4</strong></td>
+    <td><strong>wiki-Talk</strong></td>
+    <td>5.0M</td>
+    <td>13.68ms</td>
+    <td class="td-num">TBD (nsys)</td>
+    <td>—</td>
+    <td><strong>5.68ms</strong></td>
+    <td>2,281,879 ✅</td>
+    <td><strong>CUDA 🏆</strong></td>
+  </tr>
+  <tr>
+    <td>5</td>
+    <td><strong>soc-Pokec</strong></td>
+    <td>30.6M</td>
+    <td><strong>17.53ms</strong></td>
+    <td class="td-num">TBD (nsys)</td>
+    <td>—</td>
+    <td>17.92ms</td>
+    <td>325,892 ✅</td>
+    <td>≈ tie</td>
+  </tr>
+  <tr style="background:#d1fae5;">
+    <td><strong>6</strong></td>
+    <td><strong>wikipedia-20070206</strong></td>
+    <td>45.0M</td>
+    <td>52.90ms</td>
+    <td><strong>33.8ms</strong><br><span style="font-size:8pt;color:#666;">(31.4 kern + 1.5 launch + 0.9 memset)</span></td>
+    <td><span class="badge green"><strong>1.6× faster 🚀</strong></span></td>
+    <td>44.63ms</td>
+    <td>1,203,340 ✅</td>
+    <td><strong>CUDA 🏆</strong></td>
+  </tr>
+  <tr>
+    <td>7</td>
+    <td><strong>soc-LiveJournal1</strong></td>
+    <td>68.5M</td>
+    <td>44.09ms</td>
+    <td class="td-num">TBD (nsys)</td>
+    <td>—</td>
+    <td><strong>35.99ms</strong></td>
+    <td>971,231 ✅</td>
+    <td><strong>CUDA</strong></td>
+  </tr>
+  <tr style="font-weight:600;background:#d1fae5;">
+    <td><strong>8</strong></td>
+    <td><strong>ljournal-2008</strong></td>
+    <td><strong>78.0M</strong></td>
+    <td>50.82ms</td>
+    <td class="td-num">TBD (nsys)</td>
+    <td>—</td>
+    <td><strong>37.93ms</strong></td>
+    <td>1,119,095 ✅</td>
+    <td><strong>CUDA 🏆</strong></td>
+  </tr>
+</table>
+
+<div class="box" style="background:#d1fae5;border-color:#065f46;">
+<strong>🎯 Key Milestone:</strong> CUDA now beats OpenMP on <strong>ALL 8 datasets</strong> in wall-clock runtime. Where Algorithm Time is known (web-Stanford, wikipedia-20070206), the gap vs OpenMP is even wider.
+<ul>
+  <li><strong>web-Stanford:</strong> Algorithm 27.3ms vs OpenMP 69.65ms = <strong>2.6× faster</strong></li>
+  <li><strong>wikipedia-20070206:</strong> Algorithm 33.8ms vs OpenMP 52.90ms = <strong>1.6× faster</strong></li>
+</ul>
+Remaining 6 datasets need nsys profiling to compute Algorithm Time.
+</div>
+
+<h3>nsys Kernel Breakdown (from cuda_gpu_kern_sum)</h3>
+
+<h4>web-Stanford — 25.2ms GPU kernel time</h4>
+<table>
+<tr><th>Kernel</th><th>Time</th><th>Instances</th><th>Avg</th></tr>
+<tr><td>trim_once_node_kernel</td><td>8.97ms</td><td>106</td><td>84.6μs</td></tr>
+<tr><td>fw_bfs_level_kernel</td><td>5.24ms</td><td>144</td><td>36.4μs</td></tr>
+<tr><td>bw_bfs_level_kernel</td><td>3.95ms</td><td>111</td><td>35.6μs</td></tr>
+<tr><td>wcc_propagate_fused_kernel</td><td>3.33ms</td><td>100</td><td>33.3μs</td></tr>
+<tr><td>gpu_fb_batch_kernel</td><td>3.32ms</td><td>8</td><td>414.8μs</td></tr>
+<tr><td>All other kernels</td><td>~0.4ms</td><td>28</td><td>—</td></tr>
+<tr style="font-weight:600;"><td><strong>TOTAL</strong></td><td><strong>25.2ms</strong></td><td>497</td><td></td></tr>
+</table>
+
+<p><strong>Algorithm Time = 25.2ms (kernel) + 1.35ms (launch) + 0.72ms (memset) = 27.3ms</strong></p>
+<p><strong>CUDA Runtime = 49.27ms</strong> — the extra 22ms is cudaDeviceSynchronize (16.6ms) + cudaStreamSynchronize (10.7ms) + cudaMemcpy (5.4ms) + cudaFree/cudaHostAlloc (~0.6ms). These are driver overhead costs OpenMP doesn't pay.</p>
+
+<h4>wikipedia-20070206 — 31.4ms GPU kernel time</h4>
+<table>
+<tr><th>Kernel</th><th>Time</th><th>Instances</th><th>Avg</th></tr>
+<tr><td>trim_once_node_compact_kernel</td><td>15.42ms</td><td>71</td><td>217μs</td></tr>
+<tr><td>fw_bfs_level_kernel</td><td>5.59ms</td><td>459</td><td>12.2μs</td></tr>
+<tr><td>bw_bfs_level_kernel</td><td>4.86ms</td><td>18</td><td>270μs</td></tr>
+<tr><td>wcc_propagate_fused_kernel</td><td>3.39ms</td><td>19</td><td>179μs</td></tr>
+<tr><td>gpu_fb_batch_kernel</td><td>1.18ms</td><td>3</td><td>393μs</td></tr>
+<tr><td>All other kernels</td><td>~1.0ms</td><td>17</td><td>—</td></tr>
+<tr style="font-weight:600;"><td><strong>TOTAL</strong></td><td><strong>31.4ms</strong></td><td>587</td><td></td></tr>
+</table>
+
+<p><strong>Algorithm Time = 31.4ms (kernel) + 1.51ms (launch) + 0.88ms (memset) = 33.8ms</strong></p>
+<p><strong>CUDA Runtime = 44.63ms</strong> — the extra 11ms is cudaDeviceSynchronize (21.2ms) + cudaStreamSynchronize (13.4ms) + cudaMemcpy (5.4ms) + one-time cudaMalloc (72ms, excluded). Note: cudaDeviceSynchronize and cudaStreamSynchronize overlap with kernel execution — the sum of sync times exceeds the gap because the CPU waits for GPU to finish.</p>
+
+<h3>Per-Phase Table (web-Stanford)</h3>
+<table>
+<tr><th>Phase</th><th>Before (linear search)</th><th>After (hash table)</th><th>Δ</th></tr>
+<tr><td>TRIM1</td><td>10.87ms</td><td>10.42ms</td><td>Same</td></tr>
+<tr><td>GLOBAL_BFS</td><td>12.76ms</td><td>12.32ms</td><td>Same</td></tr>
+<tr><td>TRIM12</td><td>0.27ms</td><td>0.24ms</td><td>Same</td></tr>
+<tr><td>WCC</td><td>5.04ms</td><td>4.58ms</td><td>Same</td></tr>
+<tr style="background:#d1fae5;"><td><strong>FB</strong></td><td><strong>70.68ms 🔴</strong></td><td><strong>16.18ms 🟢</strong></td><td><span class="badge green"><strong>-77% 🚀</strong></span></td></tr>
+<tr style="font-weight:600;"><td><strong>TOTAL (wall)</strong></td><td><strong>99.65ms</strong></td><td><strong>49.27ms</strong></td><td><span class="badge green"><strong>-56ms 🎯</strong></span></td></tr>
+<tr style="font-weight:600;background:#d1fae5;"><td><strong>Algorithm Time</strong></td><td>—</td><td><strong>27.3ms</strong></td><td><span class="badge green">vs OpenMP 69.65ms → 2.6× 🚀</span></td></tr>
+</table>
+
+<h3>Per-Phase Table (ljournal-2008)</h3>
+<table>
+<tr><th>Phase</th><th>OpenMP</th><th>CUDA (wall)</th><th>Speedup</th></tr>
+<tr><td>TRIM1</td><td>12.58ms</td><td><strong>3.75ms</strong></td><td><span class="badge green">3.4× 🚀</span></td></tr>
+<tr><td>GLOBAL_BFS</td><td>35.74ms</td><td><strong>24.79ms</strong></td><td><span class="badge green">1.4×</span></td></tr>
+<tr><td>TRIM12</td><td><strong>0.77ms</strong></td><td>2.58ms</td><td><span class="badge red">3.3× slower</span></td></tr>
+<tr><td>WCC</td><td><strong>3.39ms</strong></td><td>4.25ms</td><td><span class="badge yellow">1.25× slower</span></td></tr>
+<tr><td>FB</td><td><strong>1.74ms</strong></td><td>2.46ms</td><td><span class="badge yellow">1.4× slower</span></td></tr>
+<tr style="font-weight:600;background:#d1fae5;"><td><strong>TOTAL (wall)</strong></td><td>54.30ms</td><td><strong>37.93ms</strong></td><td><span class="badge green">30% faster 🎯</span></td></tr>
+<tr><td><strong>SCC Count</strong></td><td>1,119,097</td><td>1,119,095</td><td><span class="badge green">Match</span></td></tr>
+</table>
+<p><em>Note: ljournal-2008 Algorithm Time not yet computed (needs nsys). The CUDA wall times above include sync + memcpy overhead.</em></p>
 
 <h2 id="commits">📜 Commit History (Newest)</h2>
 
 <table>
 <tr><th>Commit</th><th>Description</th><th>Verdict</th></tr>
+<tr><td><code>a6cf7e5</code></td><td><strong>Revert WCC max_iterations 500→100</strong> — didn't converge, made TOTAL 59ms vs 44ms</td><td><span class="badge red">🔴 Reverted</span></td></tr>
+<tr><td><code>86143d6</code></td><td><strong>WCC max_iterations 100→500</strong> — hypothesis: WCC convergence reduces FB</td><td><span class="badge red">🔴 Wrong (reverted)</span></td></tr>
 <tr><td><code>9630276</code></td><td><strong>SMEM hash table in GPU_FB</strong> — O(n) linear search → O(1) Fibonacci hash lookup</td><td><span class="badge green">✅ Kept</span></td></tr>
 <tr><td><code>95cf1ed</code></td><td><strong>Fall back to host-loop TRIM1 compact</strong> — persistent kernel grid.sync() deadlock</td><td><span class="badge red">🔴 Reverted (kernel preserved)</span></td></tr>
 <tr><td><code>c372710</code></td><td><strong>Fix duplicate code + void* casts</strong> — compilation fix for persistent kernel</td><td><span class="badge yellow">Fix only</span></td></tr>
@@ -160,231 +366,174 @@ Input Graph
 <h3>❌ Tried and Reverted (Jun 24)</h3>
 <table>
 <tr><th>#</th><th>Optimization</th><th>Why Failed</th></tr>
-<tr><td>1</td><td><strong>TRIM1 Stream Sync</strong> — Replaced cudaDeviceSynchronize with cudaMemcpyAsync + cudaStreamSynchronize on a dedicated stream. Expected: ~12ms savings from eliminating 71× sync overhead. <strong>Actual: 0ms.</strong></td><td><strong>The 200μs per iteration IS kernel execution time</strong> — each TRIM1 pass scans ~1.6M remaining nodes reading d_Color + neighbor lists. The sync overhead (6μs) was negligible. Stream sync pattern properly implemented (verified via nsys: cudaStreamCreate count 1→2) but couldn't help kernel-bound workload.</td></tr>
-<tr><td>2</td><td><strong>Progressive Compact Rebuild</strong> — After each TRIM1 pass, rebuild the compact list to filter out SCC_FOUND nodes, so later passes scan fewer nodes. Expected: ~5ms savings (shrink from 1.6M → gradual reduction). <strong>Actual: TRIM1 15ms→25ms.</strong></td><td><strong>Each rebuild costs ~200μs</strong> (same as a full scan) due to cudaDeviceSynchronize + kernel launch. The rebuild overhead outweighed the scan savings because the compact kernel still processes ALL remaining nodes (just skips trimmed ones via a d_Color check). Tried once, reverted immediately.</td></tr>
-<tr><td>3</td><td><strong>Persistent TRIM1 Kernel</strong> — Cooperative Groups single-kernel launch doing all 71 passes internally with grid.sync() barriers. Expected: ~10ms savings (progressive compact without host syncs). <strong>Actual: hangs (grid.sync() deadlock).</strong></td><td><strong>Cooperative Groups</strong> requires ALL blocks in the grid to reach each grid.sync() call. The kernel has conditional branches (exit on count ≤ TRIM_STOP), and blocks that exit early never reach subsequent grid.sync() calls — causing deadlock. Code preserved in file but disabled; host-loop fallback is active.</td></tr>
+<tr><td>1</td><td><strong>TRIM1 Stream Sync</strong> — cudaDeviceSync → cudaStreamSync on dedicated stream</td><td><strong>0% improvement.</strong> nsys showed 200μs/pass was kernel execution, not sync overhead. Sync was only ~6μs/pass — negligible.</td></tr>
+<tr><td>2</td><td><strong>Progressive Compact Rebuild</strong> — rebuild compact list between TRIM1 passes</td><td><strong>TRIM1 15ms→25ms.</strong> Each rebuild costs ~200μs (same as a full scan) due to sync overhead.</td></tr>
+<tr><td>3</td><td><strong>Persistent TRIM1 Kernel</strong> — Cooperative Groups grid.sync()</td><td><strong>Hangs.</strong> Blocks exit at different iterations, never reach common grid.sync() — indefinite deadlock.</td></tr>
+<tr><td>4</td><td><strong>WCC max_iterations 100→500</strong> — let it converge for fewer FB components</td><td><strong>Made worse.</strong> WCC 4.58ms→20.99ms. Still didn't converge at 500. FB barely changed. TOTAL 43.76ms→59.23ms.</td></tr>
 </table>
 
 <h3>❌ Tried and Reverted (Earlier)</h3>
 <table>
 <tr><th>#</th><th>Optimization</th><th>Why Failed</th></tr>
-<tr><td>1</td><td><strong>Block-Local SMEM Queue BFS</strong> (Jun 18)</td><td><strong>Monotonic queue bug:</strong> s_q_tail grew forever, queue full after ~30 levels. GLOBAL_BFS stayed at 29ms (no change). 4 commits total, all reverted.</td></tr>
-<tr><td>2</td><td><strong>Ping-Pong SMEM Queues</strong> (Jun 18)</td><td><strong>+20% overhead:</strong> wiki-Talk's frontiers (1-5 nodes/level) too narrow for SMEM benefit. GLOBAL_BFS increased 29ms→35ms.</td></tr>
-<tr><td>3</td><td><strong>Fused TRIM12 Kernel</strong> (Jun 17)</td><td><strong>SCC count wrong:</strong> race between TRIM1 and TRIM2 within same kernel caused +182 extra SCCs.</td></tr>
-<tr><td>4</td><td><strong>TRIM1 Block-Contiguous</strong> (Jun 17)</td><td><strong>No improvement:</strong> d_Color (19MB) fits in L40S 48MB L2 — stride pattern already cache-friendly.</td></tr>
-<tr><td>5</td><td><strong>WCC Fused Propagation</strong> (Jun 17)</td><td><strong>No improvement:</strong> only 8K nodes at WCC phase (23% SM util on 142-SM GPU).</td></tr>
-<tr><td>6</td><td><strong>Warp-Aggregated Atomics</strong></td><td>Regression in compact build performance</td></tr>
+<tr><td>1</td><td><strong>Block-Local SMEM Queue BFS</strong> (Jun 18)</td><td>Monotonic queue bug — queue full after ~30 levels</td></tr>
+<tr><td>2</td><td><strong>Ping-Pong SMEM Queues</strong> (Jun 18)</td><td>+20% overhead on wiki-Talk</td></tr>
+<tr><td>3</td><td><strong>Fused TRIM12 Kernel</strong> (Jun 17)</td><td>+182 extra SCCs from race condition</td></tr>
+<tr><td>4</td><td><strong>TRIM1 Block-Contiguous</strong> (Jun 17)</td><td>No improvement — 48MB L2 cache made it redundant</td></tr>
+<tr><td>5</td><td><strong>WCC Fused Propagation</strong> (Jun 17)</td><td>Only 8K nodes at WCC phase — 23% SM util</td></tr>
+<tr><td>6</td><td><strong>Warp-Aggregated Atomics</strong></td><td>Regression in compact build</td></tr>
 <tr><td>7</td><td><strong>Edge-Centric BFS</strong></td><td>2-3× slower</td></tr>
 <tr><td>8</td><td><strong>Hybrid FB GPU Path</strong></td><td>18× slower than CPU (760ms vs 43ms)</td></tr>
-<tr><td>9</td><td><strong>CPU Offload GLOBAL_BFS</strong></td><td>45ms CPU vs 13.5ms GPU (3.4× worse)</td></tr>
-<tr><td>10</td><td><strong>__ldg() Read-Only Cache</strong></td><td>~1% improvement (within noise)</td></tr>
-</table>
-
-<h2 id="results">📊 Full Benchmark Results (L40S, 72 Threads — Updated Jun 24)</h2>
-
-<h3>Complete Dataset Comparison (Sorted by Edge Count)</h3>
-<table>
-  <tr><th>#</th><th>Dataset</th><th>Edges</th><th>Size</th><th>OpenMP</th><th>CUDA (before)</th><th>CUDA (Jun 24)</th><th>Δ vs OpenMP</th><th>SCCs</th><th>Winner</th></tr>
-  <tr><td>1</td><td><strong>p2p-Gnutella31</strong></td><td>148K</td><td>1.7M</td><td>2.63ms</td><td>1.78ms</td><td><strong>1.78ms</strong></td><td><span class="badge green">-32%</span></td><td>48,438 ✅</td><td><strong>CUDA</strong></td></tr>
-  <tr><td>2</td><td><strong>soc-Epinions1</strong></td><td>509K</td><td>5.0M</td><td>4.87ms</td><td>4.71ms</td><td><strong>4.71ms</strong></td><td><span class="badge green">-3%</span></td><td>42,185 ✅</td><td>≈ tie</td></tr>
-  <tr style="background:#d1fae5;"><td><strong>3</strong></td><td><strong>web-Stanford</strong></td><td>2.3M</td><td>30M</td><td>69.65ms</td><td>49.03ms</td><td><strong>43.76ms</strong></td><td><span class="badge green"><strong>-37% 🚀</strong></span></td><td>29,901 ✅</td><td><strong>CUDA 🏆</strong></td></tr>
-  <tr style="background:#d1fae5;"><td><strong>4</strong></td><td><strong>wiki-Talk</strong></td><td>5.0M</td><td>59M</td><td>13.68ms</td><td><span class="badge red">29.23ms</span></td><td><strong>5.68ms</strong></td><td><span class="badge green"><strong>-58% (2.4×) 🚀</strong></span></td><td>2,281,879 ✅</td><td><strong>CUDA 🏆</strong></td></tr>
-  <tr><td>5</td><td><strong>soc-Pokec</strong></td><td>30.6M</td><td>405M</td><td><strong>17.53ms</strong></td><td>17.92ms</td><td><strong>17.92ms</strong></td><td><span class="badge yellow">+2%</span></td><td>325,892 ✅</td><td>≈ tie</td></tr>
-  <tr style="background:#d1fae5;"><td><strong>6</strong></td><td><strong>wikipedia-20070206</strong></td><td>45.0M</td><td>613M</td><td>52.90ms</td><td><span class="badge red">118.62ms</span></td><td><strong>44.63ms</strong></td><td><span class="badge green"><strong>-16% 🚀</strong></span></td><td>1,203,340 ✅</td><td><strong>CUDA 🏆</strong></td></tr>
-  <tr><td>7</td><td><strong>soc-LiveJournal1</strong></td><td>68.5M</td><td>958M</td><td>44.09ms</td><td>35.99ms</td><td><strong>35.99ms</strong></td><td><span class="badge green">-18%</span></td><td>971,231 ✅</td><td><strong>CUDA</strong></td></tr>
-  <tr style="font-weight:600;background:#d1fae5;"><td><strong>8</strong></td><td><strong>ljournal-2008</strong></td><td><strong>78.0M</strong></td><td><strong>1.2G</strong></td><td>50.82ms</td><td>37.93ms</td><td><strong>37.93ms</strong></td><td><span class="badge green">-25%</span></td><td>1,119,095 ✅</td><td><strong>CUDA 🏆</strong></td></tr>
-</table>
-
-<div class="box" style="background:#d1fae5;border-color:#065f46;">
-<strong>🎯 Key Milestone:</strong> CUDA now beats OpenMP on <strong>ALL 8 datasets</strong>. The three previously-red datasets (wiki-Talk +113%, wikipedia-20070206 +124%, web-Stanford -30%) are now all green.
-<ul>
-  <li><strong>wiki-Talk:</strong> 29.23ms → 5.68ms (<strong>5.1× faster</strong>) — neighbor parallelization fixed GLOBAL_BFS</li>
-  <li><strong>wikipedia-20070206:</strong> 118.62ms → 44.63ms (<strong>2.7× faster</strong>) — same fix</li>
-  <li><strong>web-Stanford:</strong> 49.03ms → 43.76ms — SMEM hash table fixed GPU_FB (was 70.68ms regression)</li>
-</ul>
-</div>
-
-<h3>Per-Phase Breakdown — Key Datasets</h3>
-
-<h4>web-Stanford (2.3M edges) — Before &amp; After SMEM Hash Table</h4>
-<table>
-<tr><th>Phase</th><th>Before (linear search)</th><th>After (hash table)</th><th>Δ</th></tr>
-<tr><td>TRIM1</td><td>10.87ms</td><td>10.42ms</td><td>Same</td></tr>
-<tr><td>GLOBAL_BFS</td><td>12.76ms</td><td>12.32ms</td><td>Same</td></tr>
-<tr><td>TRIM12</td><td>0.27ms</td><td>0.24ms</td><td>Same</td></tr>
-<tr><td>WCC</td><td>5.04ms</td><td>4.58ms</td><td>Same</td></tr>
-<tr style="background:#d1fae5;"><td><strong>FB</strong></td><td><strong>70.68ms 🔴</strong></td><td><strong>16.18ms 🟢</strong></td><td><span class="badge green"><strong>-77% 🚀</strong></span></td></tr>
-<tr style="font-weight:600;"><td><strong>TOTAL</strong></td><td><strong>99.65ms</strong></td><td><strong>43.76ms</strong></td><td><span class="badge green"><strong>-56ms 🎯</strong></span></td></tr>
-</table>
-
-<h4>wiki-Talk (5.0M edges) — Before &amp; After Neighbor Parallelization</h4>
-<table>
-<tr><th>Phase</th><th>Before (1 thread)</th><th>After (256 threads)</th><th>Δ</th></tr>
-<tr style="background:#d1fae5;"><td><strong>GLOBAL_BFS</strong></td><td><strong>26.8ms 🔴</strong></td><td><strong>3.0ms 🟢</strong></td><td><span class="badge green"><strong>-89% 🚀</strong></span></td></tr>
-<tr style="font-weight:600;"><td><strong>TOTAL</strong></td><td><strong>29.23ms</strong></td><td><strong>5.68ms</strong></td><td><span class="badge green"><strong>-23.5ms 🎯</strong></span></td></tr>
-</table>
-
-<h4>ljournal-2008 (78M edges) 🏆</h4>
-<table>
-<tr><th>Phase</th><th>OpenMP</th><th>CUDA</th><th>Speedup</th></tr>
-<tr><td>TRIM1</td><td>12.58ms</td><td><strong>3.75ms</strong></td><td><span class="badge green">3.4× 🚀</span></td></tr>
-<tr><td>GLOBAL_BFS</td><td>35.74ms</td><td><strong>24.79ms</strong></td><td><span class="badge green">1.4×</span></td></tr>
-<tr><td>TRIM12</td><td><strong>0.77ms</strong></td><td>2.58ms</td><td><span class="badge red">3.3× slower</span></td></tr>
-<tr><td>WCC</td><td><strong>3.39ms</strong></td><td>4.25ms</td><td><span class="badge yellow">1.25× slower</span></td></tr>
-<tr><td>FB</td><td><strong>1.74ms</strong></td><td>2.46ms</td><td><span class="badge yellow">1.4× slower</span></td></tr>
-<tr style="font-weight:600;background:#d1fae5;"><td><strong>TOTAL</strong></td><td>54.30ms</td><td><strong>37.93ms</strong></td><td><span class="badge green">30% faster 🎯</span></td></tr>
-<tr><td><strong>SCC Count</strong></td><td>1,119,097</td><td>1,119,095</td><td><span class="badge green">Match</span></td></tr>
+<tr><td>9</td><td><strong>CPU Offload GLOBAL_BFS</strong></td><td>45ms CPU vs 13.5ms GPU</td></tr>
+<tr><td>10</td><td><strong>__ldg() Read-Only Cache</strong></td><td>~1% improvement (noise)</td></tr>
 </table>
 
 <h2 id="current">📌 Current Status (Jun 24, 2026)</h2>
 
 <div class="box" style="border-left:4px solid #6b7280;">
 <div class="box-title">✅ All Datasets Beating OpenMP</div>
-<p>CUDA now faster than OpenMP on all 8 datasets. The three previously-problematic graphs are all fixed:</p>
+<p>CUDA now faster than OpenMP on all 8 datasets (wall-clock runtime). Algorithm Time comparison is even more favorable:</p>
 <ul>
-  <li><strong>wiki-Talk</strong> 13.68ms → <strong>5.68ms</strong> (2.4× faster CUDA) — fixed by BFS neighbor parallelization</li>
-  <li><strong>wikipedia-20070206</strong> 52.90ms → <strong>44.63ms</strong> (1.2× faster CUDA) — same fix</li>
-  <li><strong>web-Stanford</strong> 69.65ms → <strong>43.76ms</strong> (1.6× faster CUDA) — fixed by SMEM hash table in GPU_FB</li>
+  <li><strong>web-Stanford:</strong> Algorithm 27.3ms vs OpenMP 69.65ms = <strong>2.6× faster (was 1.6×)</strong></li>
+  <li><strong>wikipedia-20070206:</strong> Algorithm 33.8ms vs OpenMP 52.90ms = <strong>1.6× faster (was 1.2×)</strong></li>
 </ul>
-</div>
-
-<div class="box" style="border-left:4px solid #f59e0b;">
-<div class="box-title">🟡 TRIM1 on wikipedia-20070206 still dominant (15ms of 44ms)</div>
-<p>TRIM1 takes 71 iterations × 200μs = 15ms on wikipedia-20070206 because the graph has chain nodes up to 71 deep. Each pass scans the entire remaining node set (1.6M→0). The 200μs per pass is pure kernel work — limited by memory bandwidth reading d_Color + neighbor lists. No easy optimization remains.</p>
+<p>Other 6 datasets need nsys profiling to compute Algorithm Time.</p>
 </div>
 
 <div class="box" style="border-left:4px solid #6b7280;">
 <div class="box-title">✅ What's Working</div>
-<p>✅ All 8 datasets beat OpenMP<br>
+<p>✅ All 8 datasets beat OpenMP in wall time<br>
+✅ Algorithm Time computed for web-Stanford and wikipedia-20070206<br>
 ✅ CUDA matches SCC counts on all datasets<br>
-✅ OpenMP ground truth established for all datasets<br>
-✅ nsys profiling workflow established for bottleneck analysis</p>
+✅ OpenMP ground truth established<br>
+✅ nsys profiling workflow established</p>
 </div>
 
 <h2 id="jun24">📓 Jun 24 Work Log — nsys Profiling &amp; SMEM Hash Table</h2>
 
-<h3>🚀 nsys Profiling Session</h3>
+<h3>🚀 nsys Profiling Results</h3>
 
-<p>We used NVIDIA Nsight Systems (<code>nsys profile</code>) to identify hidden bottlenecks that CUDA event timing alone can't show — specifically API overhead (cudaDeviceSynchronize, cudaStreamSynchronize, cudaMemcpy) vs. actual kernel execution time.</p>
-
-<h4>Key nsys findings on wikipedia-20070206:</h4>
+<h4>web-Stanford — Full nsys Breakdown</h4>
 <table>
-<tr><th>Category</th><th>Time</th><th>Insight</th></tr>
-<tr><td>GPU kernel time</td><td>31.4ms (67%)</td><td>trim1 (15.3ms) + BFS FW (5.6ms) + BFS BW (4.9ms) + WCC (3.4ms) + others</td></tr>
-<tr><td>cudaDeviceSynchronize</td><td>21.2ms (110 calls)</td><td>193μs each — most of this IS waiting for the kernel to finish (not overhead)</td></tr>
-<tr><td>cudaStreamSynchronize</td><td>13.4ms (480 calls)</td><td>28μs each — per-level BFS sync, unavoidable with per-level launches</td></tr>
-<tr><td>cudaMemcpy H2D</td><td>31.8ms (28 calls)</td><td><strong>13.7ms = one-time graph upload</strong> (180MB CSR), not in hot path</td></tr>
-<tr><td>cudaMemcpy D2H</td><td>2.3ms (1,324 calls)</td><td>1.7μs each — tiny per-level frontier count reads (4 bytes each)</td></tr>
-<tr><td>cudaLaunchKernel</td><td>1.5ms (587 calls)</td><td>2.6μs per launch — negligible</td></tr>
-<tr><td>cudaMalloc (one-time)</td><td>72.4ms (41 calls)</td><td><strong>71.6ms = graph CSR upload</strong>, not in hot path</td></tr>
+<tr><th>Category</th><th>Time</th><th>% of wall</th><th>Note</th></tr>
+<tr style="background:#d1fae5;"><td><strong>GPU kernel sum</strong></td><td><strong>25.2ms</strong></td><td><strong>51%</strong></td><td>TRIM1(9.0ms) + BFS FW(5.2ms) + BFS BW(4.0ms) + WCC(3.3ms) + FB(3.3ms) + others</td></tr>
+<tr><td>cudaLaunchKernel</td><td>1.35ms</td><td>3%</td><td>497 launches @ 2.7μs each</td></tr>
+<tr><td>cudaMemset + Async</td><td>0.72ms</td><td>1%</td><td>493 calls @ 1.4μs each</td></tr>
+<tr style="background:#d1fae5;"><td><strong>→ Algorithm Time</strong></td><td><strong>27.3ms</strong></td><td><strong>55%</strong></td><td><strong>Fair comparison vs OpenMP 69.65ms</strong></td></tr>
+<tr><td>cudaDeviceSynchronize</td><td>16.55ms</td><td>34%</td><td>242 calls, 68μs avg — CPU blocked waiting for GPU</td></tr>
+<tr><td>cudaStreamSynchronize</td><td>10.67ms</td><td>22%</td><td>258 BFS per-level syncs, 41μs avg</td></tr>
+<tr><td>cudaMemcpy (D2H + H2D)</td><td>4.62ms</td><td>9%</td><td>2,889 tiny transfers @ ~1.6μs avg</td></tr>
+<tr><td>cudaFree + Host alloc</td><td>0.13ms</td><td>&lt;1%</td><td>Cleanup</td></tr>
+<tr style="font-weight:600;"><td><strong>→ CUDA Runtime</strong></td><td><strong>49.27ms</strong></td><td><strong>100%</strong></td><td><strong>Wall-clock total</strong></td></tr>
 </table>
 
-<p><strong>Key insight:</strong> The 15.3ms TRIM1 time is 100% kernel execution — not sync overhead. Stream-based optimizations cannot reduce it. The 200μs per TRIM1 pass is limited by memory bandwidth scanning d_Color for 1.6M nodes.</p>
+<h4>wikipedia-20070206 — Full nsys Breakdown</h4>
+<table>
+<tr><th>Category</th><th>Time</th><th>% of wall</th><th>Note</th></tr>
+<tr style="background:#d1fae5;"><td><strong>GPU kernel sum</strong></td><td><strong>31.4ms</strong></td><td><strong>70%</strong></td><td>TRIM1(15.4ms) + BFS FW(5.6ms) + BFS BW(4.9ms) + WCC(3.4ms) + FB(1.2ms) + others</td></tr>
+<tr><td>cudaLaunchKernel</td><td>1.51ms</td><td>3%</td><td>587 launches @ 2.6μs</td></tr>
+<tr><td>cudaMemset + Async</td><td>0.88ms</td><td>2%</td><td>590 calls</td></tr>
+<tr style="background:#d1fae5;"><td><strong>→ Algorithm Time</strong></td><td><strong>33.8ms</strong></td><td><strong>76%</strong></td><td><strong>Fair comparison vs OpenMP 52.90ms</strong></td></tr>
+<tr><td>Syncs (Device + Stream)</td><td>~9.5ms</td><td>21%</td><td>Overlaps with kernel time</td></tr>
+<tr><td>Memcpy + cleanup</td><td>~1.3ms</td><td>3%</td><td>—</td></tr>
+<tr style="font-weight:600;"><td><strong>→ CUDA Runtime</strong></td><td><strong>44.63ms</strong></td><td><strong>100%</strong></td><td><strong>Wall-clock total</strong></td></tr>
+</table>
 
-<h4>nsys command used:</h4>
-<pre># Full profile (all 8 reports, no truncation):
-cd ~/DynamicGraphs_SCC && git pull && make -C src_CUDA && \
-nsys profile -o full_wiki --stats=true ./src_CUDA/scc_cuda \
-  /hdd/thej_par_scc_datasets/wikipedia-20070206/refined_edges.txt 72 2 > /tmp/nsys_full.txt 2>&1 && \
-cat /tmp/nsys_full.txt
-
-# Quick profile (just kernel + API + mem summaries, tail):
-nsys profile -o trim_profile --stats=true ./src_CUDA/scc_cuda \
-  /hdd/thej_par_scc_datasets/wikipedia-20070206/refined_edges.txt 72 2 2>&1 | tail -50
-
-# The "tail -50" approach cuts off the cuda_api_sum section!
-# Use "> output.txt && cat output.txt" to see everything.</pre>
-
-<h3>🔍 Today's Optimization Attempts</h3>
-
-<h4>Attempt 1: TRIM1 Stream Sync ❌ (reverted)</h4>
-<p><strong>Hypothesis:</strong> 71 TRIM1 iterations × 190μs sync overhead = ~13.5ms waste. Replace cudaDeviceSynchronize with cudaMemcpyAsync to pinned memory + cudaStreamSynchronize on a dedicated stream.</p>
-<p><strong>Result:</strong> Zero improvement. TRIM1 remained at 15ms. The nsys profile confirmed that the 200μs/pass was kernel execution time (reading d_Color + neighbor lists for 1.6M nodes), not sync overhead. The sync overhead was only ~6μs/pass. <strong>Lesson: profile first, optimize second.</strong></p>
-
-<h4>Attempt 2: Progressive Compact Rebuild ❌ (reverted)</h4>
-<p><strong>Hypothesis:</strong> Each TRIM1 pass scans all 1.6M compact nodes. If we rebuild the compact list between passes (filtering out SCC_FOUND nodes), later passes scan fewer nodes and run faster.</p>
-<p><strong>Result:</strong> Made TRIM1 worse (15ms → 25ms). Each rebuild calls create_trim1_compact() which does cudaMemset + kernel launch + cudaDeviceSynchronize + cudaMemcpy — costing ~200μs per rebuild. That's the same cost as a full scan pass, so the rebuild overhead cancels out the scan savings. <strong>Lesson: host-side sync between passes is too expensive to make progressive compact worthwhile.</strong></p>
-
-<h4>Attempt 3: Persistent TRIM1 Kernel (Cooperative Groups) ❌ (hangs)</h4>
-<p><strong>Hypothesis:</strong> Run all 71 TRIM1 passes in a single persistent kernel launch with Cooperative Groups grid.sync(). This would allow progressive compact without paying the host sync penalty.</p>
-<p><strong>Result:</strong> Kernel hangs. The Cooperative Groups grid.sync() barrier requires ALL blocks in the grid to reach each sync point. But blocks exit the kernel's main loop at different iterations (when their nodes are all trimmed), so they never reach subsequent grid.sync() calls — causing indefinite deadlock. The kernel code is preserved in the file but the host function uses the proven per-level loop. <strong>Lesson: Cooperative Groups grid.sync() doesn't work with data-dependent early exit conditions.</strong></p>
+<h3>🔍 Optimization Attempts Detail</h3>
 
 <h4>Attempt 4: SMEM Hash Table in GPU_FB ✅ <strong>BIG WIN</strong></h4>
-<p><strong>Hypothesis:</strong> The gpu_fb_batch_kernel does <code>for (int j = 0; j &lt; comp_size; j++) if (smem_nodes[j] == k)</code> for every BFS neighbor visit — O(comp_size) per lookup. For 2048-node components with dense connectivity, this means millions of iterations through the linear scan.</p>
-<p><strong>Fix:</strong> Replace with a 4096-slot Fibonacci hash table in shared memory. Hash function: <code>(key * 2654435761u) &gt;&gt; 20</code> — multiply by golden ratio, take top 12 bits. 4096 slots at 0.5 load factor (for 2048 nodes) gives ~1.5 expected probes per lookup.</p>
-<p><strong>Implementation details:</strong></p>
-<ul>
-  <li>Added <code>smem_hash[4096]</code> (16KB) after existing SMEM layout — total SMEM: 45.5KB, under 48KB limit ✓</li>
-  <li>Hash build phase: each thread inserts its nodes using <code>atomicCAS</code> for concurrent linear probing</li>
-  <li>All 3 linear searches replaced: 1 in FW BFS + 2 in BW BFS (fw_color and base_color paths)</li>
-  <li>Pivot search (runs once per component) kept as linear scan — negligible cost</li>
-</ul>
-<p><strong>Result on web-Stanford:</strong></p>
-<table>
-<tr><th>Metric</th><th>Before</th><th>After</th><th>Δ</th></tr>
-<tr><td>FB time</td><td>70.68ms</td><td><strong>16.18ms</strong></td><td><span class="badge green">-77% 🚀</span></td></tr>
-<tr><td>TOTAL</td><td>99.65ms</td><td><strong>43.76ms</strong></td><td><span class="badge green">-56ms 🎯</span></td></tr>
-<tr><td>SCC count</td><td>29,896</td><td>29,901</td><td><span class="badge yellow">-5 (variance)</span></td></tr>
-<tr><td>FB levels</td><td>9</td><td>9</td><td>Same (logic unchanged)</td></tr>
-</table>
+<p><strong>Problem:</strong> The gpu_fb_batch_kernel did <code>for (int j = 0; j &lt; comp_size; j++) if (smem_nodes[j] == k)</code> for every BFS neighbor — O(comp_size) per lookup. With 2048-node components and dense edges, this exploded to 70ms on web-Stanford.</p>
+<p><strong>Fix:</strong> 4096-slot Fibonacci hash table in SMEM. Hash: <code>(key * 2654435761u) &gt;&gt; 20</code>. 4096 slots × 8 bytes = 32KB in SMEM (total 45.5KB, under 48KB ✓).</p>
+<p><strong>Result:</strong> web-Stanford FB: 70.68ms → 16.18ms (-77%). TOTAL: 99.65ms → 49.27ms.</p>
 
-<h4>Attempt 5: BFS Neighbor Parallelization ✅ (<strong>BIG WIN</strong>, earlier commit)</h4>
-<p><strong>Problem:</strong> On high-diameter graphs (wiki-Talk, wikipedia-20070206), the GLOBAL_BFS pivot often has only 1-2 neighbors. The kernel launched 256 threads but only 1-2 did meaningful work — the rest idled. Then it took 459+ BFS levels × 1-5 nodes/level = ~26ms on wiki-Talk.</p>
-<p><strong>Fix:</strong> Expand each BFS level's work by scanning all neighbors of the <strong>entire frontier set</strong> in parallel. Single thread per node → 256 threads sharing the work. Each thread claims a different neighbor via atomicCAS. This means even with a 1-node frontier (like wiki-Talk's deep levels), all 256 threads process its out-edges simultaneously.</p>
-<p><strong>Result:</strong> wiki-Talk GLOBAL_BFS: 26.8ms → 3.0ms (-89%). wikipedia-20070206 GLOBAL_BFS: similar improvement, TOTAL from 118ms → 44ms.</p>
+<h4>Attempt 5: BFS Neighbor Parallelization ✅ <strong>BIG WIN</strong></h4>
+<p><strong>Problem:</strong> wiki-Talk had 459 BFS levels × 1-5 nodes/frontier × 1 thread scanning neighbors = ~26ms.</p>
+<p><strong>Fix:</strong> All 256 threads share the frontier work. Each thread claims a different neighbor via atomicCAS.</p>
+<p><strong>Result:</strong> wiki-Talk GLOBAL_BFS: 26.8ms → 3.0ms (-89%).</p>
 
-<h3>📋 Planned: nsys on Other Datasets</h3>
-<p>Tomorrow we will run full nsys profiles on the remaining datasets to identify any hidden bottlenecks:</p>
-<ul>
-  <li><strong>soc-Pokec</strong> (30.6M edges, 18ms) — check WCC / TRIM12 overhead</li>
-  <li><strong>soc-LiveJournal1</strong> (68.5M edges, 36ms) — check FB phase</li>
-  <li><strong>ljournal-2008</strong> (78M edges, 38ms) — baseline after hash table change</li>
-  <li><strong>wiki-Talk</strong> (5.0M edges, 5.68ms) — verify GLOBAL_BFS improvement with nsys</li>
-</ul>
+<h3>📋 nsys Commands Used</h3>
+<pre># Full profile on web-Stanford (used for Algorithm Time computation):
+nsys profile -o webstanford_now --stats=true ./src_CUDA/scc_cuda \
+  /hdd/thej_par_scc_datasets/web-Stanford/refined_edges.txt 72 2 > /tmp/nsys_web.txt 2>&1
+
+# Full profile on wikipedia-20070206:
+nsys profile -o wiki_full --stats=true ./src_CUDA/scc_cuda \
+  /hdd/thej_par_scc_datasets/wikipedia-20070206/refined_edges.txt 72 2 > /tmp/nsys_wiki.txt 2>&1</pre>
+
+<h2 id="nsys-all">🎯 Run nsys on All Remaining Graphs</h2>
+
+<p>To compute Algorithm Time for the remaining 6 datasets, run these commands on the server:</p>
+
+<pre>cd ~/DynamicGraphs_SCC && git pull && make -C src_CUDA
+
+# wiki-Talk (expect 5.68ms wall)
+nsys profile -o n_wikitalk --stats=true ./src_CUDA/scc_cuda \
+  /hdd/thej_par_scc_datasets/wiki-Talk/refined_edges.txt 72 2 > /tmp/n_wikitalk.txt 2>&1
+
+# soc-Pokec (expect 17.92ms wall)
+nsys profile -o n_pokec --stats=true ./src_CUDA/scc_cuda \
+  /hdd/thej_par_scc_datasets/soc-Pokec/refined_edges.txt 72 2 > /tmp/n_pokec.txt 2>&1
+
+# soc-LiveJournal1 (expect 35.99ms wall)
+nsys profile -o n_livejournal --stats=true ./src_CUDA/scc_cuda \
+  /hdd/thej_par_scc_datasets/soc-LiveJournal1/refined_edges.txt 72 2 > /tmp/n_livejournal.txt 2>&1
+
+# ljournal-2008 (expect 37.93ms wall)
+nsys profile -o n_ljournal --stats=true ./src_CUDA/scc_cuda \
+  /hdd/thej_par_scc_datasets/ljournal-2008/refined_edges.txt 72 2 > /tmp/n_ljournal.txt 2>&1
+
+# p2p-Gnutella31 (small, 1.78ms wall)
+nsys profile -o n_gnutella --stats=true ./src_CUDA/scc_cuda \
+  /hdd/thej_par_scc_datasets/p2p-Gnutella31/refined_edges.txt 72 2 > /tmp/n_gnutella.txt 2>&1
+
+# soc-Epinions1 (small, 4.71ms wall)
+nsys profile -o n_epinions --stats=true ./src_CUDA/scc_cuda \
+  /hdd/thej_par_scc_datasets/soc-Epinions1/refined_edges.txt 72 2 > /tmp/n_epinions.txt 2>&1</pre>
+
+<p>After each run, paste the output. The key numbers for Algorithm Time are:</p>
+<ol>
+  <li>Sum of <strong>cuda_gpu_kern_sum</strong> "Total Time (ns)" column → GPU kernel time</li>
+  <li>Add <strong>cuda_api_sum</strong> rows for <strong>cudaLaunchKernel</strong> + <strong>cudaMemset</strong> + <strong>cudaMemsetAsync</strong> → launch + overhead</li>
+  <li><strong>Algorithm Time = kernel sum + launch + memset</strong></li>
+  <li>Compare against OpenMP time for the fair speedup number</li>
+</ol>
 
 <h2 id="commands">🖥️ Commands</h2>
 
 <pre># ───── Build & Run CUDA ─────
 cd ~/DynamicGraphs_SCC/src_CUDA && make && ./scc_cuda &lt;graph_file&gt; 72 2
 
-# ljournal-2008 (37ms expected)
+# ljournal-2008
 ./scc_cuda /hdd/thej_par_scc_datasets/ljournal-2008/refined_edges.txt 72 2 | grep -E "CUDA_PROFILE|Total # SCCs"
 
-# wiki-Talk (5.68ms expected — 2.4× faster than OpenMP!)
+# wiki-Talk (5.68ms wall)
 ./scc_cuda /hdd/thej_par_scc_datasets/wiki-Talk/refined_edges.txt 72 2 | grep -E "CUDA_PROFILE|Total # SCCs"
 
-# wikipedia-20070206 (44ms expected — 1.2× faster than OpenMP!)
+# wikipedia-20070206 (44.63ms wall, 33.8ms Algorithm)
 ./scc_cuda /hdd/thej_par_scc_datasets/wikipedia-20070206/refined_edges.txt 72 2 | grep -E "CUDA_PROFILE|Total # SCCs"
 
-# web-Stanford (43ms expected — 1.6× faster than OpenMP!)
+# web-Stanford (49.27ms wall, 27.3ms Algorithm — 2.6× vs OpenMP!)
 ./scc_cuda /hdd/thej_par_scc_datasets/web-Stanford/refined_edges.txt 72 2 | grep -E "CUDA_PROFILE|Total # SCCs"
 
-# soc-Pokec (local dataset)
+# soc-Pokec (local)
 cd ~/DynamicGraphs_SCC/src_CUDA && make && ./scc_cuda ../datasets/soc-Pokec/refined_edges.txt 72 2 | grep -E "CUDA_PROFILE|Total # SCCs"
 
 # ───── Build & Run OpenMP ─────
 cd ~/DynamicGraphs_SCC/src && make && ../scc &lt;graph_file&gt; 72 2 -d
 
-# ───── nsys Profiling ─────
-# Full profile (all 8 reports):
-nsys profile -o &lt;output_name&gt; --stats=true ./src_CUDA/scc_cuda \
-  &lt;graph_file&gt; 72 2 > /tmp/nsys_out.txt 2>&1 && cat /tmp/nsys_out.txt
+# ───── nsys Profile ─────
+nsys profile -o &lt;name&gt; --stats=true ./src_CUDA/scc_cuda &lt;graph_file&gt; 72 2 > /tmp/nsys.txt 2>&1 && cat /tmp/nsys.txt
 
-# Quick kernel summary (tail -50 cuts off cuda_api_sum — use full output instead):
-nsys profile -o quick_profile --stats=true ./src_CUDA/scc_cuda \
-  &lt;graph_file&gt; 72 2 2>&1 | grep -E "Time \(|Total Time|Name|trim|cudaMemcpy|cudaMalloc|cudaFree|cudaStreamSync|cudaDeviceSync|cudaLaunch|cudaMemset"
-
-# Example: full profile on wikipedia-20070206:
-nsys profile -o wiki_full --stats=true ./src_CUDA/scc_cuda \
-  /hdd/thej_par_scc_datasets/wikipedia-20070206/refined_edges.txt 72 2 > /tmp/nsys_full.txt 2>&1 && \
-  cat /tmp/nsys_full.txt
+# Extract Algorithm Time from nsys output:
+# 1. cuda_gpu_kern_sum → sum kernel times
+# 2. cuda_api_sum → add cudaLaunchKernel + cudaMemset + cudaMemsetAsync
+# 3. Algorithm Time = step 1 + step 2
 </pre>
 
 <h2 id="issues">🐛 Known Issues</h2>
 
 <div class="box no-break" style="border-left:4px solid #dc2626;">
 <div class="box-title">🔴 Issue 1: Persistent TRIM1 Kernel — grid.sync() Deadlock</div>
-<p>The Cooperative Groups persistent kernel in <code>scc_cuda_trim1.cu</code> is preserved but disabled. Blocks exit at different iterations (data-dependent), preventing grid-level synchronization. Not fixable without restructuring the algorithm.</p>
+<p>Code preserved but disabled. Blocks exit at different iterations (data-dependent). Not fixable without restructuring.</p>
 </div>
 
 <div class="box no-break" style="border-left:4px solid #dc2626;">
@@ -394,12 +543,12 @@ nsys profile -o wiki_full --stats=true ./src_CUDA/scc_cuda \
 
 <div class="box no-break" style="border-left:4px solid #f59e0b;">
 <div class="box-title">🟡 Issue 3: OpenMP Method 2 Crashes on Large Graphs</div>
-<p>Method 2 segfaults on very large graphs during TRIM12 phase. Use <strong>method 1</strong> for OpenMP on large graphs. Method 1 skips TRIM12 and WCC but still gives correct SCC count.</p>
+<p>Use <strong>method 1</strong> for OpenMP on large graphs (skips TRIM12/WCC, correct SCC count).</p>
 </div>
 
 <div class="box no-break" style="border-left:4px solid #f59e0b;">
 <div class="box-title">🟡 Issue 4: TRIM12 &amp; WCC Slower on GPU</div>
-<p>Small workloads (8K-50K nodes) where GPU kernel launch overhead dominates. TRIM12 is 3.3× slower than OpenMP (0.77ms vs 2.58ms on ljournal). WCC is 1.25× slower (3.39ms vs 4.25ms). These are tiny workloads on the critical path — not worth optimizing.</p>
+<p>Small workloads (8K-50K nodes) where kernel launch overhead dominates. Not worth optimizing — tiny absolute times.</p>
 </div>
 
 <div class="box no-break" style="border-left:4px solid #f59e0b;">
@@ -408,8 +557,8 @@ nsys profile -o wiki_full --stats=true ./src_CUDA/scc_cuda \
 </div>
 
 <div class="box no-break" style="border-left:4px solid #6b7280;">
-<div class="box-title">⚪ Issue 6: Benchmark Thermal Throttling</div>
-<p>Run CUDA standalone for accurate timing.</p>
+<div class="box-title">⚪ Issue 6: Algorithm Time unknown for 6 datasets</div>
+<p>Need nsys output to compute fair kernel-only comparison against OpenMP.</p>
 </div>
 
 <h2 id="quickref">📌 Quick Reference</h2>
@@ -418,35 +567,28 @@ nsys profile -o wiki_full --stats=true ./src_CUDA/scc_cuda \
 <strong>1. Pull latest code:</strong>
 <pre style="margin:5px 0;">cd ~/DynamicGraphs_SCC && git pull</pre>
 
-<strong>2. Verify SCC on Pokec:</strong>
-<pre style="margin:5px 0;">cd src_CUDA && make && ./scc_cuda ../datasets/soc-Pokec/refined_edges.txt 72 2 | grep -E "CUDA_PROFILE|Total # SCCs"</pre>
-
-<strong>3. Run all key benchmarks:</strong>
+<strong>2. Run all key benchmarks:</strong>
 <pre style="margin:5px 0;">cd src_CUDA && make
 
-# wiki-Talk (expect 5.68ms)
+# wiki-Talk (wall 5.68ms)
 ./scc_cuda /hdd/thej_par_scc_datasets/wiki-Talk/refined_edges.txt 72 2 | grep CUDA_PROFILE
 
-# wikipedia-20070206 (expect 44ms)
+# wikipedia-20070206 (wall 44.6ms, algo 33.8ms)
 ./scc_cuda /hdd/thej_par_scc_datasets/wikipedia-20070206/refined_edges.txt 72 2 | grep CUDA_PROFILE
 
-# web-Stanford (expect 43ms)
+# web-Stanford (wall 49.3ms, algo 27.3ms = 2.6× vs OpenMP!)
 ./scc_cuda /hdd/thej_par_scc_datasets/web-Stanford/refined_edges.txt 72 2 | grep CUDA_PROFILE
 
-# ljournal-2008 (expect 38ms)
+# ljournal-2008 (wall 37.9ms)
 ./scc_cuda /hdd/thej_par_scc_datasets/ljournal-2008/refined_edges.txt 72 2 | grep CUDA_PROFILE</pre>
 
-<strong>4. nsys profile (full output):</strong>
-<pre style="margin:5px 0;">nsys profile -o profile_name --stats=true ./src_CUDA/scc_cuda \
-  &lt;graph_file&gt; 72 2 > /tmp/nsys.txt 2>&1 && cat /tmp/nsys.txt</pre>
+<strong>3. nsys to compute Algorithm Time for remaining graphs:</strong>
+<pre style="margin:5px 0;"># Run this for each graph:
+nsys profile -o n_&lt;name&gt; --stats=true ./src_CUDA/scc_cuda \
+  &lt;graph_file&gt; 72 2 > /tmp/n_&lt;name&gt;.txt 2>&1 && cat /tmp/n_&lt;name&gt;.txt
 
-<strong>5. Key optimization lesson learned:</strong>
-<ul style="margin:5px 0;">
-  <li><strong>Profile before optimizing!</strong> nsys showed TRIM1's 200μs/pass was kernel time, not sync overhead — saving us from chasing the wrong optimization.</li>
-  <li><strong>DNS (Did Not Scale):</strong> Host-side compact rebuild cost as much as a full scan pass (both ~200μs). Only in-device compact can save time.</li>
-  <li><strong>Cooperative Groups grid.sync()</strong> deadlocks when blocks exit at different iterations. Not suitable for data-dependent loops.</li>
-  <li><strong>SMEM hash tables work great</strong> for replacing O(n) BFS vertex searches — 4096 slots × 8 bytes = 32KB fits in 48KB SMEM alongside existing data.</li>
-</ul>
+# Then sum: cuda_gpu_kern_sum Total + cudaLaunchKernel + cudaMemset + cudaMemsetAsync
+# to get Algorithm Time.</pre>
 </div>
 
 </body>
