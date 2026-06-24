@@ -180,6 +180,11 @@ int repeat_global_trim1_compact(GPUState& st, const GPUGraph& g,
     const DynamicArrays& da, int* d_count_trim_spec,
     int TRIM_STOP);
 
+int repeat_global_trim1_compact_hostloop(GPUState& st, const GPUGraph& g,
+    int* d_count, int met_algo, int flag11,
+    const DynamicArrays& da, int* d_count_trim_spec,
+    int TRIM_STOP);
+
 int repeat_local_trim1(GPUState& st, const GPUGraph& g,
     CUDAMyWork* w, int* d_count,
     int met_algo, int flag11,
@@ -187,6 +192,21 @@ int repeat_local_trim1(GPUState& st, const GPUGraph& g,
 
 // Compact build helpers (mirrors create_trim1_compact)
 void create_trim1_compact(GPUState& st, const GPUGraph& g);
+
+// Persistent TRIM1 kernel — runs all passes in a single cooperative launch
+__global__ void trim_once_node_compact_persistent_kernel(
+    const edge_t* d_begin, const node_t* d_node_idx,
+    const edge_t* d_r_begin, const node_t* d_r_node_idx,
+    int* d_Color, int* d_SCC,
+    int* d_global_count,
+    int* d_trim_targets,
+    int initial_num_targets,
+    int* d_device_counters,
+    int met_algo, int flag11,
+    const int* d_scc_list, const int* d_vec_scc_count,
+    const int* d_level_ver, const int* d_affect_level,
+    int* d_count_trim_spec,
+    int TRIM_STOP);
 
 // ---- scc_cuda_trim2.cu (mirrors scc_trim2.cc) ----
 

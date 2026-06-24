@@ -1,4 +1,5 @@
 #include "scc_cuda.h"
+#include <cooperative_groups.h>
 
 // ======================================================================
 // Device-side global state: analogs of OpenMP static globals
@@ -608,10 +609,150 @@ void create_trim1_compact(GPUState& st, const GPUGraph& g)
         create_trim1_compact_1b(st, g);
     create_trim1_compact_2();
     create_trim1_compact_3();
+}// ======================================================================
+// Persistent TRIM1 kernel — runs all passes in a single cooperative launch
+//
+// Uses Cooperative Groups grid.sync() for grid-wide barriers.
+// Internally loops: trim pass → in-place compact rebuild → repeat
+// until no nodes trimmed (or <= TRIM_STOP).
+//
+// Each thread maintains its own `num_targets` from compact_counter after
+// grid.sync(), avoiding cross-block stale-read races on device_counters.
+//
+// d_device_counters layout:
+//   [0] = num_targets (for host to read back after kernel)
+//   [1] = compact_counter (atomic counter for in-place rebuild)
+//   [2] = pass_trimmed (per-pass trimmed count for exit check)
+// ======================================================================
+
+__global__ void trim_once_node_compact_persistent_kernel(
+    const edge_t* d_begin, const node_t* d_node_idx,
+    const edge_t* d_r_begin, const node_t* d_r_node_idx,
+    int* d_Color, int* d_SCC,
+    int* d_global_count,
+    int* d_trim_targets,
+    int initial_num_targets,
+    int* d_device_counters,
+    int met_algo, int flag11,
+    const int* d_scc_list, const int* d_vec_scc_count,
+    const int* d_level_ver, const int* d_affect_level,
+    int* d_count_trim_spec,
+    int TRIM_STOP)
+{
+    // Initialize device counters (safe: only block 0 thread 0 writes)
+    if (threadIdx.x == 0 && blockIdx.x == 0) {
+        d_device_counters[0] = initial_num_targets;
+        atomicExch(&d_device_counters[1], 0);
+        atomicExch(&d_device_counters[2], 0);
+    }
+
+    // Grid-wide barrier: ensures init writes are visible
+    cooperative_groups::grid_group grid = cooperative_groups::this_grid();
+    grid.sync();
+
+    // Each thread tracks num_targets locally to avoid cross-block reads
+    int num_targets = initial_num_targets;
+    const int MAX_PASSES = 300;
+
+    for (int pass = 0; pass < MAX_PASSES; pass++) {
+        if (num_targets <= 0) break;
+
+        // ---- Phase 1: Trim pass ----
+        int tid = blockIdx.x * blockDim.x + threadIdx.x;
+        int stride = blockDim.x * gridDim.x;
+
+        int local_count = 0;
+        for (int i = tid; i < num_targets; i += stride) {
+            node_t n = d_trim_targets[i];
+            local_count += trim_once_node_device(
+                d_begin, d_node_idx, d_r_begin, d_r_node_idx,
+                d_Color, d_SCC, n,
+                met_algo, flag11,
+                d_scc_list, d_vec_scc_count,
+                d_level_ver, d_affect_level,
+                d_count_trim_spec);
+        }
+
+        // ---- Aggregate within block via SMEM ----
+        __shared__ int s_block_trimmed;
+        if (threadIdx.x == 0) s_block_trimmed = 0;
+        __syncthreads();
+        if (local_count > 0) atomicAdd(&s_block_trimmed, local_count);
+        __syncthreads();
+
+        int block_trimmed = s_block_trimmed;
+
+        // Add to global cumulative + per-pass counter
+        if (block_trimmed > 0) {
+            atomicAdd(d_global_count, block_trimmed);
+            atomicAdd(&d_device_counters[2], block_trimmed);
+        }
+
+        // ---- Grid barrier: all d_Color writes + counter adds visible ----
+        grid.sync();
+
+        // ---- Check exit: per-pass trimmed <= TRIM_STOP ----
+        if (d_device_counters[2] <= TRIM_STOP) break;
+
+        // ---- Reset per-pass counter for next iteration ----
+        if (threadIdx.x == 0 && blockIdx.x == 0)
+            atomicExch(&d_device_counters[2], 0);
+        __syncthreads();
+
+        // ---- Phase 2: In-place compact rebuild ----
+        // Filter SCC_FOUND from d_trim_targets using warp-ballot atomics.
+        if (threadIdx.x == 0 && blockIdx.x == 0)
+            atomicExch(&d_device_counters[1], 0);
+        __syncthreads();
+
+        int* compact_counter = &d_device_counters[1];
+
+        // Contiguous chunks per block (all threads in each warp participate)
+        for (int base = blockIdx.x * blockDim.x;
+             base < num_targets;
+             base += gridDim.x * blockDim.x) {
+
+            int idx = base + threadIdx.x;
+            bool keep = false;
+            node_t n = -1;
+            if (idx < num_targets) {
+                n = d_trim_targets[idx];
+                keep = (d_Color[n] != SCC_FOUND);
+            }
+
+            unsigned mask = __ballot_sync(0xffffffff, keep);
+            int lane = threadIdx.x & 31;
+            int warp_count = __popc(mask);
+
+            int warp_base = 0;
+            if (lane == 0 && warp_count > 0)
+                warp_base = atomicAdd(compact_counter, warp_count);
+            warp_base = __shfl_sync(0xffffffff, warp_base, 0);
+
+            int local_rank = __popc(mask & ((1u << lane) - 1));
+            if (keep)
+                d_trim_targets[warp_base + local_rank] = n;
+        }
+
+        // ---- Grid barrier: all compact writes done ----
+        grid.sync();
+
+        // ---- Update num_targets from compact counter ----
+        // After grid.sync(), d_device_counters[1] is the final post-compact count.
+        // Every thread reads the same value — no cross-block race.
+        num_targets = d_device_counters[1];
+
+        // Save for host readback, reset compact counter for next iteration
+        if (threadIdx.x == 0 && blockIdx.x == 0) {
+            d_device_counters[0] = num_targets;
+            atomicExch(&d_device_counters[1], 0);
+        }
+        __syncthreads();
+    }
 }
 
 // ======================================================================
-// repeat_global_trim1_compact()
+// repeat_global_trim1_compact() — uses persistent kernel internally
 // ======================================================================
 int repeat_global_trim1_compact(GPUState& st, const GPUGraph& g,
     int* d_count, int met_algo, int flag11,
@@ -619,14 +760,152 @@ int repeat_global_trim1_compact(GPUState& st, const GPUGraph& g,
     int TRIM_STOP)
 {
     create_trim1_compact(st, g);
+    if (d_trim_targets_count == 0) return 0;
+
+    CUDA_CHECK(cudaMemset(d_count, 0, sizeof(int)));
+
+    // Use d_compact_prefix as device-side state buffer
+    // [0] = num_targets  [1] = compact_counter  [2] = pass_trimmed
+    int* d_device_state = d_compact_prefix;
+
+    // Copy initial target count to device state
+    CUDA_CHECK(cudaMemcpy(&d_device_state[0], &d_trim_targets_count,
+                          sizeof(int), cudaMemcpyHostToDevice));
+
+    // Determine grid size for cooperative launch
+    int block_size = 256;
+    int grid_size = (d_trim_targets_count + block_size - 1) / block_size;
+    if (grid_size > 64) grid_size = 64;
+
+    int max_blocks;
+    CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+        &max_blocks,
+        trim_once_node_compact_persistent_kernel,
+        block_size, 0));
+    int num_sms;
+    CUDA_CHECK(cudaDeviceGetAttribute(&num_sms,
+        cudaDevAttrMultiProcessorCount, 0));
+    int max_cooperative_blocks = max_blocks * num_sms;
+    if (grid_size > max_cooperative_blocks)
+        grid_size = max_cooperative_blocks;
+    if (grid_size == 0) grid_size = 1;
+
+    // Build kernel args and launch cooperatively
+    void* kernel_args[] = {
+        &g.d_begin, &g.d_node_idx,
+        &g.d_r_begin, &g.d_r_node_idx,
+        &st.d_Color, &st.d_SCC,
+        &d_count,
+        &d_trim_targets,
+        &d_trim_targets_count,
+        &d_device_state,
+        &met_algo, &flag11,
+        &da.d_scc_list, &da.d_vec_scc_count,
+        &da.d_level_ver, &da.d_affect_level,
+        &d_count_trim_spec,
+        &TRIM_STOP
+    };
+
+    CUDA_CHECK(cudaLaunchCooperativeKernel(
+        (const void*)trim_once_node_compact_persistent_kernel,
+        grid_size, block_size, kernel_args, 0, NULL));
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    // Read total trimmed count
+    int total_count = 0;
+    CUDA_CHECK(cudaMemcpy(&total_count, d_count,
+                          sizeof(int), cudaMemcpyDeviceToHost));
+
+    // Read final compact count
+    CUDA_CHECK(cudaMemcpy(&d_trim_targets_count,
+                          &d_device_state[0],
+                          sizeof(int), cudaMemcpyDeviceToHost));
+
+    return total_count;
+}
+
+// ======================================================================
+// repeat_global_trim1_compact_hostloop() — fallback: host-side loop
+// ======================================================================
+int repeat_global_trim1_compact_hostloop(GPUState& st, const GPUGraph& g,
+    int* d_count, int met_algo, int flag11,
+    const DynamicArrays& da, int* d_count_trim_spec,
+    int TRIM_STOP)
+{
+    create_trim1_compact(st, g);
+
     int total_count = 0;
     int count;
     do {
         count = do_global_trim1_compact(st, g, d_count, met_algo, flag11,
                                         da, d_count_trim_spec);
         total_count += count;
-
     } while (count > TRIM_STOP);
+
+    return total_count;
+}
+{
+    create_trim1_compact(st, g);
+    if (d_trim_targets_count == 0) return 0;
+
+    CUDA_CHECK(cudaMemset(d_count, 0, sizeof(int)));
+
+    // Use d_compact_prefix as device-side state buffer
+    // [0] = num_targets  [1] = compact_counter  [2] = pass_trimmed
+    int* d_device_state = d_compact_prefix;
+
+    // Determine grid size for cooperative launch (all blocks must be resident)
+    int block_size = 256;
+    int grid_size = (d_trim_targets_count + block_size - 1) / block_size;
+    if (grid_size > 64) grid_size = 64;  // conservative cap for cooperative groups
+
+    // Check device capability for cooperative launch
+    int max_blocks;
+    CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+        &max_blocks,
+        trim_once_node_compact_persistent_kernel,
+        block_size, 0));
+
+    int num_sms;
+    CUDA_CHECK(cudaDeviceGetAttribute(&num_sms,
+        cudaDevAttrMultiProcessorCount, 0));
+
+    int max_cooperative_blocks = max_blocks * num_sms;
+    if (grid_size > max_cooperative_blocks)
+        grid_size = max_cooperative_blocks;
+
+    if (grid_size == 0) grid_size = 1;
+
+    // Build kernel arguments
+    void* kernel_args[] = {
+        &g.d_begin, &g.d_node_idx,
+        &g.d_r_begin, &g.d_r_node_idx,
+        &st.d_Color, &st.d_SCC,
+        &d_count,
+        &d_trim_targets,
+        &d_trim_targets_count,
+        &d_device_state,
+        &met_algo, &flag11,
+        &da.d_scc_list, &da.d_vec_scc_count,
+        &da.d_level_ver, &da.d_affect_level,
+        &d_count_trim_spec,
+        &TRIM_STOP
+    };
+
+    CUDA_CHECK(cudaLaunchCooperativeKernel(
+        (const void*)trim_once_node_compact_persistent_kernel,
+        grid_size, block_size, kernel_args, 0, NULL));
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    // Read total trimmed count
+    CUDA_CHECK(cudaMemcpy(&total_count, d_count,
+                          sizeof(int), cudaMemcpyDeviceToHost));
+
+    // Read final compact count
+    CUDA_CHECK(cudaMemcpy(&d_trim_targets_count,
+                          &d_device_state[0],
+                          sizeof(int), cudaMemcpyDeviceToHost));
+
     return total_count;
 }
 
