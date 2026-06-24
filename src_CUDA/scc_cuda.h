@@ -11,6 +11,11 @@
 #include <vector>
 #include <cuda_runtime.h>
 
+// Forward declarations for functions defined in separate .cu files
+// (fb_gpu — declared here to avoid include order issues)
+double run_gpu_fb(GPUState& st, const GPUGraph& g, int num_threads);
+void finalize_fb_gpu();
+
 // Forward declaration of gm_graph (used as reference parameter in dynamic helpers)
 // Full definition is in gm.h, included by the .cpp files that instantiate these
 class gm_graph;

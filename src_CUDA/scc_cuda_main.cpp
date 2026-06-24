@@ -30,7 +30,7 @@ int main(int argc, char** argv)
         printf("  method 0: Trim1 + FW-BW BFS (Baseline)\n");
         printf("  method 1: Trim1 + Global FW-BW + Trim1 + FW-BW DFS\n");        printf("  method  2: Trim1 + Global FW-BW + Trim1/2 + WCC + FW-BW DFS\n");
         printf("  method 22: Trim1 + Trim1/2 + WCC + FW-BW DFS (skip GLOBAL_BFS)\n");
-        printf("  method 12: Trim1 + Spanning Forest SCC (multi-pivot, replaces Phases 2-5)\n");
+
         printf("  method 5: Incremental (naive graph)\n");
         printf("  method 6: Incremental (SCC condensation)\n");
         printf("  method 7: Incremental (SCC condensation + BFS levels)\n");
@@ -408,137 +408,6 @@ int main(int argc, char** argv)
         runtime_ms = (R2.tv_sec - R1.tv_sec) * 1000.0 +
                      (R2.tv_usec - R1.tv_usec) * 0.001;
 
-    } else if (met_algo == 12) {
-        // ============================================================
-        // Method 12: Trim1 + Spanning Forest SCC
-        // Replaces Phases 2-5 (GLOBAL_BFS + TRIM1/2 + WCC + FB) with
-        // a multi-pivot spanning forest approach.
-        // ============================================================
-        printf("Running Method 12: Trim1 + Spanning Forest SCC\n");
-
-        struct timeval t_start, t_trim1, t_forest, t_end;
-        gettimeofday(&R1, NULL);
-        gettimeofday(&t_start, NULL);
-
-        // ---------- Phase 1: TRIM1 ----------
-        trimmed = repeat_global_trim1(st, gpuG, d_count,
-            met_algo, flag11, da, d_count_trim_spec, 0);
-        gettimeofday(&t_trim1, NULL);
-        printf("[CUDA] Trimmed = %d\n", trimmed);
-
-        // DEBUG: count SCC roots after TRIM1
-        {
-            vector<int> h_tmp(N);
-            CUDA_CHECK(cudaMemcpy(h_tmp.data(), st.d_SCC, N * sizeof(int), cudaMemcpyDeviceToHost));
-            int cnt = 0;
-            for (int i = 0; i < N; i++) if (h_tmp[i] == i) cnt++;
-            printf("[DEBUG_SCC] After TRIM1: d_SCC[i]==i count = %d\n", cnt);
-        }
-
-        int curr_count = N - trimmed;
-        if (curr_count == 0) {
-            printf("[CUDA] No remaining nodes after trim\n");
-            gettimeofday(&t_forest, NULL);
-        } else {
-            // ---------- Phase 2-5: Spanning Forest SCC ----------
-            // Initialize spanning forest state
-            {
-                struct timeval sf_init_start, sf_init_end;
-                gettimeofday(&sf_init_start, NULL);
-                initialize_spanning_forest(N);
-                gettimeofday(&sf_init_end, NULL);
-                double sf_init_ms = (sf_init_end.tv_sec - sf_init_start.tv_sec) * 1000.0 +
-                                    (sf_init_end.tv_usec - sf_init_start.tv_usec) * 0.001;
-                printf("[SPAN_FOREST] initialize_spanning_forest: %.2fms\n", sf_init_ms);
-            }
-            
-            // Run the full spanning forest SCC algorithm
-            run_spanning_forest_scc(st, gpuG);
-
-            // DEBUG: count SCC roots after spanning forest (before fallback)
-            {
-                struct timeval debug_start, debug_end;
-                gettimeofday(&debug_start, NULL);
-                
-                vector<int> h_tmp(N);
-                CUDA_CHECK(cudaMemcpy(h_tmp.data(), st.d_SCC, N * sizeof(int), cudaMemcpyDeviceToHost));
-                int cnt = 0;
-                for (int i = 0; i < N; i++) if (h_tmp[i] == i) cnt++;
-                printf("[DEBUG_SCC] After spanning forest (before fallback): d_SCC[i]==i count = %d\n", cnt);
-                
-                // Also count unique non-self d_SCC values (the spanning forest groups)
-                std::set<int> unique_scc;
-                for (int i = 0; i < N; i++) {
-                    if (h_tmp[i] >= 0) unique_scc.insert(h_tmp[i]);
-                }
-                printf("[DEBUG_SCC] Unique d_SCC values (any): %zu\n", unique_scc.size());
-                
-                gettimeofday(&debug_end, NULL);
-                double debug_ms = (debug_end.tv_sec - debug_start.tv_sec) * 1000.0 +
-                                  (debug_end.tv_usec - debug_start.tv_usec) * 0.001;
-                printf("[SPAN_FOREST] DEBUG_SCC download + counting: %.2fms\n", debug_ms);
-            }
-            
-            // ---------- Phase 6: Fallback — WCC + FB on remaining nodes ----------
-            // After the spanning forest's early exit, d_trim_targets contains only
-            // the unresolved residual (~21K for Pokec). Run the standard Method 22
-            // fallback (WCC + FB) scoped to this residual. Do NOT reset d_Color —
-            // the forest's SCC assignments are correct; the residual forms its own
-            // SCCs independently and doesn't need to see through resolved neighbors.
-            {
-                struct timeval fb_start, fb_end;
-                gettimeofday(&fb_start, NULL);
-
-                int remaining = d_trim_targets_count;
-                if (remaining > 0) {
-                    printf("[SPAN_FOREST] Running fallback (WCC + FB) on %d remaining nodes\n", remaining);
-
-                    do_global_wcc(st, gpuG);
-                    create_work_items_from_wcc(st, gpuG);
-                    initialize_global_fb(N);
-                    double fb_time = start_workers_fw_bw_dfs_host(st, gpuG, num_threads);
-                    if (fb_time < 0.0) fb_time = 0.0;
-                    finalize_global_fb();
-
-                    gettimeofday(&fb_end, NULL);
-                    double fb_ms = (fb_end.tv_sec - fb_start.tv_sec) * 1000.0 +
-                                   (fb_end.tv_usec - fb_start.tv_usec) * 0.001;
-                    printf("[SPAN_FOREST] Fallback FB (residual only): %.2fms\n", fb_ms);
-                } else {
-                    gettimeofday(&fb_end, NULL);
-                    printf("[SPAN_FOREST] No remaining nodes, skipping fallback\n");
-                }
-            }
-            
-            {
-                struct timeval fin_start, fin_end;
-                gettimeofday(&fin_start, NULL);
-                finalize_spanning_forest();
-                gettimeofday(&fin_end, NULL);
-                double fin_ms = (fin_end.tv_sec - fin_start.tv_sec) * 1000.0 +
-                                (fin_end.tv_usec - fin_start.tv_usec) * 0.001;
-                printf("[SPAN_FOREST] finalize_spanning_forest (12x cudaFree): %.2fms\n", fin_ms);
-            }
-            gettimeofday(&t_forest, NULL);
-        }
-
-        gettimeofday(&t_end, NULL);
-
-        // Compute per-phase timings
-        double t1 = (t_trim1.tv_sec - t_start.tv_sec) * 1000.0 +
-                    (t_trim1.tv_usec - t_start.tv_usec) * 0.001;
-        double t2 = (t_forest.tv_sec - t_trim1.tv_sec) * 1000.0 +
-                    (t_forest.tv_usec - t_trim1.tv_usec) * 0.001;
-        double t_total = t1 + t2;
-
-        printf(">>>>CUDA_PROFILE: TRIM1=%.2fms SPAN_FOREST_FALLBACK=%.2fms TOTAL=%.2fms\n",
-               t1, t2, t_total);
-        fflush(stdout);
-
-        gettimeofday(&R2, NULL);
-        runtime_ms = (R2.tv_sec - R1.tv_sec) * 1000.0 +
-                     (R2.tv_usec - R1.tv_usec) * 0.001;
-
     } else if (met_algo == 2 || met_algo == 22) {
         // ============================================================
         // Method 2: Trim1 + Global FW-BW + Trim1/2 + WCC + FW-BW DFS
@@ -697,7 +566,7 @@ int main(int argc, char** argv)
 
     } else {
         printf("Running CUDA Method %d: (not implemented)\n", met_algo);
-        printf("Supported methods: 0 (Baseline), 1 (Global FB + FB DFS), 2 (Full pipeline), 12 (Spanning Forest)\n");
+        printf("Supported methods: 0 (Baseline), 1 (Global FB + FB DFS), 2 (Full pipeline)\n");
         cudaFree(d_count);
         if (d_count_trim_spec) cudaFree(d_count_trim_spec);
         dynamic_arrays_free(da);
@@ -770,8 +639,7 @@ int main(int argc, char** argv)
     dynamic_arrays_free(da);
     fprintf(stderr, "[DEBUG] cleanup: finalize_fb_gpu\n");
     finalize_fb_gpu();
-    fprintf(stderr, "[DEBUG] cleanup: finalize_spanning_forest\n");
-    finalize_spanning_forest();
+
     fprintf(stderr, "[DEBUG] cleanup: finalize_WCC\n");
     finalize_WCC();
     fprintf(stderr, "[DEBUG] cleanup: finalize_trim2\n");
