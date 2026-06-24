@@ -11,11 +11,6 @@ int* d_compact_scratch = NULL;  // scratch buffer for compact build
 int* d_compact_prefix  = NULL;  // prefix sum / counter buffer
 int  d_compact_grid_sz = 0;
 
-// Dedicated stream + pinned memory for TRIM1 (avoids ~190μs cudaDeviceSynchronize)
-cudaStream_t trim_stream            = NULL;
-int*         h_pinned_trim_count     = NULL;  // pinned: trim count
-int*         h_pinned_compact_count  = NULL;  // pinned: compact rebuild count
-
 // ======================================================================
 // initialize_trim1()
 // OpenMP: clears trim_targets, reserves space, clears L[] per thread
@@ -37,11 +32,6 @@ void initialize_trim1_full(int num_nodes)
     d_compact_grid_sz = (num_nodes + 255) / 256;
     CUDA_CHECK(cudaMalloc(&d_compact_scratch, num_nodes * sizeof(int)));
     CUDA_CHECK(cudaMalloc(&d_compact_prefix, d_compact_grid_sz * sizeof(int)));
-
-    // Create stream + pinned memory for async operations
-    if (!trim_stream)           CUDA_CHECK(cudaStreamCreate(&trim_stream));
-    if (!h_pinned_trim_count)   CUDA_CHECK(cudaMallocHost(&h_pinned_trim_count, sizeof(int)));
-    if (!h_pinned_compact_count) CUDA_CHECK(cudaMallocHost(&h_pinned_compact_count, sizeof(int)));
 }
 
 void finalize_trim1()
@@ -51,11 +41,6 @@ void finalize_trim1()
     if (d_compact_prefix)  { cudaFree(d_compact_prefix);  d_compact_prefix = NULL; }
     d_trim_targets_count = 0;
     d_trim_targets_capacity = 0;
-
-    // Clean up stream + pinned memory
-    if (h_pinned_trim_count)   { cudaFreeHost(h_pinned_trim_count);   h_pinned_trim_count = NULL; }
-    if (h_pinned_compact_count) { cudaFreeHost(h_pinned_compact_count); h_pinned_compact_count = NULL; }
-    if (trim_stream)           { cudaStreamDestroy(trim_stream);       trim_stream = NULL; }
 }
 
 int* get_compact_trim_targets_device() { return d_trim_targets; }
@@ -291,26 +276,26 @@ int do_global_trim1(GPUState& st, const GPUGraph& g,
     int* d_count, int met_algo, int flag11,
     const DynamicArrays& da, int* d_count_trim_spec)
 {
-    CUDA_CHECK(cudaMemsetAsync(d_count, 0, sizeof(int), trim_stream));
+    CUDA_CHECK(cudaMemset(d_count, 0, sizeof(int)));
     if (d_count_trim_spec)
-        CUDA_CHECK(cudaMemsetAsync(d_count_trim_spec, 0, sizeof(int), trim_stream));
+        CUDA_CHECK(cudaMemset(d_count_trim_spec, 0, sizeof(int)));
 
     int N = g.num_nodes;
     int block_size = 256;
     int grid_size = (N + block_size - 1) / block_size;
 
-    trim_once_node_kernel<<<grid_size, block_size, 0, trim_stream>>>(
+    trim_once_node_kernel<<<grid_size, block_size>>>(
         g.d_begin, g.d_node_idx, g.d_r_begin, g.d_r_node_idx,
         st.d_Color, st.d_SCC, d_count, N,
         met_algo, flag11,
         da.d_scc_list, da.d_vec_scc_count,
         da.d_level_ver, da.d_affect_level,
         d_count_trim_spec);
+    CUDA_CHECK(cudaDeviceSynchronize());
 
-    CUDA_CHECK(cudaMemcpyAsync(h_pinned_trim_count, d_count, sizeof(int),
-                                cudaMemcpyDeviceToHost, trim_stream));
-    CUDA_CHECK(cudaStreamSynchronize(trim_stream));
-    return *h_pinned_trim_count;
+    int count;
+    CUDA_CHECK(cudaMemcpy(&count, d_count, sizeof(int), cudaMemcpyDeviceToHost));
+    return count;
 }
 
 // ======================================================================
@@ -322,14 +307,14 @@ int do_global_trim1_compact(GPUState& st, const GPUGraph& g,
 {
     if (d_trim_targets_count == 0) return 0;
 
-    CUDA_CHECK(cudaMemsetAsync(d_count, 0, sizeof(int), trim_stream));
+    CUDA_CHECK(cudaMemset(d_count, 0, sizeof(int)));
     if (d_count_trim_spec)
-        CUDA_CHECK(cudaMemsetAsync(d_count_trim_spec, 0, sizeof(int), trim_stream));
+        CUDA_CHECK(cudaMemset(d_count_trim_spec, 0, sizeof(int)));
 
     int block_size = 256;
     int grid_size = (d_trim_targets_count + block_size - 1) / block_size;
 
-    trim_once_node_compact_kernel<<<grid_size, block_size, 0, trim_stream>>>(
+    trim_once_node_compact_kernel<<<grid_size, block_size>>>(
         g.d_begin, g.d_node_idx, g.d_r_begin, g.d_r_node_idx,
         st.d_Color, st.d_SCC, d_count,
         d_trim_targets, d_trim_targets_count,
@@ -337,11 +322,11 @@ int do_global_trim1_compact(GPUState& st, const GPUGraph& g,
         da.d_scc_list, da.d_vec_scc_count,
         da.d_level_ver, da.d_affect_level,
         d_count_trim_spec);
+    CUDA_CHECK(cudaDeviceSynchronize());
 
-    CUDA_CHECK(cudaMemcpyAsync(h_pinned_trim_count, d_count, sizeof(int),
-                                cudaMemcpyDeviceToHost, trim_stream));
-    CUDA_CHECK(cudaStreamSynchronize(trim_stream));
-    return *h_pinned_trim_count;
+    int count;
+    CUDA_CHECK(cudaMemcpy(&count, d_count, sizeof(int), cudaMemcpyDeviceToHost));
+    return count;
 }
 
 // ======================================================================
@@ -372,14 +357,14 @@ int do_local_trim1(GPUState& st, const GPUGraph& g,
 {
     if (w->count <= 0) return 0;
 
-    CUDA_CHECK(cudaMemsetAsync(d_count, 0, sizeof(int), trim_stream));
+    CUDA_CHECK(cudaMemset(d_count, 0, sizeof(int)));
     int block_size = 256;
 
     if (w->d_set_nodes != NULL) {
         // --- Mirror: iterate over set nodes ---
         int grid_size = (w->count + block_size - 1) / block_size;
 
-        trim_once_node_local_set_kernel<<<grid_size, block_size, 0, trim_stream>>>(
+        trim_once_node_local_set_kernel<<<grid_size, block_size>>>(
             g.d_begin, g.d_node_idx, g.d_r_begin, g.d_r_node_idx,
             st.d_Color, st.d_SCC, d_count,
             w->d_set_nodes, w->count,
@@ -387,39 +372,43 @@ int do_local_trim1(GPUState& st, const GPUGraph& g,
             da.d_scc_list, da.d_vec_scc_count,
             da.d_level_ver, da.d_affect_level,
             d_count_trim_spec);
+        CUDA_CHECK(cudaDeviceSynchronize());
 
         // --- Mirror: erase changed-color nodes from set ---
-        // Chain compact rebuild on same stream (no intermediate sync needed)
-        CUDA_CHECK(cudaMemsetAsync(d_compact_prefix, 0, sizeof(int), trim_stream));
+        // OpenMP: for(I...) if(G_Color[*I]!=curr_color) set->erase(I);
+        // CUDA: rebuild set keeping only nodes still matching w->color
+        CUDA_CHECK(cudaMemset(d_compact_prefix, 0, sizeof(int)));
         int grid2 = (w->count + block_size - 1) / block_size;
-        build_compact_from_existing_kernel<<<grid2, block_size, 0, trim_stream>>>(
+        build_compact_from_existing_kernel<<<grid2, block_size>>>(
             st.d_Color,
             w->d_set_nodes, w->count,
             w->d_set_nodes, d_compact_prefix);
-        CUDA_CHECK(cudaMemcpyAsync(h_pinned_compact_count, d_compact_prefix, sizeof(int),
-                                    cudaMemcpyDeviceToHost, trim_stream));
-        CUDA_CHECK(cudaStreamSynchronize(trim_stream));
-        w->count = *h_pinned_compact_count;
+        CUDA_CHECK(cudaDeviceSynchronize());
+        CUDA_CHECK(cudaMemcpy(&w->count, d_compact_prefix, sizeof(int),
+                               cudaMemcpyDeviceToHost));
     } else {
         // --- Mirror: no set — scan all nodes matching w->color ---
+        // OpenMP: for(n=0; n<N; n++) if(G_Color[n]==curr_color) trim_once_node(...)
+        // CUDA: build compact set matching w->color, then process it
         if (w->d_set_nodes == NULL && d_trim_targets != NULL) {
-            CUDA_CHECK(cudaMemsetAsync(d_compact_prefix, 0, sizeof(int), trim_stream));
+            // Use d_trim_targets as temporary buffer
+            CUDA_CHECK(cudaMemset(d_compact_prefix, 0, sizeof(int)));
             int grid = (g.num_nodes + block_size - 1) / block_size;
-            build_compact_by_color_kernel<<<grid, block_size, 0, trim_stream>>>(
+            build_compact_by_color_kernel<<<grid, block_size>>>(
                 st.d_Color, d_trim_targets, d_compact_prefix,
                 g.num_nodes, w->color);
-            CUDA_CHECK(cudaMemcpyAsync(h_pinned_compact_count, d_compact_prefix, sizeof(int),
-                                        cudaMemcpyDeviceToHost, trim_stream));
-            CUDA_CHECK(cudaStreamSynchronize(trim_stream));
-            int set_size = *h_pinned_compact_count;
-
-            w->d_set_nodes = d_compact_scratch;
-            w->owns_set = 0;
+            CUDA_CHECK(cudaDeviceSynchronize());
+            
+            int set_size;
+            CUDA_CHECK(cudaMemcpy(&set_size, d_compact_prefix, sizeof(int),
+                                  cudaMemcpyDeviceToHost));
+            w->d_set_nodes = d_compact_scratch;  // use separate scratch buffer (not shared d_trim_targets)
+            w->owns_set = 0;                      // don't own it — shared scratch buffer
             w->count = set_size;
-
+            
             // Now process via the local set kernel
             int grid2 = (set_size + block_size - 1) / block_size;
-            trim_once_node_local_set_kernel<<<grid2, block_size, 0, trim_stream>>>(
+            trim_once_node_local_set_kernel<<<grid2, block_size>>>(
                 g.d_begin, g.d_node_idx, g.d_r_begin, g.d_r_node_idx,
                 st.d_Color, st.d_SCC, d_count,
                 w->d_set_nodes, set_size,
@@ -427,24 +416,21 @@ int do_local_trim1(GPUState& st, const GPUGraph& g,
                 da.d_scc_list, da.d_vec_scc_count,
                 da.d_level_ver, da.d_affect_level,
                 d_count_trim_spec);
-
+            CUDA_CHECK(cudaDeviceSynchronize());
+            
             // Rebuild set: keep only nodes still matching color
-            CUDA_CHECK(cudaMemsetAsync(d_compact_prefix, 0, sizeof(int), trim_stream));
-            build_compact_from_existing_kernel<<<grid2, block_size, 0, trim_stream>>>(
+            CUDA_CHECK(cudaMemset(d_compact_prefix, 0, sizeof(int)));
+            build_compact_from_existing_kernel<<<grid2, block_size>>>(
                 st.d_Color, w->d_set_nodes, set_size,
                 w->d_set_nodes, d_compact_prefix);
-            CUDA_CHECK(cudaMemcpyAsync(h_pinned_compact_count, d_compact_prefix, sizeof(int),
-                                        cudaMemcpyDeviceToHost, trim_stream));
-            CUDA_CHECK(cudaStreamSynchronize(trim_stream));
-            w->count = *h_pinned_compact_count;
+            CUDA_CHECK(cudaDeviceSynchronize());
+            CUDA_CHECK(cudaMemcpy(&w->count, d_compact_prefix, sizeof(int),
+                                  cudaMemcpyDeviceToHost));
         }
     }
 
-    // Read trim count
-    CUDA_CHECK(cudaMemcpyAsync(h_pinned_trim_count, d_count, sizeof(int),
-                                cudaMemcpyDeviceToHost, trim_stream));
-    CUDA_CHECK(cudaStreamSynchronize(trim_stream));
-    int count = *h_pinned_trim_count;
+    int count;
+    CUDA_CHECK(cudaMemcpy(&count, d_count, sizeof(int), cudaMemcpyDeviceToHost));
     w->count -= count;
     return count;
 }
@@ -578,32 +564,30 @@ __global__ void build_compact_from_existing_kernel(
 
 static void create_trim1_compact_1(GPUState& st, const GPUGraph& g)
 {
-    CUDA_CHECK(cudaMemsetAsync(d_compact_prefix, 0, sizeof(int), trim_stream));
+    CUDA_CHECK(cudaMemset(d_compact_prefix, 0, sizeof(int)));
     int N = g.num_nodes;
     int block_size = 256;
     int grid_size = (N + block_size - 1) / block_size;
-    build_compact_from_all_kernel<<<grid_size, block_size, 0, trim_stream>>>(
+    build_compact_from_all_kernel<<<grid_size, block_size>>>(
         st.d_Color, d_trim_targets, d_compact_prefix, N);
-    CUDA_CHECK(cudaMemcpyAsync(h_pinned_compact_count, d_compact_prefix, sizeof(int),
-                                cudaMemcpyDeviceToHost, trim_stream));
-    CUDA_CHECK(cudaStreamSynchronize(trim_stream));
-    d_trim_targets_count = *h_pinned_compact_count;
+    CUDA_CHECK(cudaDeviceSynchronize());
+    CUDA_CHECK(cudaMemcpy(&d_trim_targets_count, d_compact_prefix,
+                          sizeof(int), cudaMemcpyDeviceToHost));
 }
 
 static void create_trim1_compact_1b(GPUState& st, const GPUGraph& g)
 {
-    CUDA_CHECK(cudaMemsetAsync(d_compact_prefix, 0, sizeof(int), trim_stream));
+    CUDA_CHECK(cudaMemset(d_compact_prefix, 0, sizeof(int)));
     int num_src = d_trim_targets_count;
     int block_size = 256;
     int grid_size = (num_src + block_size - 1) / block_size;
-    build_compact_from_existing_kernel<<<grid_size, block_size, 0, trim_stream>>>(
+    build_compact_from_existing_kernel<<<grid_size, block_size>>>(
         st.d_Color,
         d_trim_targets, num_src,
         d_trim_targets, d_compact_prefix);
-    CUDA_CHECK(cudaMemcpyAsync(h_pinned_compact_count, d_compact_prefix, sizeof(int),
-                                cudaMemcpyDeviceToHost, trim_stream));
-    CUDA_CHECK(cudaStreamSynchronize(trim_stream));
-    d_trim_targets_count = *h_pinned_compact_count;
+    CUDA_CHECK(cudaDeviceSynchronize());
+    CUDA_CHECK(cudaMemcpy(&d_trim_targets_count, d_compact_prefix,
+                          sizeof(int), cudaMemcpyDeviceToHost));
 }
 
 static void create_trim1_compact_2()
