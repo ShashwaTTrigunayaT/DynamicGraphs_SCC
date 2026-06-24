@@ -231,7 +231,7 @@ __global__ void fw_bfs_level_kernel(
     int stride = blockDim.x * gridDim.x;
 
     // Per-thread staging buffer (STAGE_SIZE=4 fits in registers, no local memory spill)
-    const int STAGE_SIZE = 4;
+    const int STAGE_SIZE = 16;
     int staged[STAGE_SIZE];
     int staged_cnt = 0;
 
@@ -355,8 +355,8 @@ __global__ void bw_bfs_level_kernel(
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     int stride = blockDim.x * gridDim.x;
 
-    // Per-thread staging buffer (STAGE_SIZE=4 fits in registers)
-    const int STAGE_SIZE = 4;
+    // Per-thread staging buffer (STAGE_SIZE=16 fits in registers: 16*4=64 bytes)
+    const int STAGE_SIZE = 16;
     int staged[STAGE_SIZE];
     int staged_cnt = 0;
     int local_scc = 0;
