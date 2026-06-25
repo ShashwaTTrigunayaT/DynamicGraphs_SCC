@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Complete Dataset Comparison — DynamicGraphs SCC</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: 'Segoe UI', Arial, sans-serif;
+    font-size: 11pt;
+    background: #050d1a;
+    min-height: 100vh;
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    padding: 48px 24px;
+  }
+
+  .card {
+    background: #0a1628;
+    border: 1px solid #1a3a5c;
+    border-radius: 14px;
+    box-shadow:
+      0 0 0 1px rgba(56, 139, 253, 0.08),
+      0 8px 40px rgba(0, 0, 0, 0.6),
+      0 2px 8px rgba(0, 0, 0, 0.4);
+    padding: 40px 40px 32px 40px;
+    width: 100%;
+    max-width: 1000px;
+  }
+
+  /* ── Header ── */
+  .card-header {
+    margin-bottom: 28px;
+    padding-bottom: 20px;
+    border-bottom: 1px solid #1a3a5c;
+  }
+
+  .card-header h1 {
+    font-size: 17pt;
+    color: #e8f0fe;
+    font-weight: 700;
+    letter-spacing: 0.2px;
+    margin-bottom: 8px;
+  }
+
+  .card-header h1 span {
+    color: #4d9fff;
+  }
+
+  .card-header p {
+    font-size: 9pt;
+    color: #4a6a8a;
+    letter-spacing: 0.3px;
+  }
+
+  .card-header p .sep { color: #1a3a5c; margin: 0 6px; }
+
+  /* ── Table ── */
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    font-size: 10pt;
+  }
+
+  thead tr {
+    background: linear-gradient(90deg, #0d2444 0%, #0f2d56 100%);
+    border-bottom: 2px solid #1e5aab;
+  }
+
+  thead th {
+    padding: 13px 16px;
+    font-weight: 600;
+    text-align: left;
+    color: #7eb8ff;
+    font-size: 8.5pt;
+    letter-spacing: 0.6px;
+    text-transform: uppercase;
+    white-space: nowrap;
+  }
+
+  thead th:first-child { border-radius: 8px 0 0 0; padding-left: 20px; }
+  thead th:last-child  { border-radius: 0 8px 0 0; }
+
+  tbody tr {
+    border-bottom: 1px solid #0f1f35;
+    transition: background 0.15s;
+  }
+
+  tbody tr:last-child { border-bottom: none; }
+
+  tbody tr:nth-child(odd)  { background: #0a1628; }
+  tbody tr:nth-child(even) { background: #081422; }
+
+  tbody tr:hover { background: #0d2040 !important; }
+
+  /* confirmed ALGO_TIME rows */
+  tbody tr.highlight { background: #081e36 !important; border-left: 3px solid #1e6fd4; }
+  tbody tr.highlight:hover { background: #0d2a48 !important; }
+
+  tbody td {
+    padding: 12px 16px;
+    color: #c8d8ee;
+    vertical-align: middle;
+  }
+
+  tbody td:first-child { padding-left: 20px; }
+
+  td.num {
+    color: #2a4a6a;
+    font-size: 9pt;
+    font-weight: 700;
+    text-align: center;
+    width: 30px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  td.dataset {
+    font-weight: 700;
+    color: #ddeeff;
+    font-family: 'Consolas', 'Courier New', monospace;
+    font-size: 9.5pt;
+    letter-spacing: 0.1px;
+  }
+
+  td.edges {
+    color: #5a7a9a;
+    font-variant-numeric: tabular-nums;
+  }
+
+  td.timing {
+    font-variant-numeric: tabular-nums;
+    color: #8aafd0;
+  }
+
+  td.timing strong {
+    color: #a8d8ff;
+    font-weight: 700;
+  }
+
+  td.tbd {
+    color: #2a4a6a;
+    font-style: italic;
+    font-size: 9pt;
+  }
+
+  .badge {
+    display: inline-block;
+    padding: 3px 11px;
+    border-radius: 20px;
+    font-size: 8.5pt;
+    font-weight: 700;
+    white-space: nowrap;
+    letter-spacing: 0.2px;
+  }
+
+  .badge-green {
+    background: rgba(16, 185, 129, 0.12);
+    color: #34d399;
+    border: 1px solid rgba(52, 211, 153, 0.25);
+  }
+
+  .badge-dash {
+    background: rgba(255,255,255, 0.04);
+    color: #2a4a6a;
+    font-weight: 400;
+    border: 1px solid #0f2030;
+  }
+
+  .scc-check {
+    color: #34d399;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    font-size: 9.5pt;
+  }
+
+  /* ── Footer ── */
+  .footer-note {
+    margin-top: 22px;
+    font-size: 8pt;
+    color: #2a4a6a;
+    border-top: 1px solid #0f1f35;
+    padding-top: 14px;
+    line-height: 1.7;
+  }
+
+  .footer-note strong { color: #3a6a9a; }
+
+  .footer-note code {
+    font-family: 'Consolas', monospace;
+    background: #050d1a;
+    color: #4d9fff;
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-size: 7.5pt;
+    border: 1px solid #0f2030;
+  }
+
+  /* accent line above header col */
+  .accentbar {
+    display: flex;
+    gap: 4px;
+    margin-bottom: 18px;
+  }
+  .accentbar span {
+    height: 3px;
+    border-radius: 2px;
+  }
+  .accentbar .a1 { background: #1e5aab; width: 32px; }
+  .accentbar .a2 { background: #1e8adb; width: 16px; }
+  .accentbar .a3 { background: #1ebdff; width: 8px; }
+
+  /* ── Table labels ── */
+  .table-label {
+    font-size: 8.5pt;
+    font-weight: 700;
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+    color: #4a7aaa;
+    margin-bottom: 10px;
+  }
+
+  .table-label-2 {
+    margin-top: 36px;
+    color: #4daacc;
+    border-top: 1px solid #0f1f35;
+    padding-top: 28px;
+  }
+
+  @media (max-width: 700px) {
+    .card { padding: 20px 10px; }
+    thead th, tbody td { padding: 9px 8px; font-size: 8.5pt; }
+  }
+</style>
+</head>
+<body>
+
+<div class="card">
+  <div class="accentbar"><span class="a1"></span><span class="a2"></span><span class="a3"></span></div>
+  <div class="card-header">
+    <h1>Complete Dataset <span>Comparison</span></h1>
+    <p>
+      DynamicGraphs SCC<span class="sep">|</span>CUDA GPU Acceleration
+      <span class="sep">|</span>GPU: NVIDIA L40S 48GB
+      <span class="sep">|</span>OpenMP: 72 threads
+      <span class="sep">|</span>Updated Jun 25, 2026
+    </p>
+  </div>
+
+  <!-- TABLE 1 -->
+  <!-- TABLE 1 -->
+  <div class="table-label">Table 1</div>
+
+  <table>
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>Dataset</th>
+        <th>Edges</th>
+        <th>OpenMP</th>
+        <th>CUDA Algorithm Time</th>
+        <th>vs OpenMP</th>
+        <th>CUDA Runtime</th>
+        <th>Transfer Time</th>
+        <th>SCCs</th>
+      </tr>
+    </thead>
+    <tbody>
+
+      <tr class="highlight">
+        <td class="num">1</td>
+        <td class="dataset">soc-Epinions1</td>
+        <td class="edges">509K</td>
+        <td class="timing">4.87ms</td>
+        <td class="timing"><strong>3.46ms</strong></td>
+        <td><span class="badge badge-green">1.4× faster</span></td>
+        <td class="timing">3.64ms</td>
+        <td class="timing">0.18ms</td>
+        <td class="scc-check">42,185 ✅</td>
+      </tr>
+
+      <tr class="highlight">
+        <td class="num">2</td>
+        <td class="dataset">web-Stanford</td>
+        <td class="edges">2.3M</td>
+        <td class="timing">69.65ms</td>
+        <td class="timing"><strong>31.08ms</strong></td>
+        <td><span class="badge badge-green">2.2× faster</span></td>
+        <td class="timing">32.25ms</td>
+        <td class="timing">1.18ms</td>
+        <td class="scc-check">29,876 ✅</td>
+      </tr>
+
+      <tr class="highlight">
+        <td class="num">3</td>
+        <td class="dataset">soc-Pokec</td>
+        <td class="edges">30.6M</td>
+        <td class="timing">17.53ms</td>
+        <td class="timing"><strong>10.50ms</strong></td>
+        <td><span class="badge badge-green">1.7× faster</span></td>
+        <td class="timing">10.69ms</td>
+        <td class="timing">0.20ms</td>
+        <td class="scc-check">325,892 ✅</td>
+      </tr>
+
+      <tr class="highlight">
+        <td class="num">4</td>
+        <td class="dataset">soc-LiveJournal1</td>
+        <td class="edges">68.5M</td>
+        <td class="timing">44.09ms</td>
+        <td class="timing"><strong>23.63ms</strong></td>
+        <td><span class="badge badge-green">1.9× faster</span></td>
+        <td class="timing"><strong>23.99ms</strong></td>
+        <td class="timing">0.36ms</td>
+        <td class="scc-check">971,232 ✅</td>
+      </tr>
+
+      <tr class="highlight">
+        <td class="num">5</td>
+        <td class="dataset">ljournal-2008</td>
+        <td class="edges">78.0M</td>
+        <td class="timing">50.82ms</td>
+        <td class="timing"><strong>28.34ms</strong></td>
+        <td><span class="badge badge-green">1.8× faster</span></td>
+        <td class="timing"><strong>28.69ms</strong></td>
+        <td class="timing">0.35ms</td>
+        <td class="scc-check">1,119,097 ✅</td>
+      </tr>
+
+    </tbody>
+  </table>
+
+  <!-- TABLE 2 -->
+  <div class="table-label table-label-2">Table 2 &mdash; High Diameter Graphs</div>
+
+  <table>
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>Dataset</th>
+        <th>Edges</th>
+        <th>OpenMP</th>
+        <th>CUDA Algorithm Time</th>
+        <th>vs OpenMP</th>
+        <th>CUDA Runtime</th>
+        <th>Transfer Time</th>
+        <th>SCCs</th>
+      </tr>
+    </thead>
+    <tbody>
+
+      <tr class="highlight">
+        <td class="num">1</td>
+        <td class="dataset">wiki-Talk</td>
+        <td class="edges">5.0M</td>
+        <td class="timing">13.68ms</td>
+        <td class="timing"><strong>5.35ms</strong></td>
+        <td><span class="badge badge-green">2.6× faster</span></td>
+        <td class="timing">5.49ms</td>
+        <td class="timing">0.14ms</td>
+        <td class="scc-check">2,281,879 ✅</td>
+      </tr>
+
+      <tr class="highlight">
+        <td class="num">2</td>
+        <td class="dataset">wikipedia-20070206</td>
+        <td class="edges">45.0M</td>
+        <td class="timing">52.90ms</td>
+        <td class="timing"><strong>41.87ms</strong></td>
+        <td><span class="badge badge-green">1.3× faster</span></td>
+        <td class="timing">42.45ms</td>
+        <td class="timing">0.58ms</td>
+        <td class="scc-check">1,203,340 ✅</td>
+      </tr>
+
+    </tbody>
+  </table>
+
+  <div class="footer-note">
+    <strong>Algorithm Time</strong> = CUDA_PROFILE_TOTAL &minus; H2D/D2H transfer time &mdash; fair comparison against OpenMP pure compute.&nbsp;&nbsp;
+    <strong>CUDA Runtime</strong> = full wall-clock time including transfers.&nbsp;&nbsp;
+    Highlighted rows have confirmed Algorithm Time data.&nbsp;&nbsp;
+    All 7 comparison datasets now have confirmed ALGO_TIME data. GPU-only FB eliminated D2H→H2D round-trips — transfers dropped to &lt;1.2ms on all graphs.
+  </div>
+</div>
+
+</body>
+</html>
