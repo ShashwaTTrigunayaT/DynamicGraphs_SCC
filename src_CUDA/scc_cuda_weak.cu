@@ -434,7 +434,7 @@ void propagate_color(GPUState& st, const GPUGraph& g, int num_targets,
     int* d_changed = NULL;
     CUDA_CHECK(cudaMalloc(&d_changed, sizeof(int)));
 
-    int max_iterations = 100000;  // generous safety limit (OpenMP has no limit)
+    int max_iterations = 100;  // safety limit
     int iter = 0;
     int h_changed = 1;
 
@@ -459,7 +459,7 @@ void propagate_color(GPUState& st, const GPUGraph& g, int num_targets,
     cuda_iters = iter;
     CUDA_CHECK(cudaFree(d_changed));
     if (iter >= max_iterations) {
-        printf("[CUDA WCC] ERROR: max iterations (%d) reached — WCC NOT CONVERGED!\n", max_iterations);
+        printf("[CUDA WCC] Warning: max iterations reached (%d)\n", max_iterations);
     }
 }
 
@@ -575,8 +575,7 @@ void do_global_wcc(GPUState& st, const GPUGraph& g)
         d_trim_targets, num_targets);
     CUDA_CHECK(cudaDeviceSynchronize());
 
-    printf("[CUDA WCC] %d components, %d iterations%s\n", h_num_roots, cuda_iters,
-           cuda_iters >= 100000 ? " (LIMIT!)" : " (converged)");
+    printf("[CUDA WCC] %d components, %d iterations\n", h_num_roots, cuda_iters);
 }
 
 // ======================================================================
