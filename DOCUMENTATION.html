@@ -256,10 +256,22 @@ Input Graph
     <td>1,119,097 ✅</td>
     <td><strong>CUDA 🏆</strong></td>
   </tr>
+  <tr>
+    <td><strong>9</strong></td>
+    <td><strong>indochina-2004</strong></td>
+    <td><strong>194M</strong></td>
+    <td>3,278.76ms</td>
+    <td><strong>1,052.55ms</strong></td>
+    <td><span class="badge green"><strong>3.1× faster 🚀</strong></span></td>
+    <td><strong>1,056.25ms</strong></td>
+    <td>3.71ms</td>
+    <td><span class="badge yellow">1,739,373 ⚠️</span></td>
+    <td><strong>CUDA 🏆</strong></td>
+  </tr>
 </table>
 
 <div class="box" style="background:#d1fae5;border-color:#065f46;">
-<strong>🎯 Key Milestone:</strong> CUDA beats OpenMP on <strong>7 of 8 datasets</strong> in ALGO_TIME (p2p-Gnutella31 is too small for GPU to help). GPU-only FB eliminated all D2H→H2D round-trips — H2D/D2H dropped from ~40ms to 0.35ms on ljournal-2008! All 8 datasets have ALGO_TIME data.
+<strong>🎯 Key Milestone:</strong> CUDA beats OpenMP on <strong>8 of 9 datasets</strong> in ALGO_TIME (p2p-Gnutella31 is too small for GPU to help). GPU-only FB eliminated all D2H→H2D round-trips — H2D/D2H dropped from ~40ms to 0.35ms on ljournal-2008! <strong>indochina-2004 (194M edges, 7.4M nodes): 3.1× faster 🚀</strong> — biggest speedup yet. SCC count ~9.7K off from OpenMP, under investigation.
 </div>
 
 <h3>nsys Kernel Breakdown (from cuda_gpu_kern_sum) — Reference Only</h3>
@@ -317,6 +329,22 @@ Input Graph
 <tr><td><strong>SCC Count</strong></td><td>1,119,097</td><td>1,119,097</td><td><span class="badge green">Match</span></td></tr>
 </table>
 <p><em>FB phase now has no D2H→H2D round-trips (GPU-only). Total H2D/D2H = 0.35ms (was 40.40ms before the optimization).</em></p>
+
+<h3>Per-Phase Table (indochina-2004 — 194M edges, 7.4M nodes)</h3>
+<table>
+<tr><th>Phase</th><th>OpenMP</th><th>CUDA (profile)</th><th>Bottleneck?</th></tr>
+<tr><td>TRIM1</td><td><strong>98.6ms</strong></td><td>196.7ms</td><td><span class="badge red">🔴 2× slower — full 7.4M grid launch overhead</span></td></tr>
+<tr><td>COMPACT</td><td>—</td><td>0.13ms</td><td><span class="badge green">✅ Minimal</span></td></tr>
+<tr><td>GLOBAL_BFS</td><td>64.3ms</td><td><strong>28.3ms</strong></td><td><span class="badge green">2.3× faster 🚀</span></td></tr>
+<tr><td>TRIM12</td><td><strong>17.9ms</strong></td><td>315.7ms</td><td><span class="badge red">🔴🔴 17.6× slower — worst bottleneck</span></td></tr>
+<tr><td>WCC</td><td><strong>657.0ms</strong></td><td><strong>410.6ms</strong></td><td><span class="badge yellow">1.6× faster (209 iters, converged ✓)</span></td></tr>
+<tr style="background:#d1fae5;"><td><strong>FB</strong></td><td><strong>2,440.9ms</strong></td><td><strong>104.9ms</strong></td><td><span class="badge green">23.3× faster 🚀🚀</span></td></tr>
+<tr style="font-weight:600;"><td><strong>TOTAL (profile)</strong></td><td><strong>3,278.8ms</strong></td><td><strong>1,056.3ms</strong></td><td><span class="badge green"><strong>3.1× faster 🚀</strong></span></td></tr>
+<tr style="font-weight:600;background:#d1fae5;"><td><strong>ALGO_TIME</strong></td><td>3,278.8ms</td><td><strong>1,052.55ms</strong></td><td><span class="badge green"><strong>3.1× faster</strong></span></td></tr>
+<tr><td><strong>WCC iterations</strong></td><td>Converged</td><td>209 (converged)</td><td><span class="badge green">Was 100 (limit!) before fix</span></td></tr>
+<tr><td><strong>SCC Count</strong></td><td>1,749,051</td><td>1,739,373</td><td><span class="badge yellow">⚠️ ~9.7K gap — under investigation</span></td></tr>
+</table>
+<p><em>Bottlenecks: TRIM12 (316ms — 17.6× OpenMP) and TRIM1 (197ms — 2× OpenMP) dominate CUDA time. WCC runs 209 iterations to converge (was stopping at 100). FB is 23× faster 🚀. Total H2D/D2H = 3.71ms (167 large FB fallback components + metadata).</em></p>
 
 <h2 id="commits">📜 Commit History (Newest)</h2>
 
@@ -377,6 +405,12 @@ Input Graph
 </ol>
 <p><strong>Result:</strong> ljournal-2008 H2D/D2H: 40.40ms → 0.35ms (-99%). TOTAL: 69.26ms → 28.69ms. soc-LiveJournal1 TOTAL: ~57ms → 23.99ms.</p>
 
+<h3>🚀 Attempt 8: WCC Iteration Limit Fix (Jun 25) ✅ <strong>WCC now converges naturally</strong></h3>
+<p><strong>Problem:</strong> CUDA WCC had a hard limit of 100 iterations. On indochina-2004 (194M edges), it stopped before convergence — WCC components remained split, causing FB to produce different SCC assignments. OpenMP has no iteration limit (runs until <code>finished == true</code>).</p>
+<p><strong>Fix:</strong> <code>max_iterations</code> 100 → 100,000 in <code>propagate_color()</code>. Added <code>(converged)</code>/<code>(LIMIT!)</code> indicator to output line.</p>
+<p><strong>Result:</strong> indochina-2004 WCC: 209 iterations, converged ✓. WCC time: 226ms→410ms (expected — more iterations). SCC count improved slightly (1,739,738→1,739,373) but ~9.7K gap to OpenMP remains — root cause is elsewhere (likely TRIM12 or FB fallback).</p>
+<p><em>Note: This fix was originally attempted (100→500) and reverted on Jun 24 because it didn't help the smaller graphs. But for indochina-2004, 100 iterations truly wasn't enough — 209 were needed for convergence.</em></p>
+
 <h3>❌ Tried and Reverted (Jun 24)</h3>
 <table>
 <tr><th>#</th><th>Optimization</th><th>Why Failed</th></tr>
@@ -414,7 +448,7 @@ Input Graph
 </div>
 
 <div class="box" style="border-left:4px solid #6b7280;">
-<div class="box-title">✅ ALGO_TIME — All 8 Datasets Complete</div>
+<div class="box-title">✅ ALGO_TIME — All 9 Datasets Complete</div>
 <p>ALGO_TIME printed by every run via <code>std::chrono</code> timers. Formula: <strong>ALGO_TIME = CUDA_PROFILE_TOTAL - H2D/D2H</strong>.</p>
 <table>
 <tr><th>Dataset</th><th>ALGO_TIME</th><th>vs OpenMP</th></tr>
@@ -426,13 +460,16 @@ Input Graph
 <tr><td>wikipedia-20070206</td><td><strong>41.87ms</strong></td><td><span class="badge green">1.3×</span></td></tr>
 <tr><td>soc-LiveJournal1</td><td><strong>23.63ms</strong></td><td><span class="badge green">1.9×</span></td></tr>
 <tr><td>ljournal-2008</td><td><strong>28.34ms</strong></td><td><span class="badge green">1.8× 🚀</span></td></tr>
+<tr style="font-weight:600;background:#d1fae5;"><td><strong>indochina-2004</strong></td><td><strong>1,052.55ms</strong></td><td><span class="badge green"><strong>3.1× 🚀🚀</strong></span></td></tr>
 </table>
 </div>
 
 <div class="box" style="border-left:4px solid #6b7280;">
 <div class="box-title">✅ What's Working</div>
-<p>✅ 7/8 datasets beat OpenMP in ALGO_TIME (p2p-Gnutella31 too small)<br>
+<p>✅ 8/9 datasets beat OpenMP in ALGO_TIME (p2p-Gnutella31 too small)<br>
+✅ <strong>indochina-2004 (194M edges): 3.1× faster</strong> — biggest speedup yet<br>
 ✅ GPU-only FB eliminates D2H→H2D round-trips<br>
+✅ WCC iteration limit fixed (100→100000), now converges naturally<br>
 ✅ ALGO_TIME printed inline by every run (no nsys needed)<br>
 ✅ std::chrono timers (zero driver overhead)<br>
 ✅ nsys profiling still available for per-kernel breakdowns</p>
@@ -455,6 +492,21 @@ Input Graph
 <tr><td>cudaFree + Host alloc</td><td>0.13ms</td><td>&lt;1%</td><td>Cleanup</td></tr>
 <tr style="font-weight:600;"><td><strong>→ CUDA Runtime (inline)</strong></td><td><strong>43.74ms</strong></td><td><strong>100%</strong></td><td><strong>Wall-clock total</strong></td></tr>
 </table>
+
+<h4>soc-LiveJournal1 — nsys Kernel Breakdown</h4>
+<table>
+<tr><th>Kernel</th><th>Time</th><th>Instances</th><th>Avg</th></tr>
+<tr><td>bw_bfs_level_kernel</td><td>6.31ms</td><td>13</td><td>485μs</td></tr>
+<tr><td>fw_bfs_level_kernel</td><td>6.07ms</td><td>15</td><td>405μs</td></tr>
+<tr><td>trim_once_node_compact_kernel</td><td>4.25ms</td><td>17</td><td>250μs</td></tr>
+<tr><td>gpu_fb_batch_kernel</td><td>0.80ms</td><td>6</td><td>133μs</td></tr>
+<tr><td>trim_once_node_kernel</td><td>0.40ms</td><td>1</td><td>397μs</td></tr>
+<tr><td>All other kernels</td><td>~1.0ms</td><td>25</td><td>—</td></tr>
+<tr style="font-weight:600;"><td><strong>TOTAL GPU kernel</strong></td><td><strong>18.3ms</strong></td><td>77</td><td></td></tr>
+</table>
+<p><strong>H2D:</strong> 37 calls, 47.7ms total (including one 20.9ms for graph upload = 312MB CSR)<br>
+<strong>D2H:</strong> 82 calls, 1.5ms total (19.4MB)<br>
+<strong>ALGO_TIME = 23.76ms</strong> (vs CUDA_PROFILE 24.23ms — only 0.47ms transfer overhead on hot path)</p>
 
 <h4>wikipedia-20070206 — Full nsys Breakdown</h4>
 <table>
@@ -545,9 +597,19 @@ nsys profile -o &lt;name&gt; --stats=true ./src_CUDA/scc_cuda &lt;graph_file&gt;
 <p>Uses non-atomic <code>_cuda_color_used++</code>.</p>
 </div>
 
-<div class="box no-break" style="border-left:4px solid #6b7280;">
-<div class="box-title">⚪ Issue 6: ALGO_TIME numbers need to be collected</div>
+<div class="box no-break" style="border-left:4px solid #f59e0b;">
+<div class="box-title">🟡 Issue 6: ALGO_TIME numbers need to be collected</div>
 <p>ALGO_TIME is now printed inline by every run. Run each of the 8 datasets and fill in the results table with the ALGO_TIME values.</p>
+</div>
+
+<div class="box no-break" style="border-left:4px solid #dc2626;">
+<div class="box-title">🔴 Issue 7: indochina-2004 SCC Count ~9.7K Off</div>
+<p>CUDA reports 1,739,373 SCCs vs OpenMP's 1,749,051 on indochina-2004. WCC convergence fix (100→100K iters) didn't resolve it. Suspect: TRIM12 (316ms — 17.6× OpenMP) or FB fallback path for 167 large components. Under investigation.</p>
+</div>
+
+<div class="box no-break" style="border-left:4px solid #f59e0b;">
+<div class="box-title">🟡 Issue 8: TRIM12 17.6× Slower than OpenMP on indochina-2004</div>
+<p>316ms vs 17.9ms. The compact list kernel over 7.4M nodes with many offline nodes (SCC_FOUND) causes excessive thread divergence. Likely includes unnecessary iterations scanning already-resolved nodes.</p>
 </div>
 
 <h2 id="quickref">📌 Quick Reference</h2>

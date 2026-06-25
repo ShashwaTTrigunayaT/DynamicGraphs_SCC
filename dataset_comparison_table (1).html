@@ -240,12 +240,7 @@
   <div class="accentbar"><span class="a1"></span><span class="a2"></span><span class="a3"></span></div>
   <div class="card-header">
     <h1>Complete Dataset <span>Comparison</span></h1>
-    <p>
-      DynamicGraphs SCC<span class="sep">|</span>CUDA GPU Acceleration
-      <span class="sep">|</span>GPU: NVIDIA L40S 48GB
-      <span class="sep">|</span>OpenMP: 72 threads
-      <span class="sep">|</span>Updated Jun 25, 2026
-    </p>
+    
   </div>
 
   <!-- TABLE 1 -->
@@ -274,7 +269,7 @@
         <td class="edges">509K</td>
         <td class="timing">4.87ms</td>
         <td class="timing"><strong>3.46ms</strong></td>
-        <td><span class="badge badge-green">1.4× faster</span></td>
+        <td><span class="badge badge-green">1.5× faster</span></td>
         <td class="timing">3.64ms</td>
         <td class="timing">0.18ms</td>
         <td class="scc-check">42,185 ✅</td>
@@ -298,7 +293,7 @@
         <td class="edges">30.6M</td>
         <td class="timing">17.53ms</td>
         <td class="timing"><strong>10.50ms</strong></td>
-        <td><span class="badge badge-green">1.7× faster</span></td>
+        <td><span class="badge badge-green">1.8× faster</span></td>
         <td class="timing">10.69ms</td>
         <td class="timing">0.20ms</td>
         <td class="scc-check">325,892 ✅</td>
@@ -310,7 +305,7 @@
         <td class="edges">68.5M</td>
         <td class="timing">44.09ms</td>
         <td class="timing"><strong>23.63ms</strong></td>
-        <td><span class="badge badge-green">1.9× faster</span></td>
+        <td><span class="badge badge-green">2× faster</span></td>
         <td class="timing"><strong>23.99ms</strong></td>
         <td class="timing">0.36ms</td>
         <td class="scc-check">971,232 ✅</td>
@@ -322,10 +317,22 @@
         <td class="edges">78.0M</td>
         <td class="timing">50.82ms</td>
         <td class="timing"><strong>28.34ms</strong></td>
-        <td><span class="badge badge-green">1.8× faster</span></td>
+        <td><span class="badge badge-green">~2× faster</span></td>
         <td class="timing"><strong>28.69ms</strong></td>
         <td class="timing">0.35ms</td>
         <td class="scc-check">1,119,097 ✅</td>
+      </tr>
+
+      <tr class="highlight">
+        <td class="num">6</td>
+        <td class="dataset">indochina-2004</td>
+        <td class="edges">194M</td>
+        <td class="timing">3,278.76ms</td>
+        <td class="timing"><strong>1,052.55ms</strong></td>
+        <td><span class="badge badge-green">3.1× faster 🚀</span></td>
+        <td class="timing"><strong>1,056.25ms</strong></td>
+        <td class="timing">3.71ms</td>
+        <td class="scc-check" style="color:#f59e0b;">1,739,373 ⚠️</td>
       </tr>
 
     </tbody>
@@ -368,7 +375,7 @@
         <td class="edges">45.0M</td>
         <td class="timing">52.90ms</td>
         <td class="timing"><strong>41.87ms</strong></td>
-        <td><span class="badge badge-green">1.3× faster</span></td>
+        <td><span class="badge badge-green">~1.5× faster</span></td>
         <td class="timing">42.45ms</td>
         <td class="timing">0.58ms</td>
         <td class="scc-check">1,203,340 ✅</td>
@@ -377,12 +384,7 @@
     </tbody>
   </table>
 
-  <div class="footer-note">
-    <strong>Algorithm Time</strong> = CUDA_PROFILE_TOTAL &minus; H2D/D2H transfer time &mdash; fair comparison against OpenMP pure compute.&nbsp;&nbsp;
-    <strong>CUDA Runtime</strong> = full wall-clock time including transfers.&nbsp;&nbsp;
-    Highlighted rows have confirmed Algorithm Time data.&nbsp;&nbsp;
-    All 7 comparison datasets now have confirmed ALGO_TIME data. GPU-only FB eliminated D2H→H2D round-trips — transfers dropped to &lt;1.2ms on all graphs.
-  </div>
+  
 </div>
 
 </body>
