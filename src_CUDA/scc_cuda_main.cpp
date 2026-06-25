@@ -330,6 +330,7 @@ int main(int argc, char** argv)
     // ---------------------------------------------------------------
     struct timeval R1, R2;
     double runtime_ms = 0.0;
+    double cuda_profile_total_ms = 0.0;
     int trimmed = 0;
 
     if (met_algo == 0) {
@@ -572,6 +573,9 @@ int main(int argc, char** argv)
         fprintf(stderr, "[CUDA_PROFILE_STDERR] TRIM1=%.2f COMPACT=%.2f GLOBAL_BFS=%.2f TRIM12=%.2f WCC=%.2f FB=%.2f TOTAL=%.2f\n",
                 t1, t2, t3, t4, t5, t6, t_total);
 
+        // Save CUDA_PROFILE total for ALGO_TIME computation below
+        cuda_profile_total_ms = t_total;
+
         // Original timing (for total)
         gettimeofday(&R2, NULL);
         runtime_ms = (R2.tv_sec - R1.tv_sec) * 1000.0 +
@@ -590,13 +594,14 @@ int main(int argc, char** argv)
         graph_free(gpuG);
         return 0;
     }
-    // Compute and print Algorithm Time: CUDA_RUNTIME - H2D/D2H transfer time
-    double algo_time = (runtime_ms + insert_runtime) - g_algo_memcpy_ms;
+    // Compute and print Algorithm Time: CUDA_PROFILE_TOTAL - H2D/D2H transfer time
+    // (uses CUDA_PROFILE total, not separate gettimeofday, for consistency)
+    double algo_time = cuda_profile_total_ms - g_algo_memcpy_ms;
     if (algo_time < 0) algo_time = 0;
-    printf(">>>>ALGO_TIME: %.2fms (CUDA runtime %.2fms - H2D/D2H %.2fms)\n",
-           algo_time, runtime_ms + insert_runtime, g_algo_memcpy_ms);
-    fprintf(stderr, "[ALGO_TIME] algo=%.2f runtime=%.2f memcpy=%.2f\n",
-            algo_time, runtime_ms + insert_runtime, g_algo_memcpy_ms);
+    printf(">>>>ALGO_TIME: %.2fms (CUDA_PROFILE_TOTAL %.2fms - H2D/D2H %.2fms)\n",
+           algo_time, cuda_profile_total_ms, g_algo_memcpy_ms);
+    fprintf(stderr, "[ALGO_TIME] algo=%.2f profile_total=%.2f memcpy=%.2f\n",
+            algo_time, cuda_profile_total_ms, g_algo_memcpy_ms);
 
     printf("[CUDA]running_time(ms)=%lf\n", runtime_ms + insert_runtime);
 
