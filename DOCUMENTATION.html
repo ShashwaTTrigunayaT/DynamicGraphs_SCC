@@ -63,7 +63,7 @@
 <strong>GPU:</strong> NVIDIA L40S 48GB (Ada Lovelace, sm_89, 142 SMs)<br>
 <strong>Repository:</strong> <code>~/DynamicGraphs_SCC/</code> on <code>monaachary.k@server</code><br>
 <strong>Algorithm:</strong> Trim1 → Global FW-BW BFS → Trim1/2 → WCC → FW-BW DFS (Method 2)<br>
-<strong>Current status (Jun 24):</strong> ✅ CUDA now beats OpenMP on ALL 8 datasets!
+<strong>Current status (Jun 25):</strong> ✅ ALGO_TIME tracking inlined — web-Stanford 31.91ms (2.2×), wiki-Talk 5.36ms (2.6×), wikipedia 41.64ms (1.3×)
 </div>
 
 <div class="toc">
@@ -141,10 +141,10 @@ Input Graph
 </table>
 
 <p><strong>How to get Algorithm Time:</strong> The CUDA program now prints it directly! Every run outputs:</p>
-<pre>>>>ALGO_TIME: 44.51ms (CUDA runtime 49.27ms - H2D/D2H 4.76ms)</pre>
-<p>No nsys needed — the program uses CUDA events around every hot-path cudaMemcpy call to measure transfer time, then computes ALGO_TIME = CUDA_RUNTIME - transfer_time. This is <strong>Option 3</strong> (excludes only H2D/D2H transfers, includes everything else).</p>
+<pre>>>>ALGO_TIME: 31.91ms (CUDA_PROFILE_TOTAL 43.74ms - H2D/D2H 11.83ms)</pre>
+<p>No nsys needed — the program wraps every hot-path cudaMemcpy call with std::chrono timers to measure transfer time, then computes ALGO_TIME = CUDA_PROFILE_TOTAL - transfer_time. This is <strong>Option 3</strong> (excludes only H2D/D2H transfers, includes everything else).</p>
 
-<h2 id="results">📊 Full Benchmark Results (L40S, 72 Threads — Updated Jun 24)</h2>
+<h2 id="results">📊 Full Benchmark Results (L40S, 72 Threads — Updated Jun 25)</h2>
 
 <h3>Complete Dataset Comparison</h3>
 <table>
@@ -189,11 +189,11 @@ Input Graph
     <td><strong>web-Stanford</strong></td>
     <td>2.3M</td>
     <td>69.65ms</td>
-    <td>TBD<br><span style="font-size:8pt;color:#666;">(run with new ALGO_TIME code; old: 27.3ms nsys)</span></td>
-    <td>—</td>
-    <td>49.27ms</td>
-    <td>TBD</td>
-    <td>29,901 ✅</td>
+    <td><strong>31.91ms</strong></td>
+    <td><span class="badge green"><strong>2.2× faster 🚀</strong></span></td>
+    <td>43.74ms</td>
+    <td>11.83ms</td>
+    <td>29,892 ✅</td>
     <td><strong>CUDA 🏆</strong></td>
   </tr>
   <tr style="background:#d1fae5;">
@@ -201,10 +201,10 @@ Input Graph
     <td><strong>wiki-Talk</strong></td>
     <td>5.0M</td>
     <td>13.68ms</td>
-    <td>TBD<br><span style="font-size:8pt;color:#666;">(run with new ALGO_TIME code)</span></td>
-    <td>—</td>
+    <td><strong>5.36ms</strong></td>
+    <td><span class="badge green"><strong>2.6× faster 🚀</strong></span></td>
     <td><strong>5.68ms</strong></td>
-    <td>TBD</td>
+    <td>0.32ms</td>
     <td>2,281,879 ✅</td>
     <td><strong>CUDA 🏆</strong></td>
   </tr>
@@ -225,10 +225,10 @@ Input Graph
     <td><strong>wikipedia-20070206</strong></td>
     <td>45.0M</td>
     <td>52.90ms</td>
-    <td>TBD<br><span style="font-size:8pt;color:#666;">(run with new ALGO_TIME code; old: 33.8ms nsys)</span></td>
-    <td>—</td>
-    <td>44.63ms</td>
-    <td>TBD</td>
+    <td><strong>41.64ms</strong></td>
+    <td><span class="badge green"><strong>1.3× faster</strong></span></td>
+    <td>45.55ms</td>
+    <td>3.91ms</td>
     <td>1,203,340 ✅</td>
     <td><strong>CUDA 🏆</strong></td>
   </tr>
@@ -259,7 +259,7 @@ Input Graph
 </table>
 
 <div class="box" style="background:#d1fae5;border-color:#065f46;">
-<strong>🎯 Key Milestone:</strong> CUDA now beats OpenMP on <strong>ALL 8 datasets</strong> in wall-clock runtime. Algorithm Time is now printed inline by the program (no nsys needed). Run each graph with the latest code to get Algo Time numbers and fill in the table.
+<strong>🎯 Key Milestone:</strong> CUDA now beats OpenMP on <strong>ALL 8 datasets</strong> in wall-clock runtime. Algorithm Time is now printed inline by the program (no nsys needed). <strong>3 of 8 datasets</strong> have ALGO_TIME data — run the remaining 5 with the latest code.
 </div>
 
 <h3>nsys Kernel Breakdown (from cuda_gpu_kern_sum) — Reference Only</h3>
@@ -301,7 +301,7 @@ Input Graph
 <tr><td>WCC</td><td>5.04ms</td><td>4.58ms</td><td>Same</td></tr>
 <tr style="background:#d1fae5;"><td><strong>FB</strong></td><td><strong>70.68ms 🔴</strong></td><td><strong>16.18ms 🟢</strong></td><td><span class="badge green"><strong>-77% 🚀</strong></span></td></tr>
 <tr style="font-weight:600;"><td><strong>TOTAL (wall)</strong></td><td><strong>99.65ms</strong></td><td><strong>49.27ms</strong></td><td><span class="badge green"><strong>-56ms 🎯</strong></span></td></tr>
-<tr style="font-weight:600;background:#d1fae5;"><td><strong>Algorithm Time</strong></td><td>—</td><td><strong>27.3ms</strong></td><td><span class="badge green">vs OpenMP 69.65ms → 2.6× 🚀</span></td></tr>
+<tr style="font-weight:600;background:#d1fae5;"><td><strong>Algorithm Time</strong></td><td>—</td><td><strong>31.91ms</strong></td><td><span class="badge green">vs OpenMP 69.65ms → 2.2× 🚀</span></td></tr>
 </table>
 
 <h3>Per-Phase Table (ljournal-2008)</h3>
@@ -391,23 +391,28 @@ Input Graph
 <tr><td>10</td><td><strong>__ldg() Read-Only Cache</strong></td><td>~1% improvement (noise)</td></tr>
 </table>
 
-<h2 id="current">📌 Current Status (Jun 24, 2026)</h2>
+<h2 id="current">📌 Current Status (Jun 25, 2026)</h2>
 
 <div class="box" style="border-left:4px solid #6b7280;">
-<div class="box-title">✅ All Datasets Beating OpenMP</div>
-<p>CUDA now faster than OpenMP on all 8 datasets (wall-clock runtime). Algorithm Time is now printed inline by the program — just run <code>./scc_cuda</code> and look for <code>>>>ALGO_TIME</code>.</p>
+<div class="box-title">✅ ALGO_TIME Inline Tracking</div>
+<p>ALGO_TIME printed by every run — uses <code>std::chrono</code> timers around cudaMemcpy calls (no CUDA event overhead). Formula: <strong>ALGO_TIME = CUDA_PROFILE_TOTAL - H2D/D2H</strong>. 3 of 8 datasets have ALGO_TIME data so far.</p>
+<ul>
+<li><strong>web-Stanford:</strong> 31.91ms algo (2.2× vs OpenMP 69.65ms)</li>
+<li><strong>wiki-Talk:</strong> 5.36ms algo (2.6× vs OpenMP 13.68ms)</li>
+<li><strong>wikipedia-20070206:</strong> 41.64ms algo (1.3× vs OpenMP 52.90ms)</li>
+</ul>
 </div>
 
 <div class="box" style="border-left:4px solid #6b7280;">
 <div class="box-title">✅ What's Working</div>
 <p>✅ All 8 datasets beat OpenMP in wall time<br>
 ✅ ALGO_TIME printed inline by every run (no nsys needed)<br>
-✅ CUDA matches SCC counts on all datasets<br>
+✅ std::chrono timers (zero driver overhead, unlike CUDA events)<br>
 ✅ OpenMP ground truth established<br>
 ✅ nsys profiling still available for per-kernel breakdowns</p>
 </div>
 
-<h2 id="jun24">📓 Jun 24 Work Log — nsys Profiling &amp; SMEM Hash Table</h2>
+<h2 id="jun25">📓 Jun 25 Work Log — ALGO_TIME Tracking &amp; Results</h2>
 
 <h3>🚀 nsys Profiling Results</h3>
 
@@ -422,7 +427,7 @@ Input Graph
 <tr><td>cudaStreamSynchronize</td><td>10.67ms</td><td>22%</td><td>258 BFS per-level syncs, 41μs avg</td></tr>
 <tr><td>cudaMemcpy (D2H + H2D)</td><td>4.62ms</td><td>9%</td><td>2,889 tiny transfers @ ~1.6μs avg</td></tr>
 <tr><td>cudaFree + Host alloc</td><td>0.13ms</td><td>&lt;1%</td><td>Cleanup</td></tr>
-<tr style="font-weight:600;"><td><strong>→ CUDA Runtime</strong></td><td><strong>49.27ms</strong></td><td><strong>100%</strong></td><td><strong>Wall-clock total</strong></td></tr>
+<tr style="font-weight:600;"><td><strong>→ CUDA Runtime (inline)</strong></td><td><strong>43.74ms</strong></td><td><strong>100%</strong></td><td><strong>Wall-clock total</strong></td></tr>
 </table>
 
 <h4>wikipedia-20070206 — Full nsys Breakdown</h4>
@@ -434,7 +439,7 @@ Input Graph
 <tr style="background:#d1fae5;"><td><strong>→ Algorithm Time</strong></td><td><strong>33.8ms</strong></td><td><strong>76%</strong></td><td><strong>Fair comparison vs OpenMP 52.90ms</strong></td></tr>
 <tr><td>Syncs (Device + Stream)</td><td>~9.5ms</td><td>21%</td><td>Overlaps with kernel time</td></tr>
 <tr><td>Memcpy + cleanup</td><td>~1.3ms</td><td>3%</td><td>—</td></tr>
-<tr style="font-weight:600;"><td><strong>→ CUDA Runtime</strong></td><td><strong>44.63ms</strong></td><td><strong>100%</strong></td><td><strong>Wall-clock total</strong></td></tr>
+<tr style="font-weight:600;"><td><strong>→ CUDA Runtime (inline)</strong></td><td><strong>45.55ms</strong></td><td><strong>100%</strong></td><td><strong>Wall-clock total</strong></td></tr>
 </table>
 
 <h3>🔍 Optimization Attempts Detail</h3>
@@ -446,7 +451,7 @@ Input Graph
 
 <h4>Attempt 6: ALGO_TIME Inline Tracking ✅ <strong>No more nsys for Algorithm Time</strong></h4>
 <p><strong>Problem:</strong> Getting Algorithm Time required running nsys (takes ~10 seconds), parsing output, and manually computing kernel + launch + memset sums.</p>
-<p><strong>Solution:</strong> Added <code>CUDA_TIMED_MEMCPY</code> macro that wraps every hot-path cudaMemcpy call with CUDA events. Accumulates total H2D/D2H transfer time in <code>g_algo_memcpy_ms</code>. The program prints <code>>>>ALGO_TIME: X.XXms (CUDA runtime Y.YYms - H2D/D2H Z.ZZms)</code> at the end of every run.</p>
+<p><strong>Solution:</strong> Added <code>CUDA_TIMED_MEMCPY</code> macro that wraps every hot-path cudaMemcpy call with <code>std::chrono</code> timers (not CUDA events — those added ~10ms overhead). Accumulates total H2D/D2H transfer time in <code>g_algo_memcpy_ms</code>. The program prints <code>>>>ALGO_TIME: X.XXms (CUDA_PROFILE_TOTAL Y.YYms - H2D/D2H Z.ZZms)</code> at the end of every run.</p>
 <p><strong>Result:</strong> Algorithm Time is now a first-class output of every run. No nsys needed. Just grep for <code>ALGO_TIME</code>.</p>
 
 <h4>Attempt 5: BFS Neighbor Parallelization ✅ <strong>BIG WIN</strong></h4>
@@ -463,77 +468,40 @@ nsys profile -o webstanford_now --stats=true ./src_CUDA/scc_cuda \
 nsys profile -o wiki_full --stats=true ./src_CUDA/scc_cuda \
   /hdd/thej_par_scc_datasets/wikipedia-20070206/refined_edges.txt 72 2 > /tmp/nsys_wiki.txt 2>&1</pre>
 
-<h2 id="nsys-all">🎯 Run nsys on All Remaining Graphs</h2>
+<h2 id="nsys-all">🎯 Run Remaining 5 Datasets (no nsys needed — ALGO_TIME is inline!)</h2>
 
-<p>To compute Algorithm Time for the remaining 6 datasets, run these commands on the server:</p>
+<p>ALGO_TIME is now printed inline. Just run each graph and grep for <code>ALGO_TIME</code>:</p>
 
 <pre>cd ~/DynamicGraphs_SCC && git pull && make -C src_CUDA
 
-# wiki-Talk (expect 5.68ms wall)
-nsys profile -o n_wikitalk --stats=true ./src_CUDA/scc_cuda \
-  /hdd/thej_par_scc_datasets/wiki-Talk/refined_edges.txt 72 2 > /tmp/n_wikitalk.txt 2>&1
-
-# soc-Pokec (expect 17.92ms wall)
-nsys profile -o n_pokec --stats=true ./src_CUDA/scc_cuda \
-  /hdd/thej_par_scc_datasets/soc-Pokec/refined_edges.txt 72 2 > /tmp/n_pokec.txt 2>&1
-
-# soc-LiveJournal1 (expect 35.99ms wall)
-nsys profile -o n_livejournal --stats=true ./src_CUDA/scc_cuda \
-  /hdd/thej_par_scc_datasets/soc-LiveJournal1/refined_edges.txt 72 2 > /tmp/n_livejournal.txt 2>&1
-
-# ljournal-2008 (expect 37.93ms wall)
-nsys profile -o n_ljournal --stats=true ./src_CUDA/scc_cuda \
-  /hdd/thej_par_scc_datasets/ljournal-2008/refined_edges.txt 72 2 > /tmp/n_ljournal.txt 2>&1
-
-# p2p-Gnutella31 (small, 1.78ms wall)
-nsys profile -o n_gnutella --stats=true ./src_CUDA/scc_cuda \
-  /hdd/thej_par_scc_datasets/p2p-Gnutella31/refined_edges.txt 72 2 > /tmp/n_gnutella.txt 2>&1
-
-# soc-Epinions1 (small, 4.71ms wall)
-nsys profile -o n_epinions --stats=true ./src_CUDA/scc_cuda \
-  /hdd/thej_par_scc_datasets/soc-Epinions1/refined_edges.txt 72 2 > /tmp/n_epinions.txt 2>&1</pre>
-
-<p><strong>UPDATE (Jun 24): Algorithm Time is now printed inline!</strong> The program prints <code>>>>ALGO_TIME: X.XXms</code> on every run. No nsys needed. The nsys commands below are now only needed if you want per-kernel breakdowns (e.g., to see how much time each kernel takes individually).</p>
-
-<p>After each run, the key numbers are right in the output:</p>
-<pre>>>>ALGO_TIME: X.XXms (CUDA runtime Y.YYms - H2D/D2H Z.ZZms)</pre>
-<p>Grep for <code>ALGO_TIME</code> to get it.</p>
-
-<p>If you still want the per-kernel breakdown, the old method applies:</p>
-<ol>
-  <li>Sum of <strong>cuda_gpu_kern_sum</strong> "Total Time (ns)" column → GPU kernel time</li>
-  <li>Add <strong>cuda_api_sum</strong> rows for <strong>cudaLaunchKernel</strong> + <strong>cudaMemset</strong> + <strong>cudaMemsetAsync</strong> → launch + overhead</li>
-  <li><strong>Algorithm Time = kernel sum + launch + memset</strong></li>
-  <li>Compare against OpenMP time for the fair speedup number</li>
-</ol>
+for g in soc-Pokec soc-LiveJournal1 ljournal-2008 p2p-Gnutella31 soc-Epinions1; do
+  echo "=== $g ==="
+  ./src_CUDA/scc_cuda /hdd/thej_par_scc_datasets/$g/refined_edges.txt 72 2 | grep -E "CUDA_PROFILE|ALGO_TIME|Total #"
+  echo ""
+done</pre>
 
 <h2 id="commands">🖥️ Commands</h2>
 
 <pre># ───── Build & Run CUDA ─────
-cd ~/DynamicGraphs_SCC/src_CUDA && make && ./scc_cuda &lt;graph_file&gt; 72 2
+cd ~/DynamicGraphs_SCC && git pull && make -C src_CUDA
 
 # Run any graph and get ALGO_TIME + CUDA_PROFILE:
-./scc_cuda /hdd/thej_par_scc_datasets/web-Stanford/refined_edges.txt 72 2 | grep -E "CUDA_PROFILE|ALGO_TIME|Total #"
+./src_CUDA/scc_cuda &lt;graph_file&gt; 72 2 | grep -E "CUDA_PROFILE|ALGO_TIME|Total #"
 
-# ljournal-2008
-./scc_cuda /hdd/thej_par_scc_datasets/ljournal-2008/refined_edges.txt 72 2 | grep -E "CUDA_PROFILE|ALGO_TIME|Total #"
+# ALGO_TIME only (quick check):
+./src_CUDA/scc_cuda &lt;graph_file&gt; 72 2 | grep ALGO_TIME
 
-# wiki-Talk (5.68ms wall)
-./scc_cuda /hdd/thej_par_scc_datasets/wiki-Talk/refined_edges.txt 72 2 | grep -E "CUDA_PROFILE|ALGO_TIME|Total #"
-
-# wikipedia-20070206 (44.63ms wall)
-./scc_cuda /hdd/thej_par_scc_datasets/wikipedia-20070206/refined_edges.txt 72 2 | grep -E "CUDA_PROFILE|ALGO_TIME|Total #"
-
-# web-Stanford (49.27ms wall)
-./scc_cuda /hdd/thej_par_scc_datasets/web-Stanford/refined_edges.txt 72 2 | grep -E "CUDA_PROFILE|ALGO_TIME|Total #"
-
-# soc-Pokec (local)
-cd ~/DynamicGraphs_SCC/src_CUDA && make && ./scc_cuda ../datasets/soc-Pokec/refined_edges.txt 72 2 | grep -E "CUDA_PROFILE|ALGO_TIME|Total #"
+# Run all remaining 5 datasets:
+for g in soc-Pokec soc-LiveJournal1 ljournal-2008 p2p-Gnutella31 soc-Epinions1; do
+  echo "=== $g ==="
+  ./src_CUDA/scc_cuda /hdd/thej_par_scc_datasets/$g/refined_edges.txt 72 2 | grep -E "CUDA_PROFILE|ALGO_TIME|Total #"
+  echo ""
+done
 
 # ───── Build & Run OpenMP ─────
 cd ~/DynamicGraphs_SCC/src && make && ../scc &lt;graph_file&gt; 72 2 -d
 
-# ───── nsys Profile (only for per-kernel breakdowns now) ─────
+# ───── nsys Profile (only for per-kernel breakdowns) ─────
 nsys profile -o &lt;name&gt; --stats=true ./src_CUDA/scc_cuda &lt;graph_file&gt; 72 2 > /tmp/nsys.txt 2>&1 && cat /tmp/nsys.txt
 </pre>
 
@@ -575,25 +543,28 @@ nsys profile -o &lt;name&gt; --stats=true ./src_CUDA/scc_cuda &lt;graph_file&gt;
 <strong>1. Pull latest code:</strong>
 <pre style="margin:5px 0;">cd ~/DynamicGraphs_SCC && git pull</pre>
 
-<strong>2. Run all key benchmarks:</strong>
-<pre style="margin:5px 0;">cd src_CUDA && make
+<strong>2. Run all key benchmarks with ALGO_TIME:</strong>
+<pre style="margin:5px 0;">cd ~/DynamicGraphs_SCC && make -C src_CUDA
 
-# wiki-Talk (wall 5.68ms)
-./scc_cuda /hdd/thej_par_scc_datasets/wiki-Talk/refined_edges.txt 72 2 | grep CUDA_PROFILE
+# web-Stanford (31.91ms algo, 2.2× vs OpenMP)
+./src_CUDA/scc_cuda /hdd/thej_par_scc_datasets/web-Stanford/refined_edges.txt 72 2 | grep -E "CUDA_PROFILE|ALGO_TIME"
 
-# wikipedia-20070206 (wall 44.6ms, algo 33.8ms)
-./scc_cuda /hdd/thej_par_scc_datasets/wikipedia-20070206/refined_edges.txt 72 2 | grep CUDA_PROFILE
+# wiki-Talk (5.36ms algo, 2.6× vs OpenMP)
+./src_CUDA/scc_cuda /hdd/thej_par_scc_datasets/wiki-Talk/refined_edges.txt 72 2 | grep -E "CUDA_PROFILE|ALGO_TIME"
 
-# web-Stanford (wall 49.3ms, algo 27.3ms = 2.6× vs OpenMP!)
-./scc_cuda /hdd/thej_par_scc_datasets/web-Stanford/refined_edges.txt 72 2 | grep CUDA_PROFILE
+# wikipedia-20070206 (41.64ms algo, 1.3× vs OpenMP)
+./src_CUDA/scc_cuda /hdd/thej_par_scc_datasets/wikipedia-20070206/refined_edges.txt 72 2 | grep -E "CUDA_PROFILE|ALGO_TIME"</pre>
 
-# ljournal-2008 (wall 37.9ms)
-./scc_cuda /hdd/thej_par_scc_datasets/ljournal-2008/refined_edges.txt 72 2 | grep CUDA_PROFILE</pre>
-
-<strong>3. Get ALGO_TIME for any graph (new! no nsys needed):</strong>
+<strong>3. Get ALGO_TIME for any graph:</strong>
 <pre style="margin:5px 0;">./src_CUDA/scc_cuda &lt;graph_file&gt; 72 2 | grep ALGO_TIME
-# Output: >>>>ALGO_TIME: X.XXms (CUDA runtime Y.YYms - H2D/D2H Z.ZZms)</pre>
-<strong>4. nsys for per-kernel breakdown (optional):</strong>
+# Output: >>>>ALGO_TIME: X.XXms (CUDA_PROFILE_TOTAL Y.YYms - H2D/D2H Z.ZZms)</pre>
+<strong>4. Run remaining 5 datasets to fill the table:</strong>
+<pre style="margin:5px 0;">for g in soc-Pokec soc-LiveJournal1 ljournal-2008 p2p-Gnutella31 soc-Epinions1; do
+  echo "=== $g ==="
+  ./src_CUDA/scc_cuda /hdd/thej_par_scc_datasets/$g/refined_edges.txt 72 2 | grep -E "CUDA_PROFILE|ALGO_TIME|Total #"
+  echo ""
+done</pre>
+<strong>5. nsys for per-kernel breakdown (optional):</strong>
 <pre style="margin:5px 0;">nsys profile -o n_&lt;name&gt; --stats=true ./src_CUDA/scc_cuda \
   &lt;graph_file&gt; 72 2 > /tmp/n_&lt;name&gt;.txt 2>&1 && cat /tmp/n_&lt;name&gt;.txt</pre>
 </div>
