@@ -477,8 +477,10 @@ double run_gpu_fb(GPUState& st, const GPUGraph& g, int num_threads)
                 large_works.push_back(w);
                 continue;
             }
-            int offset = (int)(w->d_set_nodes - (int*)wcc_buf);
-            cur.starts.push_back(offset / sizeof(int));
+            // Pointer difference is already in int elements (not bytes)
+            // because both d_set_nodes and wcc_buf are int*.
+            // e.g., if d_set_nodes = &wcc_buf[10], difference = 10.
+            cur.starts.push_back((int)(w->d_set_nodes - wcc_buf));
             cur.sizes.push_back(w->count);
             cur.colors.push_back(w->color);
             delete w;
