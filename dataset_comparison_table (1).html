@@ -328,13 +328,78 @@
         <td class="dataset">indochina-2004</td>
         <td class="edges">194M</td>
         <td class="timing">3,278.76ms</td>
-        <td class="timing"><strong>1,052.55ms</strong></td>
-        <td><span class="badge badge-green">3.1× faster 🚀</span></td>
-        <td class="timing"><strong>1,056.25ms</strong></td>
-        <td class="timing">3.71ms</td>
-        <td class="scc-check" style="color:#f59e0b;">1,739,373 ⚠️</td>
+        <td class="timing"><strong>870.43ms</strong></td>
+        <td><span class="badge badge-green">3.8× faster 🚀</span></td>
+        <td class="timing"><strong>873.67ms</strong></td>
+        <td class="timing">3.25ms</td>
+        <td class="scc-check">1,749,051 ✅</td>
       </tr>
 
+    </tbody>
+  </table>
+
+  <!-- PROJECTION ROW -->
+  <div class="table-label table-label-2">Projection &mdash; Indochina-2004 If Bottlenecks Fixed</div>
+  <table>
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>Phase</th>
+        <th>Current</th>
+        <th>Target</th>
+        <th>Savings</th>
+        <th>Strategy</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td class="num">1</td>
+        <td class="dataset">TRIM1</td>
+        <td class="timing">207ms</td>
+        <td class="timing"><strong>99ms</strong></td>
+        <td class="timing" style="color:#34d399;">−108ms</td>
+        <td style="color:#5a7a9a;font-size:9pt;">Persistent kernel / reduce grid launch overhead on 7.4M nodes</td>
+      </tr>
+      <tr>
+        <td class="num">2</td>
+        <td class="dataset">GLOBAL_BFS</td>
+        <td class="timing">29ms</td>
+        <td class="timing"><strong>29ms</strong></td>
+        <td class="timing" style="color:#2a4a6a;">—</td>
+        <td style="color:#5a7a9a;font-size:9pt;">Already 2.2× faster than OpenMP — no action needed</td>
+      </tr>
+      <tr>
+        <td class="num">3</td>
+        <td class="dataset">TRIM12</td>
+        <td class="timing" style="color:#f59e0b;">301ms</td>
+        <td class="timing"><strong>18ms</strong></td>
+        <td class="timing" style="color:#34d399;">−283ms 🎯</td>
+        <td style="color:#5a7a9a;font-size:9pt;">Biggest win — compact kernel scans many already-resolved nodes. Skip SCC_FOUND nodes, or use streaming compact rebuild</td>
+      </tr>
+      <tr>
+        <td class="num">4</td>
+        <td class="dataset">WCC</td>
+        <td class="timing">227ms</td>
+        <td class="timing"><strong>150ms</strong></td>
+        <td class="timing" style="color:#34d399;">−77ms</td>
+        <td style="color:#5a7a9a;font-size:9pt;">Reduce per-iteration D2H sync overhead. Batch multiple iterations between checks</td>
+      </tr>
+      <tr>
+        <td class="num">5</td>
+        <td class="dataset">FB</td>
+        <td class="timing">110ms</td>
+        <td class="timing"><strong>60ms</strong></td>
+        <td class="timing" style="color:#34d399;">−50ms</td>
+        <td style="color:#5a7a9a;font-size:9pt;">Better handling of 167 large fallback components. GPU-batch instead of CPU fallback</td>
+      </tr>
+      <tr style="background:#0d2444;border-top:2px solid #1e5aab;">
+        <td class="num" style="color:#7eb8ff;"></td>
+        <td class="dataset" style="color:#7eb8ff;"><strong>PROJECTED PROFILE</strong></td>
+        <td class="timing">874ms</td>
+        <td class="timing" style="color:#a8d8ff;"><strong>~360ms</strong></td>
+        <td style="color:#34d399;"><strong>−514ms</strong></td>
+        <td style="color:#34d399;font-weight:600;font-size:9pt;"><strong>vs OpenMP 3,279ms → 9.1× faster 🚀🚀</strong></td>
+      </tr>
     </tbody>
   </table>
 
