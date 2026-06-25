@@ -440,43 +440,73 @@ double run_gpu_fb(GPUState& st, const GPUGraph& g, int num_threads)
         return 0.0;
     }
 
+    // ---- Determine if we can use WCC big buffer directly (avoid D2H) ----
+    // All WCC work items' d_set_nodes are slices of d_wcc_big_buffer.
+    // If available, compute offsets via pointer arithmetic and keep data on GPU.
+    int* wcc_buf = get_wcc_big_buffer();
+    int wcc_buf_size = get_wcc_big_buffer_size();
+    bool can_use_wcc_buffer = (wcc_buf != NULL && wcc_buf_size > 0);
+
     // ---- Pack initial components ----
-    // Large components (> GPU_FB_MAX_SMEM_NODES) are returned to the work queue
-    // for the host fallback path (start_workers_fw_bw_dfs_host).
     struct CompData {
-        std::vector<int> nodes;
-        std::vector<int> starts;   // prefix sum into nodes
+        std::vector<int> starts;   // offsets into GPU node buffer
         std::vector<int> sizes;
         std::vector<int> colors;
     };
+    struct NodeVec {
+        std::vector<int> data;
+        bool empty() const { return data.empty(); }
+        size_t size() const { return data.size(); }
+    };
 
     CompData cur;
+    NodeVec cur_host_nodes;  // only populated for fallback path (no WCC buffer)
+    const int* d_gpu_nodes = NULL;  // pointer to current GPU node buffer
     std::vector<CUDAMyWork*> large_works;  // for fallback
 
-    for (CUDAMyWork* w : all_works) {
-        if (w->count == 0) {
-            if (w->owns_set && w->d_set_nodes) cudaFree(w->d_set_nodes);
+    if (can_use_wcc_buffer) {
+        // Fast path: use WCC big buffer directly, no D2H needed
+        for (CUDAMyWork* w : all_works) {
+            if (w->count == 0) {
+                delete w;
+                continue;
+            }
+            if (w->count > GPU_FB_MAX_SMEM_NODES) {
+                large_works.push_back(w);
+                continue;
+            }
+            int offset = (int)(w->d_set_nodes - (int*)wcc_buf);
+            cur.starts.push_back(offset / sizeof(int));
+            cur.sizes.push_back(w->count);
+            cur.colors.push_back(w->color);
             delete w;
-            continue;
         }
-        if (w->count > GPU_FB_MAX_SMEM_NODES) {
-            // Too large for SMEM — keep for fallback
-            large_works.push_back(w);
-            continue;
+        d_gpu_nodes = wcc_buf;
+    } else {
+        // Fallback: D2H+upload path
+        for (CUDAMyWork* w : all_works) {
+            if (w->count == 0) {
+                if (w->owns_set && w->d_set_nodes) cudaFree(w->d_set_nodes);
+                delete w;
+                continue;
+            }
+            if (w->count > GPU_FB_MAX_SMEM_NODES) {
+                large_works.push_back(w);
+                continue;
+            }
+            cur.starts.push_back((int)cur_host_nodes.data.size());
+            cur.sizes.push_back(w->count);
+            cur.colors.push_back(w->color);
+            if (w->d_set_nodes) {
+                std::vector<int> tmp(w->count);
+                CUDA_TIMED_MEMCPY(tmp.data(), w->d_set_nodes,
+                                       w->count * sizeof(int), cudaMemcpyDeviceToHost);
+                cur_host_nodes.data.insert(cur_host_nodes.data.end(),
+                                           tmp.begin(), tmp.end());
+                if (w->owns_set) cudaFree(w->d_set_nodes);
+            }
+            delete w;
         }
-
-        cur.starts.push_back((int)cur.nodes.size());
-        cur.sizes.push_back(w->count);
-        cur.colors.push_back(w->color);
-
-        if (w->d_set_nodes) {
-            std::vector<int> tmp(w->count);
-            CUDA_TIMED_MEMCPY(tmp.data(), w->d_set_nodes,
-                                   w->count * sizeof(int), cudaMemcpyDeviceToHost);
-            cur.nodes.insert(cur.nodes.end(), tmp.begin(), tmp.end());
-            if (w->owns_set) cudaFree(w->d_set_nodes);
-        }
-        delete w;
     }
 
     // Return large components to work queue for fallback
@@ -487,21 +517,23 @@ double run_gpu_fb(GPUState& st, const GPUGraph& g, int num_threads)
         large_works.clear();
     }
 
-    if (cur.nodes.empty()) {
+    if (cur.sizes.empty()) {
         printf("[GPU_FB] No components fit in SMEM limit (%d) — all deferred to fallback\n",
                GPU_FB_MAX_SMEM_NODES);
         gettimeofday(&t1, NULL);
         return -1.0;  // signal: did no work, use fallback
     }
 
-    printf("[GPU_FB] Initial: %zu comps, %zu nodes\n", cur.sizes.size(), cur.nodes.size());
+    printf("[GPU_FB] Initial: %zu comps, %s\n",
+           cur.sizes.size(),
+           can_use_wcc_buffer ? "using WCC buffer (no D2H)" : "uploaded from host");
 
     // ---- Allocate persistent device buffers ----
-    // We'll grow these as needed
+    // Metadata buffers (starts, sizes, colors) — uploaded each iteration
+    // d_in_nodes is NOT needed — data lives in d_gpu_nodes (wcc_buf or d_bulk_buf)
     int max_dev_comps = (int)cur.sizes.size() * 4;
-    int max_dev_nodes = (int)cur.nodes.size() * 4;
 
-    int* d_in_nodes       = NULL;
+    int* d_in_nodes       = NULL;  // only allocated for fallback path (no WCC buffer)
     int* d_in_comp_start  = NULL;
     int* d_in_comp_size   = NULL;
     int* d_in_comp_color  = NULL;
@@ -509,52 +541,75 @@ double run_gpu_fb(GPUState& st, const GPUGraph& g, int num_threads)
     int* d_out_colors     = NULL;
     int* d_num_out        = NULL;
 
+    int max_dev_nodes = 0;
+    if (!can_use_wcc_buffer) {
+        // Fallback path needs d_in_nodes for host upload
+        max_dev_nodes = (int)cur_host_nodes.size() * 4;
+    }
+
     auto alloc_grow = [&]() {
         auto mall = [](auto*& p, int sz) {
             if (p) cudaFree(p);
             if (sz > 0) cudaMalloc(&p, sz * sizeof(int));
             else p = NULL;
         };
-        mall(d_in_nodes,       max_dev_nodes);
+        if (!can_use_wcc_buffer) {
+            mall(d_in_nodes, max_dev_nodes);
+        }
         mall(d_in_comp_start,  max_dev_comps);
         mall(d_in_comp_size,   max_dev_comps);
         mall(d_in_comp_color,  max_dev_comps);
-        mall(d_out_sizes,      max_dev_comps * 3);  // up to 3 sub-comps per input
+        mall(d_out_sizes,      max_dev_comps * 3);
         mall(d_out_colors,     max_dev_comps * 3);
         if (!d_num_out) cudaMalloc(&d_num_out, sizeof(int));
     };
     alloc_grow();
 
+    // For the fallback path, allocate the GPU node buffer and set d_gpu_nodes
+    if (!can_use_wcc_buffer && d_in_nodes) {
+        d_gpu_nodes = d_in_nodes;
+    }
+
     // ---- SMEM size ----
-    // smem_shared: 5 scalars + warp_sums (up to 32 warps × 3 counters = 96 ints max)
-    int smem_shared_ints = 5 + 32 * 3;  // max possible warps for safety
+    int smem_shared_ints = 5 + 32 * 3;
     int smem_size = GPU_FB_MAX_SMEM_NODES * (3 * sizeof(int) + 2 * sizeof(char))
                   + smem_shared_ints * sizeof(int)
                   + GPU_FB_HASH_SIZE * sizeof(int);
-    // = 2048*(12+2) + (5+96)*4 + 4096*4 = 28672 + 404 + 16384 = 45460 bytes < 48KB ✓
 
     // ---- Iterative processing ----
     int total_levels = 0;
     double kernel_ms = 0, scatter_ms = 0;
+    bool first_level = true;
 
-    while (!cur.nodes.empty() && total_levels < 1000) {
+    // cur_host_nodes is only needed for the first iteration of the fallback path
+    // total_src_nodes = sum of all component sizes (needed by scatter kernel)
+    int total_src_nodes = 0;
+    for (int sz : cur.sizes) total_src_nodes += sz;
+    if (!can_use_wcc_buffer) {
+        total_src_nodes = (int)cur_host_nodes.size();
+    }
+
+    while (!cur.sizes.empty() && total_levels < 1000) {
         total_levels++;
         int cur_comps = (int)cur.sizes.size();
 
-        // ---- Grow buffers if needed ----
+        // ---- Grow metadata buffers if needed ----
         int need_comps = cur_comps * 4;
-        int need_nodes = (int)cur.nodes.size();
-        if (need_comps > max_dev_comps || need_nodes > max_dev_nodes) {
+        if (need_comps > max_dev_comps) {
             max_dev_comps = max(max_dev_comps * 2, need_comps);
-            max_dev_nodes = max(max_dev_nodes * 2, need_nodes * 2);
             alloc_grow();
         }
 
         struct timeval ts, te;
 
-        // ---- Upload to device ----
-        CUDA_TIMED_MEMCPY(d_in_nodes, cur.nodes.data(),
-                               cur.nodes.size() * sizeof(int), cudaMemcpyHostToDevice);
+        // ---- Upload metadata to device ----
+        // d_in_nodes is NOT uploaded — data stays on GPU
+        // For the fallback path: upload host nodes on the first iteration only
+        if (!can_use_wcc_buffer && first_level) {
+            // First level fallback: need to upload host buffer to GPU
+            CUDA_TIMED_MEMCPY((void*)d_gpu_nodes, cur_host_nodes.data(),
+                                   cur_host_nodes.size() * sizeof(int), cudaMemcpyHostToDevice);
+        }
         CUDA_TIMED_MEMCPY(d_in_comp_start, cur.starts.data(),
                                cur_comps * sizeof(int), cudaMemcpyHostToDevice);
         CUDA_TIMED_MEMCPY(d_in_comp_size, cur.sizes.data(),
@@ -575,7 +630,7 @@ double run_gpu_fb(GPUState& st, const GPUGraph& g, int num_threads)
                 g.d_begin, g.d_node_idx,
                 g.d_r_begin, g.d_r_node_idx,
                 st.d_Color, st.d_SCC,
-                d_in_nodes, starts,
+                d_gpu_nodes, starts,
                 d_in_comp_size + ch,
                 d_in_comp_color + ch,
                 n,
@@ -592,7 +647,7 @@ double run_gpu_fb(GPUState& st, const GPUGraph& g, int num_threads)
 
         if (h_num_out == 0) break;  // all done
 
-        // ---- Build next batch via bulk scatter (single cudaMemcpy) ----
+        // ---- Build next batch via bulk scatter ----
         std::vector<int> h_out_sizes(h_num_out);
         std::vector<int> h_out_colors(h_num_out);
         CUDA_TIMED_MEMCPY(h_out_sizes.data(), d_out_sizes,
@@ -602,7 +657,7 @@ double run_gpu_fb(GPUState& st, const GPUGraph& g, int num_threads)
 
         gettimeofday(&ts, NULL);
 
-        // Compute prefix sums on host
+        // Compute prefix sums on host (offsets into d_bulk_buf)
         std::vector<int> h_bulk_offsets(h_num_out + 1, 0);
         int total_sz = 0;
         for (int oi = 0; oi < h_num_out; oi++) {
@@ -633,7 +688,7 @@ double run_gpu_fb(GPUState& st, const GPUGraph& g, int num_threads)
         for (int ch = 0; ch < h_num_out; ch += scatter_max_grid) {
             int n = min(scatter_max_grid, h_num_out - ch);
             bulk_scatter_single_color_kernel<<<n, block_size>>>(
-                st.d_Color, d_in_nodes, (int)cur.nodes.size(),
+                st.d_Color, d_gpu_nodes, total_src_nodes,
                 d_out_sizes + ch, d_out_colors + ch, n,
                 d_bulk_off + ch,
                 d_bulk_buf
@@ -641,22 +696,15 @@ double run_gpu_fb(GPUState& st, const GPUGraph& g, int num_threads)
         }
         CUDA_CHECK(cudaDeviceSynchronize());
 
-        // ONE cudaMemcpy for ALL sub-components
-        std::vector<int> host_bulk(total_sz);
-        CUDA_TIMED_MEMCPY(host_bulk.data(), d_bulk_buf,
-                               total_sz * sizeof(int), cudaMemcpyDeviceToHost);
-
-        // Unpack on host using prefix sums
+        // ---- GPU-only: keep scatter results on device, no D2H ----
+        // Build next iteration metadata from prefix sums (already on host)
         CompData next;
         for (int oi = 0; oi < h_num_out; oi++) {
             int sz = h_out_sizes[oi];
             int color = h_out_colors[oi];
             if (sz <= 0) continue;
-            int base = h_bulk_offsets[oi];
-            next.starts.push_back((int)next.nodes.size());
-            next.nodes.insert(next.nodes.end(),
-                               host_bulk.begin() + base,
-                               host_bulk.begin() + base + sz);
+            // starts = offsets into d_bulk_buf = the prefix sums we just computed
+            next.starts.push_back(h_bulk_offsets[oi]);
             next.sizes.push_back(sz);
             next.colors.push_back(color);
         }
@@ -664,12 +712,15 @@ double run_gpu_fb(GPUState& st, const GPUGraph& g, int num_threads)
         gettimeofday(&te, NULL);
         scatter_ms += (te.tv_sec - ts.tv_sec) * 1000.0 + (te.tv_usec - ts.tv_usec) * 0.001;
 
-        // ---- Swap ----
+        // ---- Swap: next iteration reads from d_bulk_buf ----
+        d_gpu_nodes = d_bulk_buf;
+        total_src_nodes = total_sz;
         cur = std::move(next);
+        first_level = false;
 
         if (total_levels % 10 == 0)
-            printf("[GPU_FB] Lvl %d: %zu comps, %zu nodes\n",
-                   total_levels, cur.sizes.size(), cur.nodes.size());
+            printf("[GPU_FB] Lvl %d: %zu comps, %d nodes\n",
+                   total_levels, cur.sizes.size(), total_sz);
     }
 
     // ---- Sync color counter ----
