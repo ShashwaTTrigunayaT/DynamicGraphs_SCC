@@ -14,19 +14,13 @@
 using namespace std;
 
 // ---- Algorithm Time tracking globals ----
-double      g_algo_memcpy_ms  = 0;
-cudaEvent_t g_algo_ev_start   = NULL;
-cudaEvent_t g_algo_ev_end     = NULL;
+double g_algo_memcpy_ms = 0;
 
 void algo_memcpy_init() {
-    cudaEventCreate(&g_algo_ev_start);
-    cudaEventCreate(&g_algo_ev_end);
+    g_algo_memcpy_ms = 0;
 }
 void algo_memcpy_finalize() {
-    if (g_algo_ev_start) cudaEventDestroy(g_algo_ev_start);
-    if (g_algo_ev_end)   cudaEventDestroy(g_algo_ev_end);
-    g_algo_ev_start = NULL;
-    g_algo_ev_end   = NULL;
+    // Nothing to free — std::chrono has no handles
 }
 
 // Host-side CSR arrays (shared with scc_cuda_fb_seq2.cu for host-side FB processing)

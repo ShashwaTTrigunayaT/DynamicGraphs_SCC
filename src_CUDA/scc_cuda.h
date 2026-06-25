@@ -9,6 +9,7 @@
 #include <string>
 #include <queue>
 #include <vector>
+#include <chrono>
 #include <cuda_runtime.h>
 
 // Forward declarations for functions defined in separate .cu files
@@ -285,25 +286,23 @@ int repeat_global_trim2_new(GPUState& st, const GPUGraph& g,
 // ---- Algorithm Time tracking ----
 // Tracks H2D/D2H transfer time to compute ALGO_TIME = CUDA_RUNTIME - transfer_time.
 // This gives a fair comparison vs OpenMP (which has no explicit transfers).
-extern double      g_algo_memcpy_ms;
-extern cudaEvent_t g_algo_ev_start;
-extern cudaEvent_t g_algo_ev_end;
+// Uses std::chrono (CPU-side, <100ns overhead per call) instead of CUDA events
+// to avoid ~10ms of instrumentation overhead from cudaEventRecord/Synchronize.
+extern double g_algo_memcpy_ms;
 
 void algo_memcpy_init();
 void algo_memcpy_finalize();
 
 #define CUDA_TIMED_MEMCPY(dst, src, count, kind) do {                              \
-    cudaEventRecord(g_algo_ev_start);                                               \
+    auto _start = std::chrono::high_resolution_clock::now();                         \
     cudaError_t _err = cudaMemcpy(dst, src, count, kind);                           \
-    cudaEventRecord(g_algo_ev_end);                                                 \
-    cudaEventSynchronize(g_algo_ev_end);                                            \
+    auto _end = std::chrono::high_resolution_clock::now();                          \
     if (_err != cudaSuccess) {                                                      \
         fprintf(stderr, "CUDA err %s:%d: %s\n", __FILE__, __LINE__,                 \
                 cudaGetErrorString(_err)); exit(1);                                 \
     }                                                                               \
-    float _ms = 0;                                                                  \
-    cudaEventElapsedTime(&_ms, g_algo_ev_start, g_algo_ev_end);                    \
-    g_algo_memcpy_ms += _ms;                                                        \
+    g_algo_memcpy_ms +=                                                             \
+        std::chrono::duration<float, std::milli>(_end - _start).count();            \
 } while(0)
 
 // ---- scc_cuda_fb_global.cu (mirrors scc_fb_global.cc) ----
