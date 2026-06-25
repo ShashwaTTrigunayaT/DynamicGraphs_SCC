@@ -293,9 +293,9 @@ extern double g_algo_memcpy_ms;
 void algo_memcpy_init();
 void algo_memcpy_finalize();
 
-#define CUDA_TIMED_MEMCPY(dst, src, count, kind) do {                              \
+#define CUDA_TIMED_MEMCPY(dst, src, _sz, kind) do {                              \
     auto _start = std::chrono::high_resolution_clock::now();                         \
-    cudaError_t _err = cudaMemcpy(dst, src, count, kind);                           \
+    cudaError_t _err = cudaMemcpy(dst, src, _sz, kind);                             \
     auto _end = std::chrono::high_resolution_clock::now();                          \
     if (_err != cudaSuccess) {                                                      \
         fprintf(stderr, "CUDA err %s:%d: %s\n", __FILE__, __LINE__,                 \
