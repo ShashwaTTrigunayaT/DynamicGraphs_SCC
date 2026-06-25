@@ -455,6 +455,8 @@ double run_gpu_fb(GPUState& st, const GPUGraph& g, int num_threads)
     };
     struct NodeVec {
         std::vector<int> data;
+        int* data_ptr() { return data.data(); }
+        const int* data_ptr() const { return data.data(); }
         bool empty() const { return data.empty(); }
         size_t size() const { return data.size(); }
     };
@@ -607,7 +609,7 @@ double run_gpu_fb(GPUState& st, const GPUGraph& g, int num_threads)
         // For the fallback path: upload host nodes on the first iteration only
         if (!can_use_wcc_buffer && first_level) {
             // First level fallback: need to upload host buffer to GPU
-            CUDA_TIMED_MEMCPY((void*)d_gpu_nodes, cur_host_nodes.data(),
+            CUDA_TIMED_MEMCPY((void*)d_gpu_nodes, cur_host_nodes.data_ptr(),
                                    cur_host_nodes.size() * sizeof(int), cudaMemcpyHostToDevice);
         }
         CUDA_TIMED_MEMCPY(d_in_comp_start, cur.starts.data(),
