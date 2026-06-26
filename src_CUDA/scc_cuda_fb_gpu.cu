@@ -334,6 +334,11 @@ __global__ void gpu_fb_batch_kernel(
         local_fw   = warp_sums[lane * 3 + 0];
         local_bw   = warp_sums[lane * 3 + 1];
         local_base = warp_sums[lane * 3 + 2];
+    } else if (warp_id == 0) {
+        // Zero out unused lanes (8..31) so the final SUM_REDUCE is correct
+        local_fw   = 0;
+        local_bw   = 0;
+        local_base = 0;
     }
     if (warp_id == 0) {
         SUM_REDUCE(local_fw);
