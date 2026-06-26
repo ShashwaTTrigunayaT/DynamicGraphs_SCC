@@ -665,6 +665,10 @@ double run_gpu_fb(GPUState& st, const GPUGraph& g, int num_threads)
         {   int max_color = 0;
             for (int c : cur.colors) if (c > max_color) max_color = c;
             int color_base = max_color + 1024;  // start safely above existing colors
+            if (total_levels <= 10 || total_levels % 100 == 0 || color_base < 0) {
+                printf("[GPU_FB_COLOR] Lvl %d: max_color=%d base=%d comps=%zu\n",
+                       total_levels, max_color, color_base, cur.sizes.size());
+            }
             CUDA_TIMED_MEMCPY(d_fb_color_counter, &color_base, sizeof(int),
                                cudaMemcpyHostToDevice);
         }
