@@ -15,7 +15,7 @@
 // per-component cudaMalloc overhead.
 // ======================================================================
 
-#define GPU_FB_MAX_SMEM_NODES 2048
+#define GPU_FB_MAX_SMEM_NODES 16
 #define GPU_FB_HASH_SIZE     4096   // power of 2, 2× load factor for 2048 nodes
 
 static int* d_fb_color_counter = NULL;
