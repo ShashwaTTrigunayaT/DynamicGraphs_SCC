@@ -710,6 +710,17 @@ double run_gpu_fb(GPUState& st, const GPUGraph& g, int num_threads)
         CUDA_TIMED_MEMCPY(h_out_colors.data(), d_out_colors,
                                h_num_out * sizeof(int), cudaMemcpyDeviceToHost);
 
+        // ---- Node count consistency check ----
+        {   int sum_out = 0;
+            for (int i = 0; i < h_num_out; i++) sum_out += h_out_sizes[i];
+            int diff = total_src_nodes - sum_out;
+            if (diff != 0) {
+                printf("[GPU_FB_NODES] Lvl %d: total_src=%d sum_out=%d diff=%d (%.2f%%)\n",
+                       total_levels, total_src_nodes, sum_out, diff,
+                       100.0 * diff / (total_src_nodes > 0 ? total_src_nodes : 1));
+            }
+        }
+
         gettimeofday(&ts, NULL);
 
         // Compute prefix sums on host (offsets into d_bulk_buf)
