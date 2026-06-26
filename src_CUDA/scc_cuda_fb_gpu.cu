@@ -389,14 +389,18 @@ __global__ void bulk_scatter_single_color_kernel(
     const int* d_out_colors,
     int num_out,
     const int* d_bulk_offsets,  // [num_out] prefix sum of sizes
-    int* d_bulk_buf)            // [total_nodes] flat output buffer
+    int* d_bulk_buf,            // [total_nodes] flat output buffer
+    int* d_out_actual)          // [num_out] actual count written (diagnostic)
 {
     int oi = blockIdx.x;
     if (oi >= num_out) return;
 
     int sz = d_out_sizes[oi];
     int color = d_out_colors[oi];
-    if (sz <= 0) return;
+    if (sz <= 0) {
+        if (threadIdx.x == 0) d_out_actual[oi] = 0;
+        return;
+    }
 
     int base = d_bulk_offsets[oi];
 
@@ -409,22 +413,13 @@ __global__ void bulk_scatter_single_color_kernel(
     int stride = blockDim.x;
 
     // ALL threads in the warp must iterate the same number of iterations.
-    // The old for-loop (for i = tid; i < num_src; i += stride) caused
-    // divergent exits on the last partial stride — some lanes exit early,
-    // missing __ballot_sync and causing undefined behavior.
-    //
-    // Fix: iterate a uniform total_iters. Threads with i >= num_src
-    // participate in ballots (voting false) but skip the d_Color lookup.
     int total_iters = (num_src + stride - 1) / stride;
     for (int iter = 0; iter < total_iters; iter++) {
         int i = tid + iter * stride;
         bool in_bounds = (i < num_src);
 
-        // ALL 32 lanes converge here (guaranteed — same loop count for all).
-        // Returns mask of lanes where in_bounds is true.
         unsigned active = __ballot_sync(0xffffffff, in_bounds);
 
-        // Only compute match for in-bounds nodes
         bool match = false;
         if (in_bounds) {
             match = (d_Color[d_in_nodes[i]] == color);
@@ -442,6 +437,11 @@ __global__ void bulk_scatter_single_color_kernel(
 
         if (match)
             d_bulk_buf[pos + __popc(mask & ((1u << lane) - 1))] = d_in_nodes[i];
+    }
+
+    // Record actual count written (for scatter vs counting consistency check)
+    if (threadIdx.x == 0) {
+        d_out_actual[oi] = s_pos - base;
     }
 }
 
@@ -751,9 +751,16 @@ double run_gpu_fb(GPUState& st, const GPUGraph& g, int num_threads)
         CUDA_TIMED_MEMCPY(d_bulk_off, h_bulk_offsets.data(),
                                (h_num_out + 1) * sizeof(int), cudaMemcpyHostToDevice);
 
+        // Allocate actual-counts buffer for scatter validation
+        static int* d_scatter_actual = NULL;
+        static int  d_scatter_actual_cap = 0;
+        if (d_scatter_actual_cap < h_num_out) {
+            if (d_scatter_actual) cudaFree(d_scatter_actual);
+            d_scatter_actual_cap = max(h_num_out * 2, 1024);
+            cudaMalloc(&d_scatter_actual, d_scatter_actual_cap * sizeof(int));
+        }
+
         // Determine write buffer: opposite of current d_gpu_nodes (double-buffer)
-        // First scatter: d_gpu_nodes is wcc_buf or d_in_nodes (not d_bulk_buf_A/B)
-        // Subsequent scatters: d_gpu_nodes is one of A/B, write to the other
         bool is_first_scatter = (d_gpu_nodes != d_bulk_buf_A && d_gpu_nodes != d_bulk_buf_B);
         int* d_write_buf = is_first_scatter ? d_bulk_buf_A
                          : (d_gpu_nodes == d_bulk_buf_A ? d_bulk_buf_B : d_bulk_buf_A);
@@ -766,10 +773,31 @@ double run_gpu_fb(GPUState& st, const GPUGraph& g, int num_threads)
                 st.d_Color, d_gpu_nodes, total_src_nodes,
                 d_out_sizes + ch, d_out_colors + ch, n,
                 d_bulk_off + ch,
-                d_write_buf
+                d_write_buf,
+                d_scatter_actual + ch
             );
         }
         CUDA_CHECK(cudaDeviceSynchronize());
+
+        // ---- Scatter consistency check: compare actual vs expected per output ----
+        {   std::vector<int> h_actual_counts(h_num_out);
+            CUDA_TIMED_MEMCPY(h_actual_counts.data(), d_scatter_actual,
+                                   h_num_out * sizeof(int), cudaMemcpyDeviceToHost);
+            int total_mismatch = 0;
+            for (int oi = 0; oi < h_num_out; oi++) {
+                if (h_actual_counts[oi] != h_out_sizes[oi]) {
+                    if (total_mismatch < 20) {
+                        printf("[GPU_FB_SCATTER_MISMATCH] Lvl %d oi=%d: expected=%d actual=%d color=%d\n",
+                               total_levels, oi, h_out_sizes[oi], h_actual_counts[oi], h_out_colors[oi]);
+                    }
+                    total_mismatch++;
+                }
+            }
+            if (total_mismatch > 0) {
+                printf("[GPU_FB_SCATTER] Lvl %d: %d/%d outputs mismatch\n",
+                       total_levels, total_mismatch, h_num_out);
+            }
+        }
 
         // ---- GPU-only: keep scatter results on device, no D2H ----
         // Build next iteration metadata from prefix sums (already on host)
