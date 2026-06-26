@@ -298,10 +298,16 @@ __global__ void gpu_fb_batch_kernel(
     // ================================================================
     int local_fw = 0, local_bw = 0, local_base = 0;
     for (int i = tid; i < comp_size; i += stride) {
-        int c = d_Color[smem_nodes[i]];
+        int node = smem_nodes[i];
+        int c = d_Color[node];
         if (c == fw_color)        local_fw++;
         else if (c == bw_color)   local_bw++;
         else if (c == base_color) local_base++;
+        else if (c != SCC_FOUND) {
+            // Stolen by another component's parallel FW-BFS — reclaim as fw_set
+            d_Color[node] = fw_color;
+            local_fw++;
+        }
     }
 
     // Warp-level reduction
