@@ -176,22 +176,25 @@ __global__ void gpu_fb_batch_kernel(
 
             for (edge_t e = d_begin[n]; e < d_begin[n + 1]; e++) {
                 node_t k = d_node_idx[e];
-                int old = atomicCAS(&d_Color[k], base_color, fw_color);
-                if (old == base_color) {
-                    // Find position in shared memory
-                    // Hash lookup: O(1) instead of O(comp_size) linear search
-                    unsigned hk = (unsigned)k * 2654435761u;
-                    int slot = (int)(hk >> 20) & (GPU_FB_HASH_SIZE - 1);
-                    while (1) {
-                        int pos = smem_hash[slot];
-                        if (pos < 0) break;  // not found (shouldn't happen for valid k)
-                        if (smem_nodes[pos] == k) {
-                            smem_fw_flag[pos] = 1;
-                            int np = atomicAdd((int*)&smem_ncount, 1);
-                            if (np < GPU_FB_MAX_SMEM_NODES) smem_next[np] = pos;
-                            break;
-                        }
-                        slot = (slot + 1) & (GPU_FB_HASH_SIZE - 1);
+                // Hash lookup FIRST: only claim k if it's in this component's SMEM.
+                // This prevents cross-component contamination: changing d_Color[k]
+                // for a node outside this block's SMEM would leak fw_color to nodes
+                // that belong to other components but share the same base_color.
+                unsigned hk = (unsigned)k * 2654435761u;
+                int slot = (int)(hk >> 20) & (GPU_FB_HASH_SIZE - 1);
+                int k_pos = -1;
+                while (1) {
+                    int pos = smem_hash[slot];
+                    if (pos < 0) break;
+                    if (smem_nodes[pos] == k) { k_pos = pos; break; }
+                    slot = (slot + 1) & (GPU_FB_HASH_SIZE - 1);
+                }
+                if (k_pos >= 0) {
+                    int old = atomicCAS(&d_Color[k], base_color, fw_color);
+                    if (old == base_color) {
+                        smem_fw_flag[k_pos] = 1;
+                        int np = atomicAdd((int*)&smem_ncount, 1);
+                        if (np < GPU_FB_MAX_SMEM_NODES) smem_next[np] = k_pos;
                     }
                 }
             }
@@ -241,45 +244,35 @@ __global__ void gpu_fb_batch_kernel(
             for (edge_t e = d_r_begin[n]; e < d_r_begin[n + 1]; e++) {
                 node_t k = d_r_node_idx[e];
 
-                // TOCTOU-safe: two separate atomicCAS calls instead of read-then-CAS
-                // First try: claim fw_color node as SCC_FOUND
-                int old = atomicCAS(&d_Color[k], fw_color, SCC_FOUND);
-                if (old == fw_color) {
-                    d_SCC[k] = smem_nodes[pivot_pos];
-                    // Hash lookup: O(1) instead of O(comp_size) linear search
-                    unsigned hk = (unsigned)k * 2654435761u;
-                    int slot = (int)(hk >> 20) & (GPU_FB_HASH_SIZE - 1);
-                    while (1) {
-                        int pos = smem_hash[slot];
-                        if (pos < 0) break;
-                        if (smem_nodes[pos] == k) {
-                            smem_bw_flag[pos] = 1;
+                // Hash lookup FIRST: only process k if it's in this component's SMEM.
+                unsigned hk = (unsigned)k * 2654435761u;
+                int slot = (int)(hk >> 20) & (GPU_FB_HASH_SIZE - 1);
+                int k_pos = -1;
+                while (1) {
+                    int pos = smem_hash[slot];
+                    if (pos < 0) break;
+                    if (smem_nodes[pos] == k) { k_pos = pos; break; }
+                    slot = (slot + 1) & (GPU_FB_HASH_SIZE - 1);
+                }
+                if (k_pos >= 0) {
+                    // TOCTOU-safe: two separate atomicCAS calls instead of read-then-CAS
+                    // First try: claim fw_color node as SCC_FOUND
+                    int old = atomicCAS(&d_Color[k], fw_color, SCC_FOUND);
+                    if (old == fw_color) {
+                        d_SCC[k] = smem_nodes[pivot_pos];
+                        smem_bw_flag[k_pos] = 1;
+                        int np = atomicAdd((int*)&smem_ncount, 1);
+                        if (np < GPU_FB_MAX_SMEM_NODES) smem_next[np] = k_pos;
+                    } else {
+                        // Second try: claim base_color node as bw_color
+                        old = atomicCAS(&d_Color[k], base_color, bw_color);
+                        if (old == base_color) {
+                            smem_bw_flag[k_pos] = 1;
                             int np = atomicAdd((int*)&smem_ncount, 1);
-                            if (np < GPU_FB_MAX_SMEM_NODES) smem_next[np] = pos;
-                            break;
+                            if (np < GPU_FB_MAX_SMEM_NODES) smem_next[np] = k_pos;
                         }
-                        slot = (slot + 1) & (GPU_FB_HASH_SIZE - 1);
+                        // else: already claimed by another thread, or SCC_FOUND — skip
                     }
-                } else {
-                    // Second try: claim base_color node as bw_color
-                    old = atomicCAS(&d_Color[k], base_color, bw_color);
-                    if (old == base_color) {
-                        // Hash lookup: O(1) instead of O(comp_size) linear search
-                        unsigned hk = (unsigned)k * 2654435761u;
-                        int slot = (int)(hk >> 20) & (GPU_FB_HASH_SIZE - 1);
-                        while (1) {
-                            int pos = smem_hash[slot];
-                            if (pos < 0) break;
-                            if (smem_nodes[pos] == k) {
-                                smem_bw_flag[pos] = 1;
-                                int np = atomicAdd((int*)&smem_ncount, 1);
-                                if (np < GPU_FB_MAX_SMEM_NODES) smem_next[np] = pos;
-                                break;
-                            }
-                            slot = (slot + 1) & (GPU_FB_HASH_SIZE - 1);
-                        }
-                    }
-                    // else: already claimed by another thread, or SCC_FOUND — skip
                 }
             }
         }
@@ -390,7 +383,7 @@ __global__ void bulk_scatter_single_color_kernel(
     int num_out,
     const int* d_bulk_offsets,  // [num_out] prefix sum of sizes
     int* d_bulk_buf,            // [total_nodes] flat output buffer
-    int* d_out_actual)          // [num_out] actual count written (diagnostic)
+    int* d_out_actual)          // [num_out] actual count written (diagnostic, NULL=skip)
 {
     int oi = blockIdx.x;
     if (oi >= num_out) return;
@@ -398,7 +391,7 @@ __global__ void bulk_scatter_single_color_kernel(
     int sz = d_out_sizes[oi];
     int color = d_out_colors[oi];
     if (sz <= 0) {
-        if (threadIdx.x == 0) d_out_actual[oi] = 0;
+        if (d_out_actual && threadIdx.x == 0) d_out_actual[oi] = 0;
         return;
     }
 
@@ -440,7 +433,7 @@ __global__ void bulk_scatter_single_color_kernel(
     }
 
     // Record actual count written (for scatter vs counting consistency check)
-    if (threadIdx.x == 0) {
+    if (d_out_actual && threadIdx.x == 0) {
         d_out_actual[oi] = s_pos - base;
     }
 }
@@ -665,10 +658,6 @@ double run_gpu_fb(GPUState& st, const GPUGraph& g, int num_threads)
         {   int max_color = 0;
             for (int c : cur.colors) if (c > max_color) max_color = c;
             int color_base = max_color + 1024;  // start safely above existing colors
-            if (total_levels <= 10 || total_levels % 100 == 0 || color_base < 0) {
-                printf("[GPU_FB_COLOR] Lvl %d: max_color=%d base=%d comps=%zu\n",
-                       total_levels, max_color, color_base, cur.sizes.size());
-            }
             CUDA_TIMED_MEMCPY(d_fb_color_counter, &color_base, sizeof(int),
                                cudaMemcpyHostToDevice);
         }
@@ -710,17 +699,6 @@ double run_gpu_fb(GPUState& st, const GPUGraph& g, int num_threads)
         CUDA_TIMED_MEMCPY(h_out_colors.data(), d_out_colors,
                                h_num_out * sizeof(int), cudaMemcpyDeviceToHost);
 
-        // ---- Node count consistency check ----
-        {   int sum_out = 0;
-            for (int i = 0; i < h_num_out; i++) sum_out += h_out_sizes[i];
-            int diff = total_src_nodes - sum_out;
-            if (diff != 0) {
-                printf("[GPU_FB_NODES] Lvl %d: total_src=%d sum_out=%d diff=%d (%.2f%%)\n",
-                       total_levels, total_src_nodes, sum_out, diff,
-                       100.0 * diff / (total_src_nodes > 0 ? total_src_nodes : 1));
-            }
-        }
-
         gettimeofday(&ts, NULL);
 
         // Compute prefix sums on host (offsets into d_bulk_buf)
@@ -751,21 +729,12 @@ double run_gpu_fb(GPUState& st, const GPUGraph& g, int num_threads)
         CUDA_TIMED_MEMCPY(d_bulk_off, h_bulk_offsets.data(),
                                (h_num_out + 1) * sizeof(int), cudaMemcpyHostToDevice);
 
-        // Allocate actual-counts buffer for scatter validation
-        static int* d_scatter_actual = NULL;
-        static int  d_scatter_actual_cap = 0;
-        if (d_scatter_actual_cap < h_num_out) {
-            if (d_scatter_actual) cudaFree(d_scatter_actual);
-            d_scatter_actual_cap = max(h_num_out * 2, 1024);
-            cudaMalloc(&d_scatter_actual, d_scatter_actual_cap * sizeof(int));
-        }
-
         // Determine write buffer: opposite of current d_gpu_nodes (double-buffer)
         bool is_first_scatter = (d_gpu_nodes != d_bulk_buf_A && d_gpu_nodes != d_bulk_buf_B);
         int* d_write_buf = is_first_scatter ? d_bulk_buf_A
                          : (d_gpu_nodes == d_bulk_buf_A ? d_bulk_buf_B : d_bulk_buf_A);
 
-        // Launch bulk scatter: one block per sub-component, chunked for max grid
+        //        // Launch bulk scatter: one block per sub-component, chunked for max grid
         int scatter_max_grid = 65535;
         for (int ch = 0; ch < h_num_out; ch += scatter_max_grid) {
             int n = min(scatter_max_grid, h_num_out - ch);
@@ -774,30 +743,10 @@ double run_gpu_fb(GPUState& st, const GPUGraph& g, int num_threads)
                 d_out_sizes + ch, d_out_colors + ch, n,
                 d_bulk_off + ch,
                 d_write_buf,
-                d_scatter_actual + ch
+                NULL  // no actual-counts diagnostic
             );
         }
         CUDA_CHECK(cudaDeviceSynchronize());
-
-        // ---- Scatter consistency check: compare actual vs expected per output ----
-        {   std::vector<int> h_actual_counts(h_num_out);
-            CUDA_TIMED_MEMCPY(h_actual_counts.data(), d_scatter_actual,
-                                   h_num_out * sizeof(int), cudaMemcpyDeviceToHost);
-            int total_mismatch = 0;
-            for (int oi = 0; oi < h_num_out; oi++) {
-                if (h_actual_counts[oi] != h_out_sizes[oi]) {
-                    if (total_mismatch < 20) {
-                        printf("[GPU_FB_SCATTER_MISMATCH] Lvl %d oi=%d: expected=%d actual=%d color=%d\n",
-                               total_levels, oi, h_out_sizes[oi], h_actual_counts[oi], h_out_colors[oi]);
-                    }
-                    total_mismatch++;
-                }
-            }
-            if (total_mismatch > 0) {
-                printf("[GPU_FB_SCATTER] Lvl %d: %d/%d outputs mismatch\n",
-                       total_levels, total_mismatch, h_num_out);
-            }
-        }
 
         // ---- GPU-only: keep scatter results on device, no D2H ----
         // Build next iteration metadata from prefix sums (already on host)
