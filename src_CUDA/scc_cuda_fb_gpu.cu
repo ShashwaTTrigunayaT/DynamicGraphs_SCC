@@ -399,21 +399,32 @@ __global__ void bulk_scatter_single_color_kernel(
     int tid = threadIdx.x;
     int stride = blockDim.x;
 
-    for (int i = tid; i < num_src; i += stride) {
-        bool match = (d_Color[d_in_nodes[i]] == color);
+    // ALL threads in the warp must iterate the same number of iterations.
+    // The old for-loop (for i = tid; i < num_src; i += stride) caused
+    // divergent exits on the last partial stride — some lanes exit early,
+    // missing __ballot_sync and causing undefined behavior.
+    //
+    // Fix: iterate a uniform total_iters. Threads with i >= num_src
+    // participate in ballots (voting false) but skip the d_Color lookup.
+    int total_iters = (num_src + stride - 1) / stride;
+    for (int iter = 0; iter < total_iters; iter++) {
+        int i = tid + iter * stride;
+        bool in_bounds = (i < num_src);
 
-        // NOTE: must use __activemask() for __ballot_sync/__shfl_sync!
-        // When num_src is not a multiple of 32 within the last stride,
-        // some lanes in the last warp have exited the loop and can't
-        // participate. 0xffffffff causes undefined behavior with exited
-        // threads — the mask must reflect only converged, active lanes.
-        unsigned active = __activemask();
+        // ALL 32 lanes converge here (guaranteed — same loop count for all).
+        // Returns mask of lanes where in_bounds is true.
+        unsigned active = __ballot_sync(0xffffffff, in_bounds);
+
+        // Only compute match for in-bounds nodes
+        bool match = false;
+        if (in_bounds) {
+            match = (d_Color[d_in_nodes[i]] == color);
+        }
+
         unsigned mask = __ballot_sync(active, match);
         int lane = threadIdx.x & 31;
         int warp_count = __popc(mask);
 
-        // Lowest-numbered active lane is the leader (not hardcoded lane 0,
-        // because lane 0 may have exited the loop on the tail iteration).
         int leader = __ffs(active) - 1;
         int pos = 0;
         if (lane == leader && warp_count > 0)
@@ -635,6 +646,19 @@ double run_gpu_fb(GPUState& st, const GPUGraph& g, int num_threads)
         CUDA_TIMED_MEMCPY(d_in_comp_color, cur.colors.data(),
                                cur_comps * sizeof(int), cudaMemcpyHostToDevice);
         CUDA_CHECK(cudaMemset(d_num_out, 0, sizeof(int)));
+
+        // ---- Reset color counter to prevent overflow ----
+        // Each level needs at most 37K components × 1024 = ~38M color slots.
+        // With 2^17 = 131K slots per level, we can handle 2^14 = 16384 levels
+        // without any cross-level color collision.
+        // The base is ABOVE the maximum current color in d_Color to avoid
+        // clobbering base_colors used by existing components.
+        {   int max_color = 0;
+            for (int c : cur.colors) if (c > max_color) max_color = c;
+            int color_base = max_color + 1024;  // start safely above existing colors
+            CUDA_TIMED_MEMCPY(d_fb_color_counter, &color_base, sizeof(int),
+                               cudaMemcpyHostToDevice);
+        }
 
         // ---- Launch batch kernel ----
         gettimeofday(&ts, NULL);
