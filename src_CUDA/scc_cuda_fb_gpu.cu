@@ -734,7 +734,7 @@ double run_gpu_fb(GPUState& st, const GPUGraph& g, int num_threads)
         int* d_write_buf = is_first_scatter ? d_bulk_buf_A
                          : (d_gpu_nodes == d_bulk_buf_A ? d_bulk_buf_B : d_bulk_buf_A);
 
-        //        // Launch bulk scatter: one block per sub-component, chunked for max grid
+                // Launch bulk scatter: one block per sub-component, chunked for max grid
         int scatter_max_grid = 65535;
         for (int ch = 0; ch < h_num_out; ch += scatter_max_grid) {
             int n = min(scatter_max_grid, h_num_out - ch);
