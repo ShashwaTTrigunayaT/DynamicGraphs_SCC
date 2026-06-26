@@ -54,12 +54,11 @@ echo ""
 # ==============================================================================
 # Warmup: run CUDA once to stabilize GPU clocks
 # ==============================================================================
-echo "--- Warmup: GPU clock stabilization + CPU cooldown ---"
-(cd "$SCRIPT_DIR/src_CUDA" && "$CUDA_BIN" "$DATASET" "$THREADS" 2 >/dev/null 2>&1) || true
-# Warmup's FB phase uses 72 OpenMP threads — let CPU cool before timed run
-sleep 1
-echo "  Done."
-echo ""
+# No warmup — running CUDA first (cold CPU) gives the most accurate timing.
+# The FB phase runs OpenMP on CPU, so a warmup or prior OpenMP run heats
+# the CPU and inflates FB time from ~1.4ms to ~15+ms.
+# Run OpenMP commands on separate cores using taskset to avoid interference.
+
 
 # ==============================================================================
 # 1) Run CUDA (warm GPU)

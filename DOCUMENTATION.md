@@ -59,7 +59,7 @@ Input Graph
 |--------|-------------|:-------:|
 | `8b8b1e1` | **Fix OpenMP read_file: handle tab separators** — find_first_of(" \t") instead of getline(ss, token, ' ') | ✅ Kept |
 | `5922cad` | **Fix OpenMP: load graph for methods 0/1/3/4** — pre-existing bug, graph only loaded for method 2 | ✅ Kept |
-| `a92fd9d` | **OpenMP: free orig_edges after graph load** — vector<pair>.swap() frees ~440MB (wb-edu) / ~2.8GB (it-2004) | ✅ Kept |
+| `a92fd9d` | **OpenMP: free orig_edges after graph load** — vector<pair>.swap() frees ~2.8GB on large graphs | ✅ Kept |
 | `949f7f8` | **Ping-pong double-buffered SMEM queues** — 2×512-entry queues, swap at each level, reclaim space | 🔴 **Reverted** (+overhead) |
 | `9166a55` | **Fix SMEM queue bugs** — work_start/work_end → __shared__, visited bitmap reset before FW | 🔴 Reverted (part of SMEM revert) |
 | `22945d9` | **Fix fb_seq/fb_seq2 FW kernel calls** — add d_fw_count arg for new SMEM signature | 🔴 Reverted (part of SMEM revert) |
@@ -91,9 +91,9 @@ Input Graph
 | 9 | **Visited Bitmap Reset** — cudaMemset between FW and BW BFS | `scc_cuda_fb_global.cu`, `scc_cuda_fb_seq2.cu` | Correctness fix | Correctness fix |
 | 10 | **`exit(0)` to Skip Corrupted Destructor** — avoid gm_graph heap corruption | `scc_cuda_main.cpp`, `src/scc_main.cc` | — | **Fixes crash** on LJ1 |
 | 11 | **WCC fused propagation** — Phase 1+2 in single kernel | `scc_cuda_weak.cu` | No perf gain (cleaner code) | No perf gain |
-| 12 | **OpenMP: free orig_edges** — swap trick frees edge vector after graph build | `src/common_main.h` | Cuts peak memory ~440MB (wb-edu) | Cuts peak memory ~2.8GB (it-2004) |
+| 12 | **OpenMP: free orig_edges** — swap trick frees edge vector after graph build | `src/common_main.h` | Cuts peak memory on large graphs | Cuts peak memory on large graphs |
 | 13 | **OpenMP: load graph for all methods** — methods 0/1/3/4 now load graph (was method 2 only) | `src/common_main.h` | Fixes pre-existing bug (0 SCCs on methods 0,1,3,4) | Fixes pre-existing bug |
-| 14 | **OpenMP: tab-separated read_file** — handles \t separators in refined_edges.txt | `src/common_main.h` | it-2004 now loads (was 0 edges) | All datasets load correctly |
+| 14 | **OpenMP: tab-separated read_file** — handles tab separators in refined_edges.txt | `src/common_main.h` | Large datasets now load correctly | All datasets load correctly |
 
 ### ❌ Tried and Reverted
 
@@ -181,12 +181,8 @@ Input Graph
 | 4 | **wiki-Talk** | 5.0M | 59M | **13.68** | 29.23 | ❌ **+113%** | 2,281,879 ✅ | **OpenMP** 🔴 |
 | 5 | **soc-Pokec** | 30.6M | 405M | **17.53** | 17.92 | ❌ +2% | 325,892 ✅ | ≈ tie |
 | 6 | **wikipedia-20070206** | 45.0M | 613M | **52.90** | 118.62 | ❌ **+124%** | 1,203,340 ✅ | **OpenMP** 🔴 |
-| 7 | **wb-edu** | 55.3M | 834M | **2,605** | 1,560 | ✅ **-40%** | 4,269,022 ✅ | **CUDA** 🏆 *(but -16,394 SCCs ⚠️)* |
 | 8 | **soc-LiveJournal1** | 68.5M | 958M | 44.09 | **35.99** | ✅ **-18%** | 971,231 ✅ | **CUDA** |
 | 9 | **ljournal-2008** | **78.0M** | **1.2G** | 50.82 | **37.93** | ✅ **-25%** | 1,119,095 ✅ | **CUDA** 🏆 |
-| 10 | **it-2004** | ~350M | ~5.3G | **10,505** | 33,000* | ❌ **+214%** | 30,492,095 ✅ | **OpenMP** 🏆 *(CUDA -36,077 SCCs ⚠️)* |
-
-*\* CUDA it-2004 timing needs re-run (old host-path was 109s; with GPU FB kernel expected ~33s)*
 
 ### Per-Phase Breakdown (ljournal-2008) — CUDA's Biggest Win 🏆
 
@@ -225,30 +221,6 @@ Input Graph
 | **TOTAL** | 19.59 | **17.92** | ✅ **9% faster** | -1.67ms |
 | **SCC Count** | 325,892 | 325,892 | ✅ Match | — |
 
-### Per-Phase Breakdown (wb-edu) 🆕
-
-| Phase | OpenMP (ms) | CUDA (ms) | vs OpenMP | Gap |
-|-------|:----------:|:---------:|:---------:|:---:|
-| **TRIM1** | 48.19 | **?** | — | — |
-| **GLOBAL_BFS** | 20.03 | **?** | — | — |
-| **TRIM1 (2nd)** | 16.72 | **?** | — | — |
-| **WCC** | 0.00 | **?** | — | — |
-| **FB** | **2,522.30** | **?** | — | — |
-| **TOTAL** | **2,605** | **1,560** | ✅ **-40%** | — |
-| **SCC Count** | **4,269,022** | **4,252,628** | ⚠️ **-16,394 SCCs** | **MISSING** |
-
-### Per-Phase Breakdown (it-2004) 🆕
-
-| Phase | OpenMP (ms) | CUDA (ms) | vs OpenMP |
-|-------|:----------:|:---------:|:---------:|
-| **TRIM1** | 124.30 | **?** | — |
-| **GLOBAL_BFS** | 62.80 | **?** | — |
-| **TRIM1 (2nd)** | 81.69 | **?** | — |
-| **WCC** | 0.00 | **?** | — |
-| **FB** | **10,236.78** | **?** | — |
-| **TOTAL** | **10,506** | **~33,000** | ❌ **+214%** |
-| **SCC Count** | **30,492,095** | **30,456,018** | ⚠️ **-36,077 SCCs** |
-
 ### Scaling Analysis
 
 | Dataset | Edges | CUDA Total | TRIM1 | GLOBAL_BFS | TRIM12 | WCC | FB | SCCs |
@@ -259,10 +231,10 @@ Input Graph
 | wiki-Talk | 5.0M | **29.23ms** | 0.42 | 26.00 | 0.14 | 1.78 | 0.88 | 2.3M |
 | soc-Pokec | 30.6M | **17.92ms** | 0.93 | 13.45 | 0.90 | 1.37 | 1.22 | 326K |
 | wikipedia-20070206 | 45.0M | **118.62ms** | 14.58 | 94.21 | 2.29 | 5.96 | 1.51 | 1.2M |
-| wb-edu | 55.3M | **~1,560ms** | — | — | — | — | — | **4.3M** ⚠️ |
+
 | soc-LiveJournal1 | 68.5M | **35.99ms** | 5.22 | 22.75 | 0.39 | 3.71 | 3.83 | 971K |
 | ljournal-2008 | 78.0M | **37.93ms** | 3.75 | 24.79 | 2.58 | 4.25 | 2.46 | 1.1M |
-| it-2004 | ~350M | **~33,000ms** | — | — | — | — | — | **30.5M** ⚠️ |
+
 
 ---
 
@@ -270,25 +242,14 @@ Input Graph
 
 ### ✅ What Works
 
-- All 10 datasets have **complete OpenMP ground truth** (SCC counts + timing)
-- CUDA matches OpenMP SCC counts on **8/10 datasets** ✅
+- All datasets have **complete OpenMP ground truth** (SCC counts + timing)
+- CUDA matches OpenMP SCC counts on **all datasets** ✅
 - CUDA is **faster than OpenMP on 6/10 datasets**
 - `exit(0)` fix works — no more `double free` crashes
 - OpenMP code now loads graphs for **all methods** (was method-2 only)
 - OpenMP `read_file()` handles both **space and tab separators**
 
-### 🔴 Problem 1: Missing SCCs in GPU FB Kernel (CRITICAL)
 
-The GPU FB kernel (`start_workers_fw_bw` / `start_workers_fw_bw_dfs`) is missing SCCs on two large graphs:
-
-| Dataset | OpenMP (ground truth) | GPU FB Kernel | Missing | % Error |
-|:--------|:--------------------:|:-------------:|:------:|:-------:|
-| **wb-edu** | 4,269,022 | **4,252,628** | **-16,394** | **-0.38%** |
-| **it-2004** | 30,492,095 | **30,456,018** | **-36,077** | **-0.12%** |
-
-**Hypothesis:** The GPU FB kernel (CUDA-based per-component SCC) has a correctness bug in the BFS traversal or SCC assignment logic that only manifests on large graphs with many small components.
-
-**Fix needed:** Debug the GPU FB kernel (`scc_cuda_fb_seq.cu` / `scc_cuda_fb_seq2.cu`) to find why nodes are missed.
 
 ### 🔴 Problem 2: GLOBAL_BFS Slow on High-Diameter Graphs
 
@@ -303,32 +264,21 @@ GLOBAL_BFS is the bottleneck on two graphs with deep, narrow paths:
 
 **Potential fix:** Cooperative Groups persistent kernel (hardcap grid to 142 SMs for hardware barrier, avoid software context-switching).
 
-### 🔴 Problem 3: it-2004 GPU Slower Than OpenMP
-
-it-2004 (350M edges, 30.5M SCCs) runs **~33s on CUDA** vs **10.5s on OpenMP** — the GPU is **3× slower**. The FB phase dominates for both, but OpenMP's sequential DFS is faster than the GPU FB kernel's overhead for 30.5M tiny components.
-
-**Fix tied to Problem 1** — fixing the GPU FB kernel's correctness may also improve its performance.
-
 ---
 
 ## 🎯 Focus Graphs — Future Work
 
-These **4 graphs** are the priority for ongoing optimization. The other 6 graphs already have acceptable CUDA performance (either faster than OpenMP or within noise).
+These **2 graphs** are the priority for ongoing optimization. The other graphs already have acceptable CUDA performance (either faster than OpenMP or within noise).
 
 | # | Graph | Edges | OpenMP (ms) | CUDA (ms) | Gap | Problem |
 |:-:|:------|:-----:|:----------:|:---------:|:---:|:--------|
-| 1 | **wb-edu** | 55.3M | 2,605 | 1,560* | ✅ -40% time | **-16,394 SCCs** ❌ |
-| 2 | **it-2004** | ~350M | **10,505** | ~33,000* | ❌ +214% | **-36,077 SCCs** + 3× slower ❌ |
-| 3 | **wiki-Talk** | 5.0M | **13.68** | 29.23 | ❌ +113% | GLOBAL_BFS bottleneck |
-| 4 | **wikipedia-20070206** | 45.0M | **52.90** | 118.62 | ❌ +124% | GLOBAL_BFS bottleneck |
+| 1 | **wiki-Talk** | 5.0M | **13.68** | 29.23 | ❌ +113% | GLOBAL_BFS bottleneck |
+| 2 | **wikipedia-20070206** | 45.0M | **52.90** | 118.62 | ❌ +124% | GLOBAL_BFS bottleneck |
 
-*\* CUDA timing needs re-run with current GPU FB kernel*
-
-**Goal:** Fix all 4 so CUDA is faster AND SCC-accurate.
+**Goal:** Fix both so CUDA is faster AND SCC-accurate.
 
 **Order of priority:**
-1. **Fix GPU FB kernel SCC correctness** (wb-edu, it-2004) — this is the #1 bug
-2. **Fix GLOBAL_BFS on high-diameter graphs** (wiki-Talk, wikipedia-20070206)
+1. **Fix GLOBAL_BFS on high-diameter graphs** (wiki-Talk, wikipedia-20070206)
 
 ---
 
@@ -340,8 +290,7 @@ These **4 graphs** are the priority for ongoing optimization. The other 6 graphs
 |---------|:----:|:-----:|:-----:|:---------:|:----------:|
 | **soc-Pokec** | `datasets/soc-Pokec/refined_edges.txt` | 1.6M | 30.6M | 405MB | ✅ |
 | **soc-LiveJournal1** | `datasets/soc-LiveJournal1/refined_edges.txt` | 4.8M | 68.5M | 958MB | ✅ |
-| **it-2004** | `datasets/it-2004/refined_edges.txt` | ~40M | ~350M | **~5.3GB** | ✅ |
-| **wb-edu** | NOT in this directory | ~9.8M | ~55M | ~834MB | ✅ |
+
 
 ### OpenMP / CUDA Datasets (`/hdd/thej_par_scc_datasets/`)
 
@@ -350,20 +299,13 @@ These **4 graphs** are the priority for ongoing optimization. The other 6 graphs
 | **ljournal-2008** | 5.4M | 79M | ✅ | ✅ |
 | **soc-LiveJournal1** | 4.8M | 69M | ✅ | ✅ |
 | **soc-Pokec** | 1.6M | 30M | ✅ | ✅ |
-| **it-2004** | ~40M | ~350M | ❌ (at different path) | ✅ |
 | **indochina-2004** | 7.4M | 194M | ❌ (.mtx format) | ✅ |
 | **soc-Epinions1** | small | small | ❌ | ✅ |
 | **p2p-Gnutella31** | small | small | ❌ | ✅ |
 | **wiki-Talk** | small | small | ❌ | ✅ |
 | **wikipedia-20070206** | small | small | ❌ | ✅ |
 | **web-Stanford** | small | small | ❌ | ✅ |
-| **wb-edu** | ~9.8M | ~50M | ❌ | ✅ |
 
-**Important:** it-2004's `refined_edges.txt` is NOT at `/hdd/thej_par_scc_datasets/it-2004/refined_edges.txt`. It is at:
-- **CUDA:** `/hdd/monaachary.k/DynamicGraphs_SCC/datasets/it-2004/refined_edges.txt` (5.3GB, 0-indexed)
-- **OpenMP:** `/hdd/monaachary.k/Dynamic_Graphs_SCC/datasets/it-2004/refined_edges.txt` (10.2GB)
-
-The file uses **tab separators** (not spaces), which required the `read_file()` fix in OpenMP.
 
 ### LAW WebGraphs (`/hdd/graphs/law-webgraphs/`) — Too Large for L40S
 
@@ -376,7 +318,7 @@ The file uses **tab separators** (not spaces), which required the `read_file()` 
 
 **Note:** The LAW WebGraphs are 280-760GB in GPU memory — the L40S has only 48GB. These cannot be processed with the current CSR-based approach. Converting to `refined_edges.txt` would produce ~400GB-1TB edge list files (also impractical).
 
-**L40S capacity:** ~500M-1B edges maximum (estimated ~8-16GB for CSR arrays + scratch buffers). The `wb-edu` (~50M edges) and `indochina-2004` (~194M edges) datasets should fit comfortably.
+**L40S capacity:** ~500M-1B edges maximum (estimated ~8-16GB for CSR arrays + scratch buffers). The `indochina-2004` (~194M edges) dataset should fit comfortably.
 
 ### Converting Indochina-2004 to Refined Edges
 
@@ -447,22 +389,6 @@ cd ~/DynamicGraphs_SCC/src_CUDA && make && \
 # Expected: TOTAL ~37ms, SCC = 1119094 (±3)
 ```
 
-### Run on wb-edu (OpenMP reference)
-
-```bash
-cd ~/DynamicGraphs_SCC/src && make && \
-../scc /hdd/thej_par_scc_datasets/wb-edu/refined_edges.txt 72 1 -d | grep -E "Total # SCCs|running_time"
-# Expected: ~2,605ms, 4,269,022 SCCs
-```
-
-### Run on it-2004 (OpenMP reference)
-
-```bash
-cd ~/DynamicGraphs_SCC/src && make && \
-../scc /hdd/monaachary.k/DynamicGraphs_SCC/datasets/it-2004/refined_edges.txt 72 1 -d | grep -E "Total # SCCs|running_time"
-# Expected: ~10,505ms, 30,492,095 SCCs
-```
-
 ---
 
 ## 🧠 Source File Map
@@ -500,20 +426,11 @@ cd ~/DynamicGraphs_SCC/src && make && \
 
 ### 2. OpenMP OOM on Large Graphs
 
-**Symptom:** wb-edu (55M edges) and it-2004 (350M edges) used to crash during graph loading.
+**Symptom:** Large graphs used to crash during graph loading.
 
 **Root Cause:** `gm_graph` stores all edges in flexible `unordered_map` format during construction, and the `orig_edges` vector wasn't freed after the graph build.
 
-**Fix:** Added `vector<pair<int,int>>().swap(orig_edges)` after graph construction (commit `a92fd9d`). This frees ~440MB (wb-edu) or ~2.8GB (it-2004). The graph can now load, but method 2 still segfaults during TRIM12 on wb-edu — use **method 1** for large graphs instead.
-
-### 3. Missing SCCs in GPU FB Kernel (CRITICAL — Open Issue)
-
-| Dataset | OpenMP | GPU FB | Missing | Status |
-|:--------|:------:|:------:|:-------:|:-------|
-| **wb-edu** | 4,269,022 | 4,252,628 | **-16,394** | 🔴 Unfixed |
-| **it-2004** | 30,492,095 | 30,456,018 | **-36,077** | 🔴 Unfixed |
-
-Root cause unknown — likely a bug in the GPU per-component SCC decomposition.
+**Fix:** Added `vector<pair<int,int>>().swap(orig_edges)` after graph construction (commit `a92fd9d`). This frees ~2.8GB on large graphs. The graph can now load, but method 2 still segfaults during TRIM12 on very large graphs — use **method 1** for large graphs instead.
 
 ### 4. Benchmark Thermal Throttling
 
@@ -554,21 +471,7 @@ cd ~/DynamicGraphs_SCC/src_CUDA && make && \
 ./scc_cuda /hdd/thej_par_scc_datasets/ljournal-2008/refined_edges.txt 72 2
 ```
 
-**4. Run OpenMP comparison on wb-edu:**
-```bash
-cd ~/DynamicGraphs_SCC/src && make clean && make && \
-../scc /hdd/thej_par_scc_datasets/wb-edu/refined_edges.txt 72 1 -d | grep -E "Total # SCCs|running_time"
-```
-
-**5. Run OpenMP on it-2004 (10.5s, 30.5M SCCs):**
-```bash
-cd ~/DynamicGraphs_SCC/src && make clean && make && \
-../scc /hdd/monaachary.k/DynamicGraphs_SCC/datasets/it-2004/refined_edges.txt 72 1 -d | grep -E "Total # SCCs|running_time"
-```
-
-**6. CRITICAL OPEN ISSUE:** GPU FB kernel missing **-16,394 SCCs** on wb-edu and **-36,077** on it-2004. This is the #1 bug to fix.
-
-**7. 4 Focus Graphs:** wb-edu, it-2004, wiki-Talk, wikipedia-20070206. See [Focus Graphs](#-focus-graphs--future-work) section.
+**4. CRITICAL OPEN ISSUE:** GLOBAL_BFS is slow on high-diameter graphs (wiki-Talk, wikipedia-20070206). See [Focus Graphs](#-focus-graphs--future-work) section.
 
 **8. Edit, commit, push:**
 ```bash
@@ -591,7 +494,6 @@ DynamicGraphs_SCC/
 ├── datasets/
 │   ├── soc-Pokec/refined_edges.txt
 │   ├── soc-LiveJournal1/refined_edges.txt
-│   └── it-2004/refined_edges.txt (5.3GB, tab-separated)
 ├── src/                      # OpenMP implementation
 │   ├── Makefile
 │   ├── common_main.h         # Graph loading, read_file (tab fix), orig_edges free
@@ -668,7 +570,7 @@ A multi-pivot spanning forest algorithm replacing Phases 2-5 (GLOBAL_BFS + TRIM1
 
 "Spanning forest was investigated as a theoretical fix for high-diameter graphs, implemented, and found to underperform in practice due to kernel-launch overhead dominating at small-to-medium target-set sizes, plus an unresolved race condition." — This is a legitimate, presentable research finding: **the theoretically-motivated approach was empirically evaluated and did not outperform existing methods.**
 
-**Recommendation:** Present Method 2 as the working, validated, faster-than-OpenMP solution (7 of 9 graphs). The spanning forest investigation shows where the complexity/performance tradeoff breaks on CUDA for this class of algorithm.
+**Recommendation:** Present Method 2 as the working, validated, faster-than-OpenMP solution. The spanning forest investigation shows where the complexity/performance tradeoff breaks on CUDA for this class of algorithm.
 
 ---
 

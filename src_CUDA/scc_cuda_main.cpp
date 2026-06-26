@@ -407,7 +407,7 @@ int main(int argc, char** argv)
 
             // ---------- Phase 3: TRIM1 (compact) ----------
             trimmed = repeat_global_trim1_compact(st, gpuG, d_count,
-                met_algo, flag11, da, d_count_trim_spec, 0);
+                met_algo, flag11, da, d_count_trim_spec, 100);
 
             curr_count = d_trim_targets_count;
             if (curr_count > 0) {
@@ -512,7 +512,7 @@ int main(int argc, char** argv)
 
             // ---------- Phase 3: TRIM1/2 (compact) — separate passes ----------
             trimmed = repeat_global_trim1_compact(st, gpuG, d_count,
-                met_algo, flag11, da, d_count_trim_spec, 0);
+                met_algo, flag11, da, d_count_trim_spec, 100);
             int trim_total = do_global_trim2_new(st, gpuG, d_count);
             trim_total += repeat_global_trim1_compact(st, gpuG, d_count,
                 met_algo, flag11, da, d_count_trim_spec, 100);
