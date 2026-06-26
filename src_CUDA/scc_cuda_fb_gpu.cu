@@ -21,7 +21,8 @@
 static int* d_fb_color_counter = NULL;
 
 // ---- Bulk scatter buffer (reused across iterations, avoids per-comp cudaMemcpy) ----
-static int* d_bulk_buf   = NULL;  // [d_bulk_cap]
+static int* d_bulk_buf_A = NULL;  // [d_bulk_cap] — double-buffer A
+static int* d_bulk_buf_B = NULL;  // [d_bulk_cap] — double-buffer B
 static int  d_bulk_cap   = 0;
 static int* d_bulk_off   = NULL;  // [max_comps] prefix sum offsets (reused)
 static int  d_bulk_off_cap = 0;
@@ -683,11 +684,13 @@ double run_gpu_fb(GPUState& st, const GPUGraph& g, int num_threads)
         }
         h_bulk_offsets[h_num_out] = total_sz;
 
-        // Allocate/grow bulk buffer if needed
+        // Allocate/grow bulk buffers if needed (double-buffer: A and B)
         if (d_bulk_cap < total_sz) {
-            if (d_bulk_buf) cudaFree(d_bulk_buf);
+            if (d_bulk_buf_A) cudaFree(d_bulk_buf_A);
+            if (d_bulk_buf_B) cudaFree(d_bulk_buf_B);
             d_bulk_cap = max(total_sz * 2, 1024);
-            cudaMalloc(&d_bulk_buf, d_bulk_cap * sizeof(int));
+            cudaMalloc(&d_bulk_buf_A, d_bulk_cap * sizeof(int));
+            cudaMalloc(&d_bulk_buf_B, d_bulk_cap * sizeof(int));
         }
         // Allocate/grow offsets buffer if needed
         if (d_bulk_off_cap < h_num_out + 1) {
@@ -700,6 +703,13 @@ double run_gpu_fb(GPUState& st, const GPUGraph& g, int num_threads)
         CUDA_TIMED_MEMCPY(d_bulk_off, h_bulk_offsets.data(),
                                (h_num_out + 1) * sizeof(int), cudaMemcpyHostToDevice);
 
+        // Determine write buffer: opposite of current d_gpu_nodes (double-buffer)
+        // First scatter: d_gpu_nodes is wcc_buf or d_in_nodes (not d_bulk_buf_A/B)
+        // Subsequent scatters: d_gpu_nodes is one of A/B, write to the other
+        bool is_first_scatter = (d_gpu_nodes != d_bulk_buf_A && d_gpu_nodes != d_bulk_buf_B);
+        int* d_write_buf = is_first_scatter ? d_bulk_buf_A
+                         : (d_gpu_nodes == d_bulk_buf_A ? d_bulk_buf_B : d_bulk_buf_A);
+
         // Launch bulk scatter: one block per sub-component, chunked for max grid
         int scatter_max_grid = 65535;
         for (int ch = 0; ch < h_num_out; ch += scatter_max_grid) {
@@ -708,7 +718,7 @@ double run_gpu_fb(GPUState& st, const GPUGraph& g, int num_threads)
                 st.d_Color, d_gpu_nodes, total_src_nodes,
                 d_out_sizes + ch, d_out_colors + ch, n,
                 d_bulk_off + ch,
-                d_bulk_buf
+                d_write_buf
             );
         }
         CUDA_CHECK(cudaDeviceSynchronize());
@@ -729,8 +739,8 @@ double run_gpu_fb(GPUState& st, const GPUGraph& g, int num_threads)
         gettimeofday(&te, NULL);
         scatter_ms += (te.tv_sec - ts.tv_sec) * 1000.0 + (te.tv_usec - ts.tv_usec) * 0.001;
 
-        // ---- Swap: next iteration reads from d_bulk_buf ----
-        d_gpu_nodes = d_bulk_buf;
+        // ---- Swap: next iteration reads from the write buffer ----
+        d_gpu_nodes = d_write_buf;
         total_src_nodes = total_sz;
         cur = std::move(next);
         first_level = false;
@@ -762,7 +772,8 @@ double run_gpu_fb(GPUState& st, const GPUGraph& g, int num_threads)
 void finalize_fb_gpu()
 {
     if (d_fb_color_counter) { cudaFree(d_fb_color_counter); d_fb_color_counter = NULL; }
-    if (d_bulk_buf)         { cudaFree(d_bulk_buf);         d_bulk_buf = NULL; }
+    if (d_bulk_buf_A)       { cudaFree(d_bulk_buf_A);       d_bulk_buf_A = NULL; }
+    if (d_bulk_buf_B)       { cudaFree(d_bulk_buf_B);       d_bulk_buf_B = NULL; }
     if (d_bulk_off)         { cudaFree(d_bulk_off);         d_bulk_off = NULL; }
     d_bulk_cap = 0; d_bulk_off_cap = 0;
 }
