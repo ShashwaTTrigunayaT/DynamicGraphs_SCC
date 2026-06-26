@@ -15,7 +15,7 @@
 // per-component cudaMalloc overhead.
 // ======================================================================
 
-#define GPU_FB_MAX_SMEM_NODES 16
+#define GPU_FB_MAX_SMEM_NODES 2048
 #define GPU_FB_HASH_SIZE     4096   // power of 2, 2× load factor for 2048 nodes
 
 static int* d_fb_color_counter = NULL;
@@ -781,29 +781,6 @@ double run_gpu_fb(GPUState& st, const GPUGraph& g, int num_threads)
         if (total_levels % 10 == 0)
             printf("[GPU_FB] Lvl %d: %zu comps, %d nodes\n",
                    total_levels, cur.sizes.size(), total_sz);
-    }
-
-    // ---- Return leftover components to work queue for fallback ----
-    // When the loop hits 1000-level cap, any remaining unresolved
-    // components must go back to the CPU work queue.
-    if (!cur.sizes.empty() && total_levels >= 1000) {
-        for (size_t i = 0; i < cur.sizes.size(); i++) {
-            if (cur.sizes[i] > 0) {
-                CUDAMyWork* w = new CUDAMyWork();
-                w->count    = cur.sizes[i];
-                w->color    = cur.colors[i];
-                w->owns_set = false;
-                // d_set_nodes points into the GPU bulk buffer. Since the
-                // buffer is still alive (d_bulk_cap > 0), we can reference
-                // it directly without a copy.
-                w->d_set_nodes = (int*)d_gpu_nodes + cur.starts[i];
-                large_works.push_back(w);
-            }
-        }
-        if (!large_works.empty()) {
-            work_q_put_all(0, large_works);
-            large_works.clear();
-        }
     }
 
     // ---- Sync color counter ----
