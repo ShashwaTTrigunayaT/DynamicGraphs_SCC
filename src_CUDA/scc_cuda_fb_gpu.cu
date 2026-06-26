@@ -401,14 +401,23 @@ __global__ void bulk_scatter_single_color_kernel(
     for (int i = tid; i < num_src; i += stride) {
         bool match = (d_Color[d_in_nodes[i]] == color);
 
-        unsigned mask = __ballot_sync(0xffffffff, match);
+        // NOTE: must use __activemask() for __ballot_sync/__shfl_sync!
+        // When num_src is not a multiple of 32 within the last stride,
+        // some lanes in the last warp have exited the loop and can't
+        // participate. 0xffffffff causes undefined behavior with exited
+        // threads — the mask must reflect only converged, active lanes.
+        unsigned active = __activemask();
+        unsigned mask = __ballot_sync(active, match);
         int lane = threadIdx.x & 31;
         int warp_count = __popc(mask);
 
+        // Lowest-numbered active lane is the leader (not hardcoded lane 0,
+        // because lane 0 may have exited the loop on the tail iteration).
+        int leader = __ffs(active) - 1;
         int pos = 0;
-        if (lane == 0 && warp_count > 0)
+        if (lane == leader && warp_count > 0)
             pos = atomicAdd((int*)&s_pos, warp_count);
-        pos = __shfl_sync(0xffffffff, pos, 0);
+        pos = __shfl_sync(active, pos, leader);
 
         if (match)
             d_bulk_buf[pos + __popc(mask & ((1u << lane) - 1))] = d_in_nodes[i];
