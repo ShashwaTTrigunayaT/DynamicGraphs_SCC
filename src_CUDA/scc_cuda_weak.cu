@@ -434,7 +434,7 @@ void propagate_color(GPUState& st, const GPUGraph& g, int num_targets,
     int* d_changed = NULL;
     CUDA_CHECK(cudaMalloc(&d_changed, sizeof(int)));
 
-    int max_iterations = 5000;  // safety limit (increased from 100 for better convergence)
+    int max_iterations = 100;  // safety limit (was 5000 — no improvement on SCC accuracy, 2x slower)
     int iter = 0;
     int h_changed = 1;
 
