@@ -627,7 +627,7 @@ double run_gpu_fb(GPUState& st, const GPUGraph& g, int num_threads)
         total_src_nodes = (int)cur_host_nodes.size();
     }
 
-    while (!cur.sizes.empty() && total_levels < 1000) {
+    while (!cur.sizes.empty() && total_levels < 5000) {
         total_levels++;
         int cur_comps = (int)cur.sizes.size();
 
