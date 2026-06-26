@@ -175,24 +175,22 @@ __global__ void gpu_fb_batch_kernel(
 
             for (edge_t e = d_begin[n]; e < d_begin[n + 1]; e++) {
                 node_t k = d_node_idx[e];
-                // Only mark nodes within this component — prevents cross-component
-                // interference where parallel blocks steal nodes from each other.
-                unsigned hk = (unsigned)k * 2654435761u;
-                int slot = (int)(hk >> 20) & (GPU_FB_HASH_SIZE - 1);
-                bool in_comp = false;
-                int k_pos = -1;
-                while (1) {
-                    k_pos = smem_hash[slot];
-                    if (k_pos < 0) break;
-                    if (smem_nodes[k_pos] == k) { in_comp = true; break; }
-                    slot = (slot + 1) & (GPU_FB_HASH_SIZE - 1);
-                }
-                if (in_comp) {
-                    int old = atomicCAS(&d_Color[k], base_color, fw_color);
-                    if (old == base_color) {
-                        smem_fw_flag[k_pos] = 1;
-                        int np = atomicAdd((int*)&smem_ncount, 1);
-                        if (np < GPU_FB_MAX_SMEM_NODES) smem_next[np] = k_pos;
+                int old = atomicCAS(&d_Color[k], base_color, fw_color);
+                if (old == base_color) {
+                    // Find position in shared memory
+                    // Hash lookup: O(1) instead of O(comp_size) linear search
+                    unsigned hk = (unsigned)k * 2654435761u;
+                    int slot = (int)(hk >> 20) & (GPU_FB_HASH_SIZE - 1);
+                    while (1) {
+                        int pos = smem_hash[slot];
+                        if (pos < 0) break;  // not found (shouldn't happen for valid k)
+                        if (smem_nodes[pos] == k) {
+                            smem_fw_flag[pos] = 1;
+                            int np = atomicAdd((int*)&smem_ncount, 1);
+                            if (np < GPU_FB_MAX_SMEM_NODES) smem_next[np] = pos;
+                            break;
+                        }
+                        slot = (slot + 1) & (GPU_FB_HASH_SIZE - 1);
                     }
                 }
             }
@@ -242,35 +240,43 @@ __global__ void gpu_fb_batch_kernel(
             for (edge_t e = d_r_begin[n]; e < d_r_begin[n + 1]; e++) {
                 node_t k = d_r_node_idx[e];
 
-                // Only mark nodes within this component — prevents cross-component
-                // interference where parallel blocks steal nodes from each other.
-                unsigned hk = (unsigned)k * 2654435761u;
-                int slot = (int)(hk >> 20) & (GPU_FB_HASH_SIZE - 1);
-                bool in_comp = false;
-                int k_pos = -1;
-                while (1) {
-                    k_pos = smem_hash[slot];
-                    if (k_pos < 0) break;
-                    if (smem_nodes[k_pos] == k) { in_comp = true; break; }
-                    slot = (slot + 1) & (GPU_FB_HASH_SIZE - 1);
-                }
-                if (!in_comp) continue;
-
                 // TOCTOU-safe: two separate atomicCAS calls instead of read-then-CAS
                 // First try: claim fw_color node as SCC_FOUND
                 int old = atomicCAS(&d_Color[k], fw_color, SCC_FOUND);
                 if (old == fw_color) {
                     d_SCC[k] = smem_nodes[pivot_pos];
-                    smem_bw_flag[k_pos] = 1;
-                    int np = atomicAdd((int*)&smem_ncount, 1);
-                    if (np < GPU_FB_MAX_SMEM_NODES) smem_next[np] = k_pos;
+                    // Hash lookup: O(1) instead of O(comp_size) linear search
+                    unsigned hk = (unsigned)k * 2654435761u;
+                    int slot = (int)(hk >> 20) & (GPU_FB_HASH_SIZE - 1);
+                    while (1) {
+                        int pos = smem_hash[slot];
+                        if (pos < 0) break;
+                        if (smem_nodes[pos] == k) {
+                            smem_bw_flag[pos] = 1;
+                            int np = atomicAdd((int*)&smem_ncount, 1);
+                            if (np < GPU_FB_MAX_SMEM_NODES) smem_next[np] = pos;
+                            break;
+                        }
+                        slot = (slot + 1) & (GPU_FB_HASH_SIZE - 1);
+                    }
                 } else {
                     // Second try: claim base_color node as bw_color
                     old = atomicCAS(&d_Color[k], base_color, bw_color);
                     if (old == base_color) {
-                        smem_bw_flag[k_pos] = 1;
-                        int np = atomicAdd((int*)&smem_ncount, 1);
-                        if (np < GPU_FB_MAX_SMEM_NODES) smem_next[np] = k_pos;
+                        // Hash lookup: O(1) instead of O(comp_size) linear search
+                        unsigned hk = (unsigned)k * 2654435761u;
+                        int slot = (int)(hk >> 20) & (GPU_FB_HASH_SIZE - 1);
+                        while (1) {
+                            int pos = smem_hash[slot];
+                            if (pos < 0) break;
+                            if (smem_nodes[pos] == k) {
+                                smem_bw_flag[pos] = 1;
+                                int np = atomicAdd((int*)&smem_ncount, 1);
+                                if (np < GPU_FB_MAX_SMEM_NODES) smem_next[np] = pos;
+                                break;
+                            }
+                            slot = (slot + 1) & (GPU_FB_HASH_SIZE - 1);
+                        }
                     }
                     // else: already claimed by another thread, or SCC_FOUND — skip
                 }
