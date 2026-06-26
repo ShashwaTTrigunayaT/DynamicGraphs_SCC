@@ -298,11 +298,20 @@ __global__ void gpu_fb_batch_kernel(
     // Count sub-partitions by d_Color value
     // ================================================================
     int local_fw = 0, local_bw = 0, local_base = 0;
-    for (int i = tid; i < comp_size; i += stride) {
-        int c = d_Color[smem_nodes[i]];
-        if (c == fw_color)        local_fw++;
-        else if (c == bw_color)   local_bw++;
-        else if (c == base_color) local_base++;
+    // Uniform loop: ALL threads iterate the same number of times so they
+    // converge before SUM_REDUCE (which uses __shfl_xor_sync with 0xffffffff
+    // mask). Old divergent loop caused undefined behavior on SM 8.9+ with
+    // independent thread scheduling — early-exited lanes ran SUM_REDUCE
+    // while other lanes in the same warp were still in the loop body.
+    int total_count_iters = (comp_size + stride - 1) / stride;
+    for (int iter = 0; iter < total_count_iters; iter++) {
+        int i = tid + iter * stride;
+        if (i < comp_size) {
+            int c = d_Color[smem_nodes[i]];
+            if (c == fw_color)        local_fw++;
+            else if (c == bw_color)   local_bw++;
+            else if (c == base_color) local_base++;
+        }
     }
 
     // Warp-level reduction
@@ -772,6 +781,29 @@ double run_gpu_fb(GPUState& st, const GPUGraph& g, int num_threads)
         if (total_levels % 10 == 0)
             printf("[GPU_FB] Lvl %d: %zu comps, %d nodes\n",
                    total_levels, cur.sizes.size(), total_sz);
+    }
+
+    // ---- Return leftover components to work queue for fallback ----
+    // When the loop hits 1000-level cap, any remaining unresolved
+    // components must go back to the CPU work queue.
+    if (!cur.sizes.empty() && total_levels >= 1000) {
+        for (size_t i = 0; i < cur.sizes.size(); i++) {
+            if (cur.sizes[i] > 0) {
+                CUDAMyWork* w = new CUDAMyWork();
+                w->count    = cur.sizes[i];
+                w->color    = cur.colors[i];
+                w->owns_set = false;
+                // d_set_nodes points into the GPU bulk buffer. Since the
+                // buffer is still alive (d_bulk_cap > 0), we can reference
+                // it directly without a copy.
+                w->d_set_nodes = (int*)d_gpu_nodes + cur.starts[i];
+                large_works.push_back(w);
+            }
+        }
+        if (!large_works.empty()) {
+            work_q_put_all(0, large_works);
+            large_works.clear();
+        }
     }
 
     // ---- Sync color counter ----
