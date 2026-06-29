@@ -217,6 +217,7 @@ bool build_gpu_condensation_graph(
     vector<node_t>& h_r_node_idx,
     int& N, int& M)
 {
+    fprintf(stderr, "[DBG] GPU build start\n");
     int num_orig = (int)orig_edges.size();
     int num_ins  = (int)insert_edges.size();
     int total_edges = num_orig + num_ins;
