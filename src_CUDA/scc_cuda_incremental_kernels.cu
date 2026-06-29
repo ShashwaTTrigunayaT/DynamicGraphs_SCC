@@ -141,6 +141,28 @@ __global__ void find_max_pivot_kernel(
 }
 
 // ======================================================================
+// deinterleave_pairs_kernel
+//
+// Deinterleaves a pair array [first, second, first, second, ...] into
+// two separate arrays d_src and d_dst.
+//
+// Avoids creating 500MB of temporary host vectors for host-side
+// concatenation of orig_edges and insert_edges.
+// ======================================================================
+__global__ void deinterleave_pairs_kernel(
+    const int* d_pairs, int num_pairs,
+    int* d_src, int* d_dst)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = gridDim.x * blockDim.x;
+
+    for (int i = idx; i < num_pairs; i += stride) {
+        d_src[i] = d_pairs[2 * i];
+        d_dst[i] = d_pairs[2 * i + 1];
+    }
+}
+
+// ======================================================================
 // build_csr_begin_kernel
 //
 // Builds the CSR begin array from a sorted edge list.
@@ -195,11 +217,6 @@ bool build_gpu_condensation_graph(
     vector<node_t>& h_r_node_idx,
     int& N, int& M)
 {
-    fprintf(stderr, "[DBG] build_gpu: orig=%d ins=%d total=%d vertices=%d num_sccs=%d\n",
-            (int)orig_edges.size(), (int)insert_edges.size(),
-            (int)orig_edges.size() + (int)insert_edges.size(),
-            (int)h_scc_list.size(), num_sccs);
-
     int num_orig = (int)orig_edges.size();
     int num_ins  = (int)insert_edges.size();
     int total_edges = num_orig + num_ins;
@@ -217,8 +234,6 @@ bool build_gpu_condensation_graph(
         return true;
     }
 
-    fprintf(stderr, "[DBG] build_gpu: step1 cudaMalloc begin\n");
-
     // ---------------------------------------------------------------
     // 1. Upload host data to GPU
     // ---------------------------------------------------------------
@@ -227,30 +242,32 @@ bool build_gpu_condensation_graph(
     int* d_scc_list = NULL;
 
     CUDA_CHECK(cudaMalloc(&d_all_src,  total_edges * sizeof(int)));
-    fprintf(stderr, "[DBG] build_gpu: cudaMalloc d_all_src OK\n");
     CUDA_CHECK(cudaMalloc(&d_all_dst,  total_edges * sizeof(int)));
-    fprintf(stderr, "[DBG] build_gpu: cudaMalloc d_all_dst OK\n");
     CUDA_CHECK(cudaMalloc(&d_scc_list, num_vertices * sizeof(int)));
-    fprintf(stderr, "[DBG] build_gpu: cudaMalloc d_scc_list OK\n");
 
-    // Concatenate orig + insert edges into flat arrays
+    // Upload edge data directly as pairs (avoids 500MB of temporary host vectors)
+    // We upload to a GPU pair buffer, then deinterleave via a kernel.
     {
-        fprintf(stderr, "[DBG] build_gpu: creating h_all_src (%d elements)\n", total_edges);
-        vector<int> h_all_src(total_edges);
-        fprintf(stderr, "[DBG] build_gpu: creating h_all_dst\n");
-        vector<int> h_all_dst(total_edges);
-        for (int i = 0; i < num_orig; i++) {
-            h_all_src[i] = orig_edges[i].first;
-            h_all_dst[i] = orig_edges[i].second;
-        }
-        for (int i = 0; i < num_ins; i++) {
-            h_all_src[num_orig + i] = insert_edges[i].first;
-            h_all_dst[num_orig + i] = insert_edges[i].second;
-        }
-        CUDA_CHECK(cudaMemcpy(d_all_src, h_all_src.data(),
-                               total_edges * sizeof(int), cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpy(d_all_dst, h_all_dst.data(),
-                               total_edges * sizeof(int), cudaMemcpyHostToDevice));
+        int* d_pairs = NULL;
+        CUDA_CHECK(cudaMalloc(&d_pairs, total_edges * sizeof(int) * 2));
+
+        // Upload orig edges as pairs (first, second, first, second, ...)
+        CUDA_CHECK(cudaMemcpy(d_pairs, orig_edges.data(),
+                               num_orig * sizeof(pair<int,int>),
+                               cudaMemcpyHostToDevice));
+        // Upload insert edges after orig
+        CUDA_CHECK(cudaMemcpy(d_pairs + num_orig * 2, insert_edges.data(),
+                               num_ins * sizeof(pair<int,int>),
+                               cudaMemcpyHostToDevice));
+
+        // Deinterleave: pairs -> d_all_src and d_all_dst
+        int db_blocks = (total_edges + 255) / 256;
+        db_blocks = min(db_blocks, 1024);
+        deinterleave_pairs_kernel<<<db_blocks, 256>>>(
+            d_pairs, total_edges, d_all_src, d_all_dst);
+        CUDA_CHECK(cudaDeviceSynchronize());
+
+        CUDA_CHECK(cudaFree(d_pairs));
     }
     CUDA_CHECK(cudaMemcpy(d_scc_list, h_scc_list.data(),
                            num_vertices * sizeof(int), cudaMemcpyHostToDevice));
