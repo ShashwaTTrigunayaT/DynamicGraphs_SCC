@@ -138,8 +138,8 @@ void build_incremental_graph(
         string orig_fname = fname.substr(0, lastPos) + "/refined_edges.txt";
         int num_vertices = read_file(orig_fname, orig_edges);
         read_file(fname, insert_edges);
-        num_sccs = read_file1(
-            "/home/tk.temp/par-scc/scc_list.txt", h_scc_list, num_vertices);
+        string scc_list_fname = fname.substr(0, lastPos) + "/scc_list.txt";
+        num_sccs = read_file1(scc_list_fname, h_scc_list, num_vertices);
 
         // GPU: filter cross-SCC edges, build CSR, find pivot
         bool gpu_ok = build_gpu_condensation_graph(
@@ -195,8 +195,8 @@ void build_incremental_graph(
         string orig_fname = fname.substr(0, lastPos) + "/refined_edges.txt";
         int num_vertices = read_file(orig_fname, orig_edges);
         read_file(fname, insert_edges);
-        num_sccs = read_file1(
-            "/home/tk.temp/par-scc/scc_list.txt", h_scc_list, num_vertices);
+        string scc_list_fname = fname.substr(0, lastPos) + "/scc_list.txt";
+        num_sccs = read_file1(scc_list_fname, h_scc_list, num_vertices);
 
         create_scc_edges(orig_edges, insert_edges, scc_edges,
             num_vertices, num_sccs, met_algo_original,
@@ -236,8 +236,8 @@ void build_incremental_graph(
         string orig_fname = fname.substr(0, lastPos) + "/refined_edges.txt";
         int num_vertices = read_file(orig_fname, orig_edges);
         read_file(fname, insert_edges);
-        num_sccs = read_file1(
-            "/home/tk.temp/par-scc/scc_list.txt", h_scc_list, num_vertices);
+        string scc_list_fname = fname.substr(0, lastPos) + "/scc_list.txt";
+        num_sccs = read_file1(scc_list_fname, h_scc_list, num_vertices);
 
         // OpenMP: create_scc_edges (includes BFS levels + affect_level for met_algo==7)
         create_scc_edges(orig_edges, insert_edges, scc_edges,

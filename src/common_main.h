@@ -543,7 +543,8 @@ public:
             string orig_fname = fname.substr(0, lastPos) + "/refined_edges.txt";
             int num_vertices = read_file(orig_fname, orig_edges);
             read_file(fname, insert_edges);
-            int num_sccs = read_file1("/home/tk.temp/par-scc/scc_list.txt", scc_list, num_vertices);
+            string scc_list_fname = fname.substr(0, lastPos) + "/scc_list.txt";
+            int num_sccs = read_file1(scc_list_fname, scc_list, num_vertices);
             gettimeofday(&T6_1, NULL);
             create_scc_edges(orig_edges, insert_edges, scc_edges, num_vertices, num_sccs);
             gettimeofday(&T6_2, NULL);
@@ -588,7 +589,8 @@ public:
             string orig_fname = fname.substr(0, lastPos) + "/refined_edges.txt";
             int num_vertices = read_file(orig_fname, orig_edges);
             read_file(fname, insert_edges);
-            int num_sccs = read_file1("/home/tk.temp/par-scc/scc_list.txt", scc_list, num_vertices);
+            string scc_list_fname = fname.substr(0, lastPos) + "/scc_list.txt";
+            int num_sccs = read_file1(scc_list_fname, scc_list, num_vertices);
             gettimeofday(&T6_1, NULL);
             create_scc_edges(orig_edges, insert_edges, scc_edges, num_vertices, num_sccs);
             gettimeofday(&T6_2, NULL);
@@ -630,7 +632,8 @@ public:
             string orig_fname = fname.substr(0, lastPos) + "/refined_edges.txt";
             int num_vertices = read_file(orig_fname, orig_edges);
             read_file(fname, insert_edges);
-            int num_sccs = read_file1("/home/tk.temp/par-scc/scc_list.txt", scc_list, num_vertices);
+            string scc_list_fname = fname.substr(0, lastPos) + "/scc_list.txt";
+            int num_sccs = read_file1(scc_list_fname, scc_list, num_vertices);
             create_scc_edges(orig_edges, insert_edges, scc_edges, num_vertices, num_sccs);
             gettimeofday(&T1, NULL);
             if (num_sccs > 1)
@@ -649,7 +652,8 @@ public:
             size_t lastPos = fname.rfind('/');
             string orig_fname = fname.substr(0, lastPos) + "/refined_edges.txt";
             int num_vertices = read_file(orig_fname, orig_edges);
-            int num_sccs = read_file1("/home/tk.temp/par-scc/scc_list.txt", scc_list, num_vertices);
+            string scc_list_fname = fname.substr(0, lastPos) + "/scc_list.txt";
+            int num_sccs = read_file1(scc_list_fname, scc_list, num_vertices);
             read_file2(fname, orig_edges, scc_list, rem_edges, vec_scc_count, num_sccs);
             gettimeofday(&T1, NULL);
             for (int i = 0; i < num_vertices; i++)
@@ -702,7 +706,8 @@ public:
             size_t lastPos = fname.rfind('/');
             string orig_fname = fname.substr(0, lastPos) + "/refined_edges.txt";
             int num_vertices = read_file(orig_fname, orig_edges);
-            int num_sccs = read_file1("/home/tk.temp/par-scc/scc_list.txt", scc_list, num_vertices);
+            string scc_list_fname = fname.substr(0, lastPos) + "/scc_list.txt";
+            int num_sccs = read_file1(scc_list_fname, scc_list, num_vertices);
             read_file2(fname, orig_edges, scc_list, rem_edges, vec_scc_count, num_sccs);
             gettimeofday(&T1, NULL);
             for (int i = 0; i < num_vertices; i++)
@@ -717,7 +722,8 @@ public:
             size_t lastPos = fname.rfind('/');
             string orig_fname = fname.substr(0, lastPos) + "/refined_edges.txt";
             int num_vertices = read_file(orig_fname, orig_edges);
-            int num_sccs = read_file1("/home/tk.temp/par-scc/scc_list.txt", scc_list, num_vertices);
+            string scc_list_fname = fname.substr(0, lastPos) + "/scc_list.txt";
+            int num_sccs = read_file1(scc_list_fname, scc_list, num_vertices);
             read_file2(fname, orig_edges, scc_list, rem_edges, vec_scc_count, num_sccs);
             gettimeofday(&T1, NULL);
             for (int i = 0; i < num_vertices; i++)
