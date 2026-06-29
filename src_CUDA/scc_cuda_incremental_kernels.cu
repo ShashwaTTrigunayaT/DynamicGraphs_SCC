@@ -430,6 +430,7 @@ bool build_gpu_condensation_graph(
     int* d_sorted_by_dst_src = NULL;
     int* d_sorted_by_dst_dst = NULL;
     CUDA_CHECK(cudaMalloc(&d_sorted_by_dst_src, num_cross * sizeof(int)));
+    fprintf(stderr, "[DBG] G1\n");
     CUDA_CHECK(cudaMalloc(&d_sorted_by_dst_dst, num_cross * sizeof(int)));
 
     // Determine temp storage for second sort
