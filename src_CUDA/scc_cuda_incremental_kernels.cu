@@ -303,11 +303,14 @@ bool build_gpu_condensation_graph(
     int grid_size = (total_edges + block_size - 1) / block_size;
     grid_size = min(grid_size, 1024);
 
+    fprintf(stderr, "[DBG] launching filter kernel: grid=%d block=%d\n", grid_size, block_size);
     filter_cross_scc_edges_kernel<<<grid_size, block_size>>>(
         d_all_src, d_all_dst, total_edges,
         d_scc_list,
         d_filtered_src, d_filtered_dst, d_filtered_count);
+    fprintf(stderr, "[DBG] filter kernel launched, syncing...\n");
     CUDA_CHECK(cudaDeviceSynchronize());
+    fprintf(stderr, "[DBG] filter kernel done\n");
 
     int num_cross;
     CUDA_CHECK(cudaMemcpy(&num_cross, d_filtered_count,
