@@ -37,11 +37,13 @@ __global__ void filter_cross_scc_edges_kernel(
     const int* d_scc_list,
     int* d_out_src, int* d_out_dst, int* d_out_count)
 {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    bool cross_scc = false;
-    int out_src_val = 0, out_dst_val = 0;
+    int stride = blockDim.x * gridDim.x;
+    int lane = threadIdx.x & 31;
 
-    if (idx < num_edges) {
+    for (int idx = blockIdx.x * blockDim.x + threadIdx.x; idx < num_edges; idx += stride) {
+        bool cross_scc = false;
+        int out_src_val = 0, out_dst_val = 0;
+
         int u = d_src[idx];
         int v = d_dst[idx];
         int scc_u = d_scc_list[u];
@@ -51,22 +53,21 @@ __global__ void filter_cross_scc_edges_kernel(
             out_src_val = scc_u;
             out_dst_val = scc_v;
         }
-    }
 
-    // Warp-ballot compact
-    unsigned mask = __ballot_sync(0xffffffff, cross_scc);
-    int lane = threadIdx.x & 31;
-    int warp_count = __popc(mask);
+        // Warp-ballot compact
+        unsigned mask = __ballot_sync(0xffffffff, cross_scc);
+        int warp_count = __popc(mask);
 
-    int warp_base = 0;
-    if (lane == 0 && warp_count > 0)
-        warp_base = atomicAdd(d_out_count, warp_count);
-    warp_base = __shfl_sync(0xffffffff, warp_base, 0);
+        int warp_base = 0;
+        if (lane == 0 && warp_count > 0)
+            warp_base = atomicAdd(d_out_count, warp_count);
+        warp_base = __shfl_sync(0xffffffff, warp_base, 0);
 
-    int local_rank = __popc(mask & ((1u << lane) - 1));
-    if (cross_scc) {
-        d_out_src[warp_base + local_rank] = out_src_val;
-        d_out_dst[warp_base + local_rank] = out_dst_val;
+        int local_rank = __popc(mask & ((1u << lane) - 1));
+        if (cross_scc) {
+            d_out_src[warp_base + local_rank] = out_src_val;
+            d_out_dst[warp_base + local_rank] = out_dst_val;
+        }
     }
 }
 
@@ -491,10 +492,16 @@ bool build_gpu_condensation_graph(
     fprintf(stderr, "[DBG] G8\n");
 
     // ---------------------------------------------------------------
-    // 8. Copy to host output arrays
+    // 8. Copy to host output arrays (cudaMemcpy, not assign — GPU pointers!)
     // ---------------------------------------------------------------
-    h_node_idx.assign(d_sorted_dst, d_sorted_dst + num_cross);
-    h_r_node_idx.assign(d_sorted_by_dst_src, d_sorted_by_dst_src + num_cross);
+    h_node_idx.resize(num_cross);
+    CUDA_CHECK(cudaMemcpy(h_node_idx.data(), d_sorted_dst,
+                           num_cross * sizeof(node_t),
+                           cudaMemcpyDeviceToHost));
+    h_r_node_idx.resize(num_cross);
+    CUDA_CHECK(cudaMemcpy(h_r_node_idx.data(), d_sorted_by_dst_src,
+                           num_cross * sizeof(node_t),
+                           cudaMemcpyDeviceToHost));
 
     N = num_sccs;
     M = num_cross;
