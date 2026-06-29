@@ -218,7 +218,6 @@ bool build_gpu_condensation_graph(
     vector<node_t>& h_r_node_idx,
     int& N, int& M)
 {
-    fprintf(stderr, "[DBG] GPU build start\n");
     int num_orig = (int)orig_edges.size();
     int num_ins  = (int)insert_edges.size();
     int total_edges = num_orig + num_ins;
@@ -226,7 +225,6 @@ bool build_gpu_condensation_graph(
 
     // Skip if no edges at all
     if (total_edges == 0) {
-        fprintf(stderr, "[DBG] no edges\n");
         N = (num_sccs > 0) ? num_sccs : 1;
         M = 0;
         good_init_pivot = 0;
@@ -236,8 +234,6 @@ bool build_gpu_condensation_graph(
         h_r_node_idx.clear();
         return true;
     }
-
-    fprintf(stderr, "[DBG] step1 malloc\n");
 
     // ---------------------------------------------------------------
     // 1. Upload host data to GPU
@@ -249,8 +245,6 @@ bool build_gpu_condensation_graph(
     CUDA_CHECK(cudaMalloc(&d_all_src,  total_edges * sizeof(int)));
     CUDA_CHECK(cudaMalloc(&d_all_dst,  total_edges * sizeof(int)));
     CUDA_CHECK(cudaMalloc(&d_scc_list, num_vertices * sizeof(int)));
-
-    fprintf(stderr, "[DBG] step2 pair upload\n");
 
     // Upload edge data directly as pairs (avoids 500MB of temporary host vectors)
     // We upload to a GPU pair buffer, then deinterleave via a kernel.
@@ -276,7 +270,6 @@ bool build_gpu_condensation_graph(
 
         CUDA_CHECK(cudaFree(d_pairs));
     }
-    fprintf(stderr, "[DBG] step3 upload scc_list\n");
     CUDA_CHECK(cudaMemcpy(d_scc_list, h_scc_list.data(),
                            num_vertices * sizeof(int), cudaMemcpyHostToDevice));
 
@@ -288,14 +281,10 @@ bool build_gpu_condensation_graph(
     int* d_filtered_dst = NULL;
     int* d_filtered_count = NULL;
 
-    fprintf(stderr, "[DBG] step4 filter buffer alloc\n");
     CUDA_CHECK(cudaMalloc(&d_filtered_src,   total_edges * sizeof(int)));
-    fprintf(stderr, "[DBG] step4a d_filtered_src OK\n");
     CUDA_CHECK(cudaMalloc(&d_filtered_dst,   total_edges * sizeof(int)));
-    fprintf(stderr, "[DBG] step4b d_filtered_dst OK\n");
     CUDA_CHECK(cudaMalloc(&d_filtered_count, sizeof(int)));
     CUDA_CHECK(cudaMemset(d_filtered_count, 0, sizeof(int)));
-    fprintf(stderr, "[DBG] step4c memset OK\n");
 
     // ---------------------------------------------------------------
     // 3. Launch filter kernel (warp-ballot compact)
@@ -304,19 +293,15 @@ bool build_gpu_condensation_graph(
     int grid_size = (total_edges + block_size - 1) / block_size;
     grid_size = min(grid_size, 1024);
 
-    fprintf(stderr, "[DBG] launching filter kernel: grid=%d block=%d\n", grid_size, block_size);
     filter_cross_scc_edges_kernel<<<grid_size, block_size>>>(
         d_all_src, d_all_dst, total_edges,
         d_scc_list,
         d_filtered_src, d_filtered_dst, d_filtered_count);
-    fprintf(stderr, "[DBG] filter kernel launched, syncing...\n");
     CUDA_CHECK(cudaDeviceSynchronize());
-    fprintf(stderr, "[DBG] filter kernel done\n");
 
     int num_cross;
     CUDA_CHECK(cudaMemcpy(&num_cross, d_filtered_count,
                            sizeof(int), cudaMemcpyDeviceToHost));
-    fprintf(stderr, "[DBG] num_cross=%d\n", num_cross);
 
     // No cross-SCC edges → single-node condensation graph
     if (num_cross == 0) {
@@ -337,7 +322,6 @@ bool build_gpu_condensation_graph(
         return true;
     }
 
-    fprintf(stderr, "[DBG] A\n");
     int* d_out_degree = NULL;
     CUDA_CHECK(cudaMalloc(&d_out_degree, num_sccs * sizeof(int)));
     CUDA_CHECK(cudaMemset(d_out_degree, 0, num_sccs * sizeof(int)));
@@ -346,7 +330,6 @@ bool build_gpu_condensation_graph(
         d_filtered_src, num_cross, d_out_degree);
     CUDA_CHECK(cudaDeviceSynchronize());
 
-    fprintf(stderr, "[DBG] B\n");
     {
         int* d_max_idx = NULL;
         int* d_max_val = NULL;
@@ -374,7 +357,6 @@ bool build_gpu_condensation_graph(
         if (h_max_val <= 0) good_init_pivot = 0;
     }
 
-    fprintf(stderr, "[DBG] C\n");
     int* d_sorted_src = NULL;
     int* d_sorted_dst = NULL;
     CUDA_CHECK(cudaMalloc(&d_sorted_src, num_cross * sizeof(int)));
@@ -387,7 +369,7 @@ bool build_gpu_condensation_graph(
         d_filtered_dst, d_sorted_dst,
         num_cross, 0, sizeof(int) * 8);
     CUDA_CHECK(cudaMalloc(&d_temp_storage, temp_storage_bytes));
-    fprintf(stderr, "[DBG] D temp=%zu\n", temp_storage_bytes);
+
 
     cub::DeviceRadixSort::SortPairs(d_temp_storage, temp_storage_bytes,
         d_filtered_src, d_sorted_src,
@@ -396,7 +378,6 @@ bool build_gpu_condensation_graph(
     CUDA_CHECK(cudaDeviceSynchronize());
     CUDA_CHECK(cudaFree(d_temp_storage));
 
-    fprintf(stderr, "[DBG] E\n");
     int* d_begin_gpu = NULL;
     int* d_node_idx_gpu = NULL;
     CUDA_CHECK(cudaMalloc(&d_begin_gpu, (num_sccs + 1) * sizeof(edge_t)));
@@ -427,13 +408,10 @@ bool build_gpu_condensation_graph(
                            num_cross * sizeof(node_t),
                            cudaMemcpyDeviceToDevice));
 
-    fprintf(stderr, "[DBG] F\n");
     int* d_sorted_by_dst_src = NULL;
     int* d_sorted_by_dst_dst = NULL;
     CUDA_CHECK(cudaMalloc(&d_sorted_by_dst_src, num_cross * sizeof(int)));
-    fprintf(stderr, "[DBG] G1\n");
     CUDA_CHECK(cudaMalloc(&d_sorted_by_dst_dst, num_cross * sizeof(int)));
-    fprintf(stderr, "[DBG] G2\n");
 
     // Determine temp storage for second sort
     d_temp_storage = NULL;
@@ -442,7 +420,7 @@ bool build_gpu_condensation_graph(
         d_filtered_dst, d_sorted_by_dst_dst,  // key = dst
         d_filtered_src, d_sorted_by_dst_src,  // value = src
         num_cross, 0, sizeof(int) * 8);
-    fprintf(stderr, "[DBG] G3 temp=%zu\n", temp_storage_bytes);
+
     CUDA_CHECK(cudaMalloc(&d_temp_storage, temp_storage_bytes));
 
     // Sort pairs (dst, src) by dst
@@ -451,14 +429,12 @@ bool build_gpu_condensation_graph(
         d_filtered_src, d_sorted_by_dst_src,
         num_cross, 0, sizeof(int) * 8);
     CUDA_CHECK(cudaDeviceSynchronize());
-    fprintf(stderr, "[DBG] G4\n");
     CUDA_CHECK(cudaFree(d_temp_storage));
 
     // Build reverse begin array
     int* d_r_begin_gpu = NULL;
     int* d_r_node_idx_gpu = NULL;
     CUDA_CHECK(cudaMalloc(&d_r_begin_gpu, (num_sccs + 1) * sizeof(edge_t)));
-    fprintf(stderr, "[DBG] G5\n");
     CUDA_CHECK(cudaMalloc(&d_r_node_idx_gpu, num_cross * sizeof(node_t)));
 
     // Initialize reverse begin array to -1, then build from sorted edges
@@ -466,7 +442,6 @@ bool build_gpu_condensation_graph(
     build_csr_begin_kernel<<<grid_size, block_size>>>(
         d_sorted_by_dst_dst, num_cross, d_r_begin_gpu, num_sccs);
     CUDA_CHECK(cudaDeviceSynchronize());
-    fprintf(stderr, "[DBG] G6\n");
 
     CUDA_CHECK(cudaMemcpy(&d_r_begin_gpu[num_sccs], &num_cross,
                            sizeof(int), cudaMemcpyHostToDevice));
@@ -489,7 +464,6 @@ bool build_gpu_condensation_graph(
     CUDA_CHECK(cudaMemcpy(d_r_node_idx_gpu, d_sorted_by_dst_src,
                            num_cross * sizeof(node_t),
                            cudaMemcpyDeviceToDevice));
-    fprintf(stderr, "[DBG] G8\n");
 
     // ---------------------------------------------------------------
     // 8. Copy to host output arrays (cudaMemcpy, not assign — GPU pointers!)
