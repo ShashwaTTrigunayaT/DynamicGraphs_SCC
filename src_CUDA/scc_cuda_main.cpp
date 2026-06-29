@@ -375,6 +375,7 @@ int main(int argc, char** argv)
     gm_rt_set_num_threads(num_threads);
     gm_rt_initialize();
 
+    fprintf(stderr, "[DBG] main: starting graph load, method=%d\n", met_algo_original);
     gettimeofday(&T1, NULL);
     {
         vector<pair<int,int>> orig_edges;
@@ -400,6 +401,7 @@ int main(int argc, char** argv)
         if (met_algo_original == 5 || met_algo_original == 6 ||
             met_algo_original == 7 || met_algo_original == 11)
         {
+            fprintf(stderr, "[DBG] main: calling build_incremental_graph\n");
             build_incremental_graph(G, fname, met_algo_original,
                 num_sccs, good_init_pivot, insert_runtime,
                 h_scc_list, h_level_ver, h_affect_level, h_new_edge_nodes,

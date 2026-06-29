@@ -141,6 +141,9 @@ void build_incremental_graph(
         string scc_list_fname = fname.substr(0, lastPos) + "/scc_list.txt";
         num_sccs = read_file1(scc_list_fname, h_scc_list, num_vertices);
 
+        fprintf(stderr, "[DBG] build_incr: method=6 num_vertices=%d num_sccs=%d\n",
+                num_vertices, num_sccs);
+        fflush(stderr);
         // GPU: filter cross-SCC edges, build CSR, find pivot
         bool gpu_ok = build_gpu_condensation_graph(
             orig_edges, insert_edges, h_scc_list, num_sccs,
