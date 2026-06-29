@@ -466,6 +466,27 @@ bool build_gpu_condensation_graph(
                            cudaMemcpyDeviceToDevice));
 
     // ---------------------------------------------------------------
+    // 7.5 Reverse CSR verification
+    // ---------------------------------------------------------------
+    {
+        long long r_total_deg = 0;
+        for (int i = 0; i < num_sccs; i++) {
+            int d = h_r_begin[i + 1] - h_r_begin[i];
+            if (d < 0) {
+                fprintf(stderr, "[CSR_ERROR] r_begin[%d]=%d > r_begin[%d]=%d (diff=%d)\n",
+                        i, h_r_begin[i], i+1, h_r_begin[i+1], d);
+            }
+            r_total_deg += d;
+        }
+        fprintf(stderr, "[CSR_VERIFY] reverse: h_r_begin[num_sccs]=%d, total_deg=%lld, num_cross=%d\n",
+                h_r_begin[num_sccs], r_total_deg, num_cross);
+        if (r_total_deg != (long long)num_cross) {
+            fprintf(stderr, "[CSR_ERROR] reverse CSR MISMATCH: total_deg=%lld != num_cross=%d\n",
+                    r_total_deg, num_cross);
+        }
+    }
+
+    // ---------------------------------------------------------------
     // 8. Copy to host output arrays (cudaMemcpy, not assign — GPU pointers!)
     // ---------------------------------------------------------------
     h_node_idx.resize(num_cross);
@@ -476,6 +497,25 @@ bool build_gpu_condensation_graph(
     CUDA_CHECK(cudaMemcpy(h_r_node_idx.data(), d_sorted_by_dst_src,
                            num_cross * sizeof(node_t),
                            cudaMemcpyDeviceToHost));
+
+    // ---------------------------------------------------------------
+    // 8.5 CSR verification: check that begin array sums to M
+    // ---------------------------------------------------------------
+    long long total_deg = 0;
+    for (int i = 0; i < num_sccs; i++) {
+        int d = h_begin[i + 1] - h_begin[i];
+        if (d < 0) {
+            fprintf(stderr, "[CSR_ERROR] begin[%d]=%d > begin[%d]=%d (diff=%d)\n",
+                    i, h_begin[i], i+1, h_begin[i+1], d);
+        }
+        total_deg += d;
+    }
+    fprintf(stderr, "[CSR_VERIFY] forward: h_begin[num_sccs]=%d, total_deg=%lld, num_cross=%d\n",
+            h_begin[num_sccs], total_deg, num_cross);
+    if (total_deg != (long long)num_cross) {
+        fprintf(stderr, "[CSR_ERROR] forward CSR MISMATCH: total_deg=%lld != num_cross=%d\n",
+                total_deg, num_cross);
+    }
 
     N = num_sccs;
     M = num_cross;
