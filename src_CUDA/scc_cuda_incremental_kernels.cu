@@ -315,6 +315,7 @@ bool build_gpu_condensation_graph(
     int num_cross;
     CUDA_CHECK(cudaMemcpy(&num_cross, d_filtered_count,
                            sizeof(int), cudaMemcpyDeviceToHost));
+    fprintf(stderr, "[DBG] num_cross=%d\n", num_cross);
 
     // No cross-SCC edges → single-node condensation graph
     if (num_cross == 0) {
