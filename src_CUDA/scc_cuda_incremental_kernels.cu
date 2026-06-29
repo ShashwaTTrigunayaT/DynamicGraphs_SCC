@@ -289,9 +289,12 @@ bool build_gpu_condensation_graph(
 
     fprintf(stderr, "[DBG] step4 filter buffer alloc\n");
     CUDA_CHECK(cudaMalloc(&d_filtered_src,   total_edges * sizeof(int)));
+    fprintf(stderr, "[DBG] step4a d_filtered_src OK\n");
     CUDA_CHECK(cudaMalloc(&d_filtered_dst,   total_edges * sizeof(int)));
+    fprintf(stderr, "[DBG] step4b d_filtered_dst OK\n");
     CUDA_CHECK(cudaMalloc(&d_filtered_count, sizeof(int)));
     CUDA_CHECK(cudaMemset(d_filtered_count, 0, sizeof(int)));
+    fprintf(stderr, "[DBG] step4c memset OK\n");
 
     // ---------------------------------------------------------------
     // 3. Launch filter kernel (warp-ballot compact)
