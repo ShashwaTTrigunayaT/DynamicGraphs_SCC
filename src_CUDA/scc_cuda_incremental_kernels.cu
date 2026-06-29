@@ -336,9 +336,7 @@ bool build_gpu_condensation_graph(
         return true;
     }
 
-    // ---------------------------------------------------------------
-    // 4. Compute out-degree per SCC → find max pivot
-    // ---------------------------------------------------------------
+    fprintf(stderr, "[DBG] A\n");
     int* d_out_degree = NULL;
     CUDA_CHECK(cudaMalloc(&d_out_degree, num_sccs * sizeof(int)));
     CUDA_CHECK(cudaMemset(d_out_degree, 0, num_sccs * sizeof(int)));
@@ -347,7 +345,7 @@ bool build_gpu_condensation_graph(
         d_filtered_src, num_cross, d_out_degree);
     CUDA_CHECK(cudaDeviceSynchronize());
 
-    // Find max pivot on GPU (reduction)
+    fprintf(stderr, "[DBG] B\n");
     {
         int* d_max_idx = NULL;
         int* d_max_val = NULL;
@@ -375,16 +373,12 @@ bool build_gpu_condensation_graph(
         if (h_max_val <= 0) good_init_pivot = 0;
     }
 
-    // ---------------------------------------------------------------
-    // 5. Build forward CSR from compacted edge list
-    //    Using cub::DeviceRadixSort::SortPairs
-    // ---------------------------------------------------------------
+    fprintf(stderr, "[DBG] C\n");
     int* d_sorted_src = NULL;
     int* d_sorted_dst = NULL;
     CUDA_CHECK(cudaMalloc(&d_sorted_src, num_cross * sizeof(int)));
     CUDA_CHECK(cudaMalloc(&d_sorted_dst, num_cross * sizeof(int)));
 
-    // Determine temporary storage size for cub sort
     void* d_temp_storage = NULL;
     size_t temp_storage_bytes = 0;
     cub::DeviceRadixSort::SortPairs(d_temp_storage, temp_storage_bytes,
@@ -392,58 +386,47 @@ bool build_gpu_condensation_graph(
         d_filtered_dst, d_sorted_dst,
         num_cross, 0, sizeof(int) * 8);
     CUDA_CHECK(cudaMalloc(&d_temp_storage, temp_storage_bytes));
+    fprintf(stderr, "[DBG] D temp=%zu\n", temp_storage_bytes);
 
-    // Sort pairs (src, dst) by src
     cub::DeviceRadixSort::SortPairs(d_temp_storage, temp_storage_bytes,
         d_filtered_src, d_sorted_src,
         d_filtered_dst, d_sorted_dst,
         num_cross, 0, sizeof(int) * 8);
     CUDA_CHECK(cudaDeviceSynchronize());
-
     CUDA_CHECK(cudaFree(d_temp_storage));
 
-    // ---------------------------------------------------------------
-    // 6. Build forward CSR begin array
-    // ---------------------------------------------------------------
+    fprintf(stderr, "[DBG] E\n");
     int* d_begin_gpu = NULL;
     int* d_node_idx_gpu = NULL;
     CUDA_CHECK(cudaMalloc(&d_begin_gpu, (num_sccs + 1) * sizeof(edge_t)));
     CUDA_CHECK(cudaMalloc(&d_node_idx_gpu, num_cross * sizeof(node_t)));
 
-    // Initialize begin array to -1, then build from sorted edges
     CUDA_CHECK(cudaMemset(d_begin_gpu, 0xFF, (num_sccs + 1) * sizeof(edge_t)));
     build_csr_begin_kernel<<<grid_size, block_size>>>(
         d_sorted_src, num_cross, d_begin_gpu, num_sccs);
     CUDA_CHECK(cudaDeviceSynchronize());
 
-    // Set sentinel
     CUDA_CHECK(cudaMemcpy(&d_begin_gpu[num_sccs], &num_cross,
                            sizeof(int), cudaMemcpyHostToDevice));
 
-    // Fill zero-degree nodes on host (num_sccs is small)
     h_begin.resize(num_sccs + 1);
     CUDA_CHECK(cudaMemcpy(h_begin.data(), d_begin_gpu,
                            (num_sccs + 1) * sizeof(edge_t),
                            cudaMemcpyDeviceToHost));
 
-    // Fill forward: propagate last edge position to zero-degree nodes
     for (int i = num_sccs - 1; i >= 0; i--) {
         if (h_begin[i] == -1)
             h_begin[i] = h_begin[i + 1];
     }
-    // Upload corrected begin array back
     CUDA_CHECK(cudaMemcpy(d_begin_gpu, h_begin.data(),
                            (num_sccs + 1) * sizeof(edge_t),
                            cudaMemcpyHostToDevice));
 
-    // node_idx = sorted_dst (already in correct order)
     CUDA_CHECK(cudaMemcpy(d_node_idx_gpu, d_sorted_dst,
                            num_cross * sizeof(node_t),
                            cudaMemcpyDeviceToDevice));
 
-    // ---------------------------------------------------------------
-    // 7. Build reverse CSR — sort by dst
-    // ---------------------------------------------------------------
+    fprintf(stderr, "[DBG] F\n");
     int* d_sorted_by_dst_src = NULL;
     int* d_sorted_by_dst_dst = NULL;
     CUDA_CHECK(cudaMalloc(&d_sorted_by_dst_src, num_cross * sizeof(int)));
