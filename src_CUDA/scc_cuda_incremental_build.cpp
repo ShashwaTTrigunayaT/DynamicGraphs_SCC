@@ -142,6 +142,7 @@ void build_incremental_graph(
         num_sccs = read_file1(scc_list_fname, h_scc_list, num_vertices);
 
         // GPU: filter cross-SCC edges, build CSR, find pivot
+        fprintf(stderr, "[DBG] calling build_gpu_condensation_graph\n");
         bool gpu_ok = build_gpu_condensation_graph(
             orig_edges, insert_edges, h_scc_list, num_sccs,
             good_init_pivot,
