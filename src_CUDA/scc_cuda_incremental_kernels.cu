@@ -217,6 +217,8 @@ bool build_gpu_condensation_graph(
         return true;
     }
 
+    fprintf(stderr, "[DBG] build_gpu: step1 cudaMalloc begin\n");
+
     // ---------------------------------------------------------------
     // 1. Upload host data to GPU
     // ---------------------------------------------------------------
@@ -225,12 +227,17 @@ bool build_gpu_condensation_graph(
     int* d_scc_list = NULL;
 
     CUDA_CHECK(cudaMalloc(&d_all_src,  total_edges * sizeof(int)));
+    fprintf(stderr, "[DBG] build_gpu: cudaMalloc d_all_src OK\n");
     CUDA_CHECK(cudaMalloc(&d_all_dst,  total_edges * sizeof(int)));
+    fprintf(stderr, "[DBG] build_gpu: cudaMalloc d_all_dst OK\n");
     CUDA_CHECK(cudaMalloc(&d_scc_list, num_vertices * sizeof(int)));
+    fprintf(stderr, "[DBG] build_gpu: cudaMalloc d_scc_list OK\n");
 
     // Concatenate orig + insert edges into flat arrays
     {
+        fprintf(stderr, "[DBG] build_gpu: creating h_all_src (%d elements)\n", total_edges);
         vector<int> h_all_src(total_edges);
+        fprintf(stderr, "[DBG] build_gpu: creating h_all_dst\n");
         vector<int> h_all_dst(total_edges);
         for (int i = 0; i < num_orig; i++) {
             h_all_src[i] = orig_edges[i].first;
