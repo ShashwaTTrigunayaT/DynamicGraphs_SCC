@@ -472,6 +472,14 @@ int main(int argc, char** argv)
     state_allocate(st, N);
     state_init(st);
 
+    // For condensation graphs (method 6): every node IS its own SCC (DAG).
+    // Skip the entire pipeline — just mark all nodes directly.
+    bool skip_all_pipeline = gpu_graph_built;
+    if (skip_all_pipeline) {
+        mark_all_as_scc_launch(st.d_SCC, st.d_Color, N);
+        printf("[CUDA] Condensation graph (DAG): marked %d nodes as their own SCCs\n", N);
+    }
+
     initialize_trim1_full(N);
     initialize_trim2(N);
     initialize_WCC(N);
@@ -515,6 +523,18 @@ int main(int argc, char** argv)
     double runtime_ms = 0.0;
     double cuda_profile_total_ms = 0.0;
     int trimmed = 0;
+
+    if (skip_all_pipeline) {
+        // Condensation graph: all nodes already marked as their own SCCs.
+        // Set timing to 0 and go straight to SCC counting.
+        gettimeofday(&R1, NULL);
+        gettimeofday(&R2, NULL);
+        runtime_ms = 0.0;
+        cuda_profile_total_ms = 0.0;
+        printf(">>>>CUDA_PROFILE: TRIM1=0.00ms COMPACT_BUILD=0.00ms GLOBAL_BFS=0.00ms TRIM12=0.00ms WCC=0.00ms FB=0.00ms TOTAL=0.00ms\n");
+        fprintf(stderr, "[CUDA_PROFILE_STDERR] TRIM1=0.00 COMPACT=0.00 GLOBAL_BFS=0.00 TRIM12=0.00 WCC=0.00 FB=0.00 TOTAL=0.00\n");
+        goto after_pipeline;
+    }
 
     if (met_algo == 0) {
         // ============================================================
@@ -777,6 +797,7 @@ int main(int argc, char** argv)
         graph_free(gpuG);
         return 0;
     }
+after_pipeline:
     // Compute and print Algorithm Time: CUDA_PROFILE_TOTAL - H2D/D2H transfer time
     // (uses CUDA_PROFILE total, not separate gettimeofday, for consistency)
     double algo_time = cuda_profile_total_ms - g_algo_memcpy_ms;

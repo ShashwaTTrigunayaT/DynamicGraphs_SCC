@@ -198,6 +198,34 @@ __global__ void build_csr_begin_kernel(
 }
 
 // ======================================================================
+// mark_all_as_scc_launch — host function to launch mark_all_as_scc_kernel
+// ======================================================================
+void mark_all_as_scc_launch(int* d_SCC, int* d_Color, int N)
+{
+    int block_size = 256;
+    int grid_size = (N + block_size - 1) / block_size;
+    grid_size = min(grid_size, 1024);
+    mark_all_as_scc_kernel<<<grid_size, block_size>>>(d_SCC, d_Color, N);
+    CUDA_CHECK(cudaDeviceSynchronize());
+}
+
+// ======================================================================
+// mark_all_as_scc_kernel
+//
+// Sets all nodes as their own SCC (d_SCC[i] = i, d_Color[i] = SCC_FOUND).
+// Used for condensation graphs which are DAGs — every node is its own SCC.
+// ======================================================================
+__global__ void mark_all_as_scc_kernel(int* d_SCC, int* d_Color, int N)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = gridDim.x * blockDim.x;
+    for (int i = idx; i < N; i += stride) {
+        d_SCC[i] = i;
+        d_Color[i] = SCC_FOUND;
+    }
+}
+
+// ======================================================================
 // build_gpu_condensation_graph() — HOST FUNCTION
 //
 // Orchestrates the GPU-based condensation graph construction for

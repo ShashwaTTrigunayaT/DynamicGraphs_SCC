@@ -507,6 +507,10 @@ void build_incremental_graph(
     int& gpu_N, int& gpu_M);
 
 // ---- scc_cuda_incremental_kernels.cu (GPU kernels for incremental graph construction) ----
+// skip_all_pipeline — set by main when method 6 builds condensation graph
+// (DAG: every node IS its own SCC, skip TRIM1/pipeline)
+void mark_all_as_scc_launch(int* d_SCC, int* d_Color, int N);
+
 bool build_gpu_condensation_graph(
     const std::vector<std::pair<int,int>>& orig_edges,
     const std::vector<std::pair<int,int>>& insert_edges,
