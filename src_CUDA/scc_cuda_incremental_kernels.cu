@@ -225,6 +225,7 @@ bool build_gpu_condensation_graph(
 
     // Skip if no edges at all
     if (total_edges == 0) {
+        fprintf(stderr, "[DBG] no edges\n");
         N = (num_sccs > 0) ? num_sccs : 1;
         M = 0;
         good_init_pivot = 0;
@@ -234,6 +235,8 @@ bool build_gpu_condensation_graph(
         h_r_node_idx.clear();
         return true;
     }
+
+    fprintf(stderr, "[DBG] step1 malloc\n");
 
     // ---------------------------------------------------------------
     // 1. Upload host data to GPU
@@ -245,6 +248,8 @@ bool build_gpu_condensation_graph(
     CUDA_CHECK(cudaMalloc(&d_all_src,  total_edges * sizeof(int)));
     CUDA_CHECK(cudaMalloc(&d_all_dst,  total_edges * sizeof(int)));
     CUDA_CHECK(cudaMalloc(&d_scc_list, num_vertices * sizeof(int)));
+
+    fprintf(stderr, "[DBG] step2 pair upload\n");
 
     // Upload edge data directly as pairs (avoids 500MB of temporary host vectors)
     // We upload to a GPU pair buffer, then deinterleave via a kernel.
@@ -270,6 +275,7 @@ bool build_gpu_condensation_graph(
 
         CUDA_CHECK(cudaFree(d_pairs));
     }
+    fprintf(stderr, "[DBG] step3 upload scc_list\n");
     CUDA_CHECK(cudaMemcpy(d_scc_list, h_scc_list.data(),
                            num_vertices * sizeof(int), cudaMemcpyHostToDevice));
 
@@ -281,6 +287,7 @@ bool build_gpu_condensation_graph(
     int* d_filtered_dst = NULL;
     int* d_filtered_count = NULL;
 
+    fprintf(stderr, "[DBG] step4 filter buffer alloc\n");
     CUDA_CHECK(cudaMalloc(&d_filtered_src,   total_edges * sizeof(int)));
     CUDA_CHECK(cudaMalloc(&d_filtered_dst,   total_edges * sizeof(int)));
     CUDA_CHECK(cudaMalloc(&d_filtered_count, sizeof(int)));
