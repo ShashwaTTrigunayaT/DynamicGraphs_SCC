@@ -454,8 +454,7 @@ __global__ void scatter_single_color_all_nodes_kernel(
     int target_color,
     int* d_out, int* d_pos);
 
-// ---- scc_cuda_dynamic.cpp (mirrors common_main.h helpers) ----
-// Host-side helpers for dynamic graph construction (compiled with g++)
+// ---- scc_cuda_main.cpp (graph loading helpers from common_main.h) ----
 
 int  read_file(const std::string& filename,
                std::vector<std::pair<int,int>>& edges_list);
@@ -481,12 +480,44 @@ void BFS(std::vector<std::vector<int>>& adj_list,
 
 void parallel_prefix_sum(std::vector<int>& a);
 
-// ---- scc_cuda_dynamic.cpp (mirrors scc_incremental.cc) ----
+// ---- scc_cuda_incremental_build.cpp (mirrors scc_incremental.cc + common_main.h incremental blocks) ----
 void insert_idea1(gm_graph& G,
                   std::vector<std::pair<int,int>> orig_edges,
                   std::vector<std::pair<int,int>> insert_edges);
 void insert_idea2(gm_graph& G,
                   std::vector<std::pair<int,int>> scc_edges);
+
+
+void build_incremental_graph(
+    gm_graph& G,
+    const std::string& fname,
+    int met_algo_original,
+    int& num_sccs,
+    int& good_init_pivot,
+    double& insert_runtime,
+    std::vector<int>& h_scc_list,
+    std::vector<int>& h_level_ver,
+    std::vector<int>& h_affect_level,
+    std::vector<int>& h_new_edge_nodes,
+    bool& gpu_graph_built,
+    std::vector<edge_t>& h_gpu_begin,
+    std::vector<node_t>& h_gpu_node_idx,
+    std::vector<edge_t>& h_gpu_r_begin,
+    std::vector<node_t>& h_gpu_r_node_idx,
+    int& gpu_N, int& gpu_M);
+
+// ---- scc_cuda_incremental_kernels.cu (GPU kernels for incremental graph construction) ----
+bool build_gpu_condensation_graph(
+    const std::vector<std::pair<int,int>>& orig_edges,
+    const std::vector<std::pair<int,int>>& insert_edges,
+    const std::vector<int>& h_scc_list,
+    int num_sccs,
+    int& good_init_pivot,
+    std::vector<edge_t>& h_begin,
+    std::vector<node_t>& h_node_idx,
+    std::vector<edge_t>& h_r_begin,
+    std::vector<node_t>& h_r_node_idx,
+    int& N, int& M);
 
 // DynamicArrays upload helpers — upload host data to existing device buffers
 void dynamic_arrays_upload_scc_list(DynamicArrays& da,

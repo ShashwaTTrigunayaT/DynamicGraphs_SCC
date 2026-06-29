@@ -35,7 +35,7 @@ CXXFLAGS  = -O3 -I. -I$(GM_INC) -I$(CUDA_HOME)/include -std=c++17 -fopenmp
 LFLAGS    = -L$(CUDA_HOME)/lib64 -lcudart -L$(GM_LIB) -lgmgraph -lgomp
 
 TARGET = scc_cuda
-OBJS = scc_cuda_main.o scc_cuda_dynamic.o scc_cuda_graph.o scc_cuda_trim1.o scc_cuda_trim2.o scc_cuda_trim2_new.o scc_cuda_fb_global.o scc_cuda_fb_seq.o scc_cuda_fb_seq2.o scc_cuda_fb_gpu.o scc_cuda_weak.o scc_cuda_work_queue.o scc_cuda_spanning_forest.o
+OBJS = scc_cuda_main.o scc_cuda_incremental_build.o scc_cuda_incremental_kernels.o scc_cuda_graph.o scc_cuda_trim1.o scc_cuda_trim2.o scc_cuda_trim2_new.o scc_cuda_fb_global.o scc_cuda_fb_seq.o scc_cuda_fb_seq2.o scc_cuda_fb_gpu.o scc_cuda_weak.o scc_cuda_work_queue.o scc_cuda_spanning_forest.o
 
 all: $(TARGET)
 
@@ -46,9 +46,15 @@ $(TARGET): $(OBJS) $(GM_LIB)/libgmgraph.a
 scc_cuda_main.o: scc_cuda_main.cpp scc_cuda.h
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
-# Dynamic graph construction helpers (host-only, uses gm_graph)
-scc_cuda_dynamic.o: scc_cuda_dynamic.cpp scc_cuda.h
+# Incremental graph construction (host-only, uses gm_graph)
+# Mirrors: scc_incremental.cc (insert_idea1/2) + common_main.h incremental blocks
+scc_cuda_incremental_build.o: scc_cuda_incremental_build.cpp scc_cuda.h
 	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+# GPU incremental kernels: filter, out-degree, max-pivot, CSR builder
+# Compiled with nvcc (contains CUDA kernels and cub::DeviceRadixSort)
+scc_cuda_incremental_kernels.o: scc_cuda_incremental_kernels.cu scc_cuda.h
+	$(NVCC) $(NVCCFLAGS) -dc $< -o $@
 
 # CUDA device code: compiled with nvcc -dc
 scc_cuda_graph.o: scc_cuda_graph.cu scc_cuda.h
