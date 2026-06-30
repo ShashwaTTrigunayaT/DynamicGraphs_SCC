@@ -502,18 +502,15 @@ void compute_trim1_alive_counts(const GPUGraph& g, const GPUState& st)
 }
 
 // ======================================================================
-// Kernel: trim_once_node_compact_fix2_kernel — Fix 2
+// Kernel: trim_once_node_compact_fix2_kernel — Fix 2c (recompute, no decrements)
 //
-// Replaces the warp-cooperative edge scan (Fix 1) with O(1) alive-count
-// checks via d_out_alive_count[] / d_in_alive_count[].
+// Pure O(1) alive-count check kernel — reads d_out/in_alive_count[n] and
+// marks nodes for trimming if count <= 0. NO decrement loops — that was
+// the source of the 115ms atomic storm.
 //
-// When a node IS trimmed, its neighbors' alive counts are decremented
-// atomically via warp-strided loops over the trimmed node's edges.
-// This maintains the invariant without rescanning all edges per iteration.
-//
-// Key benefit: when NO nodes are trimmed (pathological iteration),
-// this does ZERO edge scanning work, vs the old approach which scanned
-// ALL edges of ALL remaining nodes to find no live neighbor.
+// The caller (repeat_global_trim1_compact) recomputes alive counts each
+// iteration via compute_trim1_alive_counts, which scans only compact-set
+// nodes (~7K) costing ~1ms per recompute. Over 5 iterations: ~5ms total.
 // ======================================================================
 __global__ void trim_once_node_compact_fix2_kernel(
     const edge_t* d_begin, const node_t* d_node_idx,
@@ -532,7 +529,6 @@ __global__ void trim_once_node_compact_fix2_kernel(
     __syncthreads();
 
     int warp_id = (blockIdx.x * (blockDim.x / 32)) + (threadIdx.x / 32);
-    int lane = threadIdx.x & 31;
     int num_warps = gridDim.x * (blockDim.x / 32);
     int local_count = 0;
 
@@ -565,45 +561,21 @@ __global__ void trim_once_node_compact_fix2_kernel(
         }
         if (d_Color[n] != curr_color) continue;
 
-        // ---- Out-degree check via alive count (O(1)) ----
+        // ---- Out-degree check via alive count (O(1)) — no decrement ----
         if (d_out_alive_count[n] <= 0) {
             d_SCC[n] = n;
             d_Color[n] = -2;
             local_count++;
-
-            // Decrement in_alive_count of successors (this n is no longer live)
-            for (edge_t k_idx = d_begin[n] + lane; k_idx < d_begin[n + 1]; k_idx += 32) {
-                node_t succ = d_node_idx[k_idx];
-                if (succ != n)
-                    atomicAdd(&d_in_alive_count[succ], -1);
-            }
-            // Decrement out_alive_count of predecessors (this n is no longer live)
-            for (edge_t k_idx = d_r_begin[n] + lane; k_idx < d_r_begin[n + 1]; k_idx += 32) {
-                node_t pred = d_r_node_idx[k_idx];
-                if (pred != n)
-                    atomicAdd(&d_out_alive_count[pred], -1);
-            }
+            // No decrement — counts will be recomputed next iteration
             continue;
         }
 
-        // ---- In-degree check via alive count (O(1)) ----
+        // ---- In-degree check via alive count (O(1)) — no decrement ----
         if (d_in_alive_count[n] <= 0) {
             d_SCC[n] = n;
             d_Color[n] = -2;
             local_count++;
-
-            // Decrement in_alive_count of successors
-            for (edge_t k_idx = d_begin[n] + lane; k_idx < d_begin[n + 1]; k_idx += 32) {
-                node_t succ = d_node_idx[k_idx];
-                if (succ != n)
-                    atomicAdd(&d_in_alive_count[succ], -1);
-            }
-            // Decrement out_alive_count of predecessors
-            for (edge_t k_idx = d_r_begin[n] + lane; k_idx < d_r_begin[n + 1]; k_idx += 32) {
-                node_t pred = d_r_node_idx[k_idx];
-                if (pred != n)
-                    atomicAdd(&d_out_alive_count[pred], -1);
-            }
+            // No decrement — counts will be recomputed next iteration
         }
     }
 
@@ -1158,17 +1130,15 @@ __global__ void trim_once_node_compact_persistent_kernel(
 }
 
 // ======================================================================
-// repeat_global_trim1_compact() — host-side loop (Fix 2: O(1) checks)
+// repeat_global_trim1_compact() — host-side loop (Fix 2c: recompute each iter)
 //
-// Before the compact loop, initializes alive-neighbor counts via
-// compute_alive_counts_kernel (one-time cost: ~0.1ms for 1.6M nodes).
+// Each iteration:
+//   1. Recompute alive counts for compact-set nodes (~1ms for 7K nodes)
+//   2. Check counts (O(1) per node — negligible)
+//   3. Trim nodes with count <= 0
 //
-// The compact kernel then checks d_out/in_alive_count[n] (O(1)) instead
-// of scanning all edges. When a node is trimmed, neighbor counts are
-// decremented atomically, maintaining the invariant without rescanning.
-//
-// On the pathological iteration where NO nodes are trimmed, this does
-// ZERO edge scanning work — eliminating the 261ms bottleneck entirely.
+// No atomic decrement loops needed — counts are freshly computed each
+// iteration based on the current d_Color state.
 // ======================================================================
 int repeat_global_trim1_compact(GPUState& st, const GPUGraph& g,
     int* d_count, int met_algo, int flag11,
@@ -1178,12 +1148,12 @@ int repeat_global_trim1_compact(GPUState& st, const GPUGraph& g,
     create_trim1_compact(st, g);
     if (d_trim_targets_count == 0) return 0;
 
-    // Fix 2: One-time init of alive-neighbor counts before the loop
-    compute_trim1_alive_counts(g, st);
-
     int total_count = 0;
     int count;
     do {
+        // Recompute alive counts for current compact set
+        compute_trim1_alive_counts(g, st);
+
         count = do_global_trim1_compact_fix2(st, g, d_count, met_algo, flag11,
                                              da, d_count_trim_spec);
         total_count += count;
