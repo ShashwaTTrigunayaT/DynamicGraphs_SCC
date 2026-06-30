@@ -192,19 +192,78 @@ __global__ void trim_once_node_compact_kernel(
     if (threadIdx.x == 0) s_count = 0;
     __syncthreads();
 
-    int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    int stride = gridDim.x * blockDim.x;
+    int warp_id = (blockIdx.x * (blockDim.x / 32)) + (threadIdx.x / 32);
+    int lane = threadIdx.x & 31;
+    int num_warps = gridDim.x * (blockDim.x / 32);
     int local_count = 0;
 
-    for (int ix = tid; ix < num_targets; ix += stride) {
+    for (int ix = warp_id; ix < num_targets; ix += num_warps) {
         node_t n = d_trim_targets[ix];
-        local_count += trim_once_node_device(
-            d_begin, d_node_idx, d_r_begin, d_r_node_idx,
-            d_Color, d_SCC, n,
-            met_algo, flag11,
-            d_scc_list, d_vec_scc_count,
-            d_level_ver, d_affect_level,
-            d_count_trim_spec);
+        if (d_Color[n] == SCC_FOUND) continue;
+        int curr_color = d_Color[n];
+
+        // Method-specific checks (same as trim_once_node_device)
+        if (met_algo == 11 && flag11 == 2) {
+            if (d_SCC[n] < 0) {
+                d_Color[n] = -2;
+                d_SCC[n] = n;
+                atomicAdd(d_count_trim_spec, 1);
+                local_count++;
+                continue;
+            }
+        }
+        if (met_algo == 9 && d_vec_scc_count[d_scc_list[n]] == -1) {
+            d_Color[n] = -2;
+            d_SCC[n] = -1;
+            local_count++;
+            continue;
+        }
+        if (met_algo == 7 && d_affect_level[d_level_ver[n]] == 0) {
+            d_SCC[n] = n;
+            d_Color[n] = -2;
+            local_count++;
+            continue;
+        }
+        if (d_Color[n] != curr_color) continue;
+
+        // Warp-cooperative out-degree check: 32 lanes scan 32 edges per step
+        bool found = false;
+        edge_t out_begin = d_begin[n];
+        edge_t out_end   = d_begin[n + 1];
+        for (edge_t base = out_begin; base < out_end && !found; base += 32) {
+            edge_t k_idx = base + lane;
+            bool alive = (k_idx < out_end) &&
+                         (d_node_idx[k_idx] != n) &&
+                         (d_Color[d_node_idx[k_idx]] == curr_color);
+            unsigned mask = __ballot_sync(0xffffffff, alive);
+            if (mask) found = true;
+        }
+
+        if (!found) {
+            d_SCC[n] = n;
+            d_Color[n] = -2;
+            local_count++;
+            continue;
+        }
+
+        // Warp-cooperative in-degree check
+        found = false;
+        edge_t in_begin = d_r_begin[n];
+        edge_t in_end   = d_r_begin[n + 1];
+        for (edge_t base = in_begin; base < in_end && !found; base += 32) {
+            edge_t k_idx = base + lane;
+            bool alive = (k_idx < in_end) &&
+                         (d_r_node_idx[k_idx] != n) &&
+                         (d_Color[d_r_node_idx[k_idx]] == curr_color);
+            unsigned mask = __ballot_sync(0xffffffff, alive);
+            if (mask) found = true;
+        }
+
+        if (!found) {
+            d_SCC[n] = n;
+            d_Color[n] = -2;
+            local_count++;
+        }
     }
 
     if (local_count > 0) atomicAdd(&s_count, local_count);
