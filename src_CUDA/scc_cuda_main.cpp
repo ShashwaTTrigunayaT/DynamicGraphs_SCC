@@ -528,7 +528,7 @@ int main(int argc, char** argv)
 
         // ---------- Phase 1: TRIM1 ----------
         trimmed = repeat_global_trim1(st, gpuG, d_count,
-            met_algo, flag11, da, d_count_trim_spec, 0);
+            met_algo, flag11, da, d_count_trim_spec, 100);
         int remaining = N - trimmed;
         printf("[CUDA] Trimmed = %d\n", trimmed);
 
@@ -568,7 +568,7 @@ int main(int argc, char** argv)
 
         // ---------- Phase 1: TRIM1 ----------
         trimmed = repeat_global_trim1(st, gpuG, d_count,
-            met_algo, flag11, da, d_count_trim_spec, 0);
+            met_algo, flag11, da, d_count_trim_spec, 100);
         printf("[CUDA] Trimmed = %d\n", trimmed);
 
         int curr_count = N - trimmed;
@@ -622,7 +622,7 @@ int main(int argc, char** argv)
 
         // ---------- Phase 1: TRIM1 ----------
         trimmed = repeat_global_trim1(st, gpuG, d_count,
-            met_algo, flag11, da, d_count_trim_spec, 0);
+            met_algo, flag11, da, d_count_trim_spec, 100);
         gettimeofday(&t_trim1, NULL);
         printf("[CUDA] Trimmed = %d\n", trimmed);
 
