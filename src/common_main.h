@@ -543,7 +543,9 @@ public:
             string orig_fname = fname.substr(0, lastPos) + "/refined_edges.txt";
             int num_vertices = read_file(orig_fname, orig_edges);
             read_file(fname, insert_edges);
-            string scc_list_fname = fname.substr(0, lastPos) + "/scc_list.txt";
+            string dataset_dir = fname.substr(0, lastPos);
+            string dataset_name = dataset_dir.substr(dataset_dir.rfind('/') + 1);
+            string scc_list_fname = "scc_lists/" + dataset_name + ".txt";
             int num_sccs = read_file1(scc_list_fname, scc_list, num_vertices);
             gettimeofday(&T6_1, NULL);
             create_scc_edges(orig_edges, insert_edges, scc_edges, num_vertices, num_sccs);
@@ -589,7 +591,9 @@ public:
             string orig_fname = fname.substr(0, lastPos) + "/refined_edges.txt";
             int num_vertices = read_file(orig_fname, orig_edges);
             read_file(fname, insert_edges);
-            string scc_list_fname = fname.substr(0, lastPos) + "/scc_list.txt";
+            string dataset_dir = fname.substr(0, lastPos);
+            string dataset_name = dataset_dir.substr(dataset_dir.rfind('/') + 1);
+            string scc_list_fname = "scc_lists/" + dataset_name + ".txt";
             int num_sccs = read_file1(scc_list_fname, scc_list, num_vertices);
             gettimeofday(&T6_1, NULL);
             create_scc_edges(orig_edges, insert_edges, scc_edges, num_vertices, num_sccs);
@@ -632,7 +636,9 @@ public:
             string orig_fname = fname.substr(0, lastPos) + "/refined_edges.txt";
             int num_vertices = read_file(orig_fname, orig_edges);
             read_file(fname, insert_edges);
-            string scc_list_fname = fname.substr(0, lastPos) + "/scc_list.txt";
+            string dataset_dir = fname.substr(0, lastPos);
+            string dataset_name = dataset_dir.substr(dataset_dir.rfind('/') + 1);
+            string scc_list_fname = "scc_lists/" + dataset_name + ".txt";
             int num_sccs = read_file1(scc_list_fname, scc_list, num_vertices);
             create_scc_edges(orig_edges, insert_edges, scc_edges, num_vertices, num_sccs);
             gettimeofday(&T1, NULL);
@@ -652,7 +658,9 @@ public:
             size_t lastPos = fname.rfind('/');
             string orig_fname = fname.substr(0, lastPos) + "/refined_edges.txt";
             int num_vertices = read_file(orig_fname, orig_edges);
-            string scc_list_fname = fname.substr(0, lastPos) + "/scc_list.txt";
+            string dataset_dir = fname.substr(0, lastPos);
+            string dataset_name = dataset_dir.substr(dataset_dir.rfind('/') + 1);
+            string scc_list_fname = "scc_lists/" + dataset_name + ".txt";
             int num_sccs = read_file1(scc_list_fname, scc_list, num_vertices);
             read_file2(fname, orig_edges, scc_list, rem_edges, vec_scc_count, num_sccs);
             gettimeofday(&T1, NULL);
@@ -706,7 +714,9 @@ public:
             size_t lastPos = fname.rfind('/');
             string orig_fname = fname.substr(0, lastPos) + "/refined_edges.txt";
             int num_vertices = read_file(orig_fname, orig_edges);
-            string scc_list_fname = fname.substr(0, lastPos) + "/scc_list.txt";
+            string dataset_dir = fname.substr(0, lastPos);
+            string dataset_name = dataset_dir.substr(dataset_dir.rfind('/') + 1);
+            string scc_list_fname = "scc_lists/" + dataset_name + ".txt";
             int num_sccs = read_file1(scc_list_fname, scc_list, num_vertices);
             read_file2(fname, orig_edges, scc_list, rem_edges, vec_scc_count, num_sccs);
             gettimeofday(&T1, NULL);
@@ -722,7 +732,9 @@ public:
             size_t lastPos = fname.rfind('/');
             string orig_fname = fname.substr(0, lastPos) + "/refined_edges.txt";
             int num_vertices = read_file(orig_fname, orig_edges);
-            string scc_list_fname = fname.substr(0, lastPos) + "/scc_list.txt";
+            string dataset_dir = fname.substr(0, lastPos);
+            string dataset_name = dataset_dir.substr(dataset_dir.rfind('/') + 1);
+            string scc_list_fname = "scc_lists/" + dataset_name + ".txt";
             int num_sccs = read_file1(scc_list_fname, scc_list, num_vertices);
             read_file2(fname, orig_edges, scc_list, rem_edges, vec_scc_count, num_sccs);
             gettimeofday(&T1, NULL);
