@@ -198,18 +198,6 @@ __global__ void build_csr_begin_kernel(
 }
 
 // ======================================================================
-// mark_all_as_scc_launch — host function to launch mark_all_as_scc_kernel
-// ======================================================================
-void mark_all_as_scc_launch(int* d_SCC, int* d_Color, int N)
-{
-    int block_size = 256;
-    int grid_size = (N + block_size - 1) / block_size;
-    grid_size = min(grid_size, 1024);
-    mark_all_as_scc_kernel<<<grid_size, block_size>>>(d_SCC, d_Color, N);
-    CUDA_CHECK(cudaDeviceSynchronize());
-}
-
-// ======================================================================
 // mark_all_as_scc_kernel
 //
 // Sets all nodes as their own SCC (d_SCC[i] = i, d_Color[i] = SCC_FOUND).
@@ -223,6 +211,18 @@ __global__ void mark_all_as_scc_kernel(int* d_SCC, int* d_Color, int N)
         d_SCC[i] = i;
         d_Color[i] = SCC_FOUND;
     }
+}
+
+// ======================================================================
+// mark_all_as_scc_launch — host function to launch mark_all_as_scc_kernel
+// ======================================================================
+void mark_all_as_scc_launch(int* d_SCC, int* d_Color, int N)
+{
+    int block_size = 256;
+    int grid_size = (N + block_size - 1) / block_size;
+    grid_size = min(grid_size, 1024);
+    mark_all_as_scc_kernel<<<grid_size, block_size>>>(d_SCC, d_Color, N);
+    CUDA_CHECK(cudaDeviceSynchronize());
 }
 
 // ======================================================================
