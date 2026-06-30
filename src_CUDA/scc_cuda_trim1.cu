@@ -1224,7 +1224,7 @@ int repeat_global_trim1_compact(GPUState& st, const GPUGraph& g,
         // on full graphs where most nodes have many alive neighbors.
         // The full-count compute kernel scans ALL edges — expensive on large sets.
         // For small compact sets, the compute kernel + O(1) fix2 check is fine.
-        if (d_trim_targets_count > 300000) {
+        if (d_trim_targets_count > 100000) {
             // Short-circuit: stops at first alive neighbor (fast for large sets)
             count = do_global_trim1_compact(st, g, d_count, met_algo, flag11,
                                             da, d_count_trim_spec);
