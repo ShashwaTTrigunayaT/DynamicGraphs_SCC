@@ -1219,11 +1219,21 @@ int repeat_global_trim1_compact(GPUState& st, const GPUGraph& g,
     int total_count = 0;
     int count;
     do {
-        // Recompute alive counts for current compact set
-        compute_trim1_alive_counts(g, st);
-
-        count = do_global_trim1_compact_fix2(st, g, d_count, met_algo, flag11,
-                                             da, d_count_trim_spec);
+        // For large compact sets (>100K nodes), use the original short-circuit
+        // kernel which stops at the first alive neighbor. This is much faster
+        // on full graphs where most nodes have many alive neighbors.
+        // The full-count compute kernel scans ALL edges — expensive on large sets.
+        // For small compact sets, the compute kernel + O(1) fix2 check is fine.
+        if (d_trim_targets_count > 100000) {
+            // Short-circuit: stops at first alive neighbor (fast for large sets)
+            count = do_global_trim1_compact(st, g, d_count, met_algo, flag11,
+                                            da, d_count_trim_spec);
+        } else {
+            // Full-count: compute alive counts, then O(1) check
+            compute_trim1_alive_counts(g, st);
+            count = do_global_trim1_compact_fix2(st, g, d_count, met_algo, flag11,
+                                                 da, d_count_trim_spec);
+        }
         total_count += count;
 
         // Rebuild compact set in-place (filters out SCC_FOUND nodes)
