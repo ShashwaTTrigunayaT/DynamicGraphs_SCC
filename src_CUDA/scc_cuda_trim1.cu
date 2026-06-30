@@ -278,21 +278,38 @@ __global__ void compute_trim_targets_alive_counts_kernel(
         int in_cnt = 0;
 
         if (d_Color[n] != SCC_FOUND) {
-            int color = d_Color[n];
+            int color = __ldg(&d_Color[n]);
 
             // ---- Out-degree: all 256 threads cooperatively scan ----
-            // Stride = blockDim.x (=256) so every thread handles consecutive edges
+            // Unrolled 4x with __ldg for random d_Color reads.
+            // __ldg() routes through the read-only data cache which handles
+            // random access patterns better than the general L1/L2 path.
+            // Loop unrolling gives the compiler more ILP to hide memory latency.
             edge_t out_end = d_begin[n + 1];
-            for (edge_t e = d_begin[n] + tid; e < out_end; e += blockDim.x) {
-                node_t k = d_node_idx[e];
-                out_cnt += (k != n && d_Color[k] == color) ? 1 : 0;
+            edge_t out_stride = blockDim.x * 4;
+            for (edge_t e = d_begin[n] + tid; e < out_end; e += out_stride) {
+                int k0 = (e + blockDim.x * 0 < out_end) ? d_node_idx[e + blockDim.x * 0] : n;
+                int k1 = (e + blockDim.x * 1 < out_end) ? d_node_idx[e + blockDim.x * 1] : n;
+                int k2 = (e + blockDim.x * 2 < out_end) ? d_node_idx[e + blockDim.x * 2] : n;
+                int k3 = (e + blockDim.x * 3 < out_end) ? d_node_idx[e + blockDim.x * 3] : n;
+                out_cnt += (k0 != n && __ldg(&d_Color[k0]) == color) ? 1 : 0;
+                out_cnt += (k1 != n && __ldg(&d_Color[k1]) == color) ? 1 : 0;
+                out_cnt += (k2 != n && __ldg(&d_Color[k2]) == color) ? 1 : 0;
+                out_cnt += (k3 != n && __ldg(&d_Color[k3]) == color) ? 1 : 0;
             }
 
             // ---- In-degree: all 256 threads cooperatively scan ----
             edge_t in_end = d_r_begin[n + 1];
-            for (edge_t e = d_r_begin[n] + tid; e < in_end; e += blockDim.x) {
-                node_t k = d_r_node_idx[e];
-                in_cnt += (k != n && d_Color[k] == color) ? 1 : 0;
+            edge_t in_stride = blockDim.x * 4;
+            for (edge_t e = d_r_begin[n] + tid; e < in_end; e += in_stride) {
+                int k0 = (e + blockDim.x * 0 < in_end) ? d_r_node_idx[e + blockDim.x * 0] : n;
+                int k1 = (e + blockDim.x * 1 < in_end) ? d_r_node_idx[e + blockDim.x * 1] : n;
+                int k2 = (e + blockDim.x * 2 < in_end) ? d_r_node_idx[e + blockDim.x * 2] : n;
+                int k3 = (e + blockDim.x * 3 < in_end) ? d_r_node_idx[e + blockDim.x * 3] : n;
+                in_cnt += (k0 != n && __ldg(&d_Color[k0]) == color) ? 1 : 0;
+                in_cnt += (k1 != n && __ldg(&d_Color[k1]) == color) ? 1 : 0;
+                in_cnt += (k2 != n && __ldg(&d_Color[k2]) == color) ? 1 : 0;
+                in_cnt += (k3 != n && __ldg(&d_Color[k3]) == color) ? 1 : 0;
             }
         }
 
