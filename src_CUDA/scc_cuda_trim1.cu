@@ -265,40 +265,60 @@ __global__ void compute_trim_targets_alive_counts_kernel(
     int* d_out_alive_count, int* d_in_alive_count,
     const int* d_trim_targets, int num_targets)
 {
-    int warp_id = (blockIdx.x * (blockDim.x / 32)) + (threadIdx.x / 32);
-    int lane = threadIdx.x & 31;
-    int num_warps = gridDim.x * (blockDim.x / 32);
+    // Block-cooperative: all 256 threads in a block work together on ONE node
+    // at a time. This prevents supernodes from stalling the block: instead of
+    // one warp doing all 500K-edge scanning (15K iterations/lane) while 7 other
+    // warps wait, all 256 threads share the work (1,953 iterations/thread).
+    __shared__ int s_red[256];
+    int tid = threadIdx.x;
 
-    for (int ix = warp_id; ix < num_targets; ix += num_warps) {
+    for (int ix = blockIdx.x; ix < num_targets; ix += gridDim.x) {
         node_t n = d_trim_targets[ix];
-        if (d_Color[n] == SCC_FOUND) continue;
-        int color = d_Color[n];
+        int out_cnt = 0;
+        int in_cnt = 0;
 
-        // ---- Out-degree: warp-cooperative scan ----
-        int out_lane = 0;
-        edge_t out_end = d_begin[n + 1];
-        for (edge_t e = d_begin[n] + lane; e < out_end; e += 32) {
-            node_t k = d_node_idx[e];
-            if (k != n && d_Color[k] == color) out_lane++;
+        if (d_Color[n] != SCC_FOUND) {
+            int color = d_Color[n];
+
+            // ---- Out-degree: all 256 threads cooperatively scan ----
+            // Stride = blockDim.x (=256) so every thread handles consecutive edges
+            edge_t out_end = d_begin[n + 1];
+            for (edge_t e = d_begin[n] + tid; e < out_end; e += blockDim.x) {
+                node_t k = d_node_idx[e];
+                out_cnt += (k != n && d_Color[k] == color) ? 1 : 0;
+            }
+
+            // ---- In-degree: all 256 threads cooperatively scan ----
+            edge_t in_end = d_r_begin[n + 1];
+            for (edge_t e = d_r_begin[n] + tid; e < in_end; e += blockDim.x) {
+                node_t k = d_r_node_idx[e];
+                in_cnt += (k != n && d_Color[k] == color) ? 1 : 0;
+            }
         }
 
-        // ---- In-degree: warp-cooperative scan ----
-        int in_lane = 0;
-        edge_t in_end = d_r_begin[n + 1];
-        for (edge_t e = d_r_begin[n] + lane; e < in_end; e += 32) {
-            node_t k = d_r_node_idx[e];
-            if (k != n && d_Color[k] == color) in_lane++;
+        // ---- Block-wide tree reduction: sum out_cnt across all 256 threads ----
+        s_red[tid] = out_cnt;
+        __syncthreads();
+
+        for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+            if (tid < s) s_red[tid] += s_red[tid + s];
+            __syncthreads();
         }
 
-        // ---- Warp reduction: sum per-lane counts across all 32 lanes ----
-        #pragma unroll
-        for (int offset = 16; offset > 0; offset >>= 1) {
-            out_lane += __shfl_xor_sync(0xffffffff, out_lane, offset);
-            in_lane  += __shfl_xor_sync(0xffffffff, in_lane,  offset);
+        if (tid == 0) d_out_alive_count[n] = s_red[0];
+        __syncthreads();
+
+        // ---- Block-wide tree reduction: sum in_cnt across all 256 threads ----
+        s_red[tid] = in_cnt;
+        __syncthreads();
+
+        for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+            if (tid < s) s_red[tid] += s_red[tid + s];
+            __syncthreads();
         }
-        // After reduction, all 32 lanes have the same total — safe redundant write
-        d_out_alive_count[n] = out_lane;
-        d_in_alive_count[n]  = in_lane;
+
+        if (tid == 0) d_in_alive_count[n] = s_red[0];
+        __syncthreads();
     }
 }
 
@@ -509,11 +529,17 @@ void compute_trim1_alive_counts(const GPUGraph& g, const GPUState& st)
     if (num_targets == 0) return;
 
     int block_size = 256;
-    // Use max grid to fill all SMs: 142 blocks (L40S has 142 SMs)
-    // This over-subscribes the GPU — extra warps with no work just skip
-    // and improves occupancy from ~1.2 to ~8 warps per SM.
-    int grid_size = 142;
-    compute_trim_targets_alive_counts_kernel<<<grid_size, block_size>>>(
+    // Query SM count for portable grid sizing (L40S=142, A100=108, etc.)
+    // The block-level kernel requires 1 block per node — launch enough blocks
+    // to fill all SMs while not exceeding num_targets.
+    static int grid_size = 0;
+    if (grid_size == 0) {
+        cudaDeviceProp props;
+        cudaGetDeviceProperties(&props, 0);
+        grid_size = min(num_targets, props.multiProcessorCount);
+    }
+    int actual_grid = (num_targets < 256) ? num_targets : grid_size;
+    compute_trim_targets_alive_counts_kernel<<<actual_grid, block_size>>>(
         g.d_begin, g.d_node_idx,
         g.d_r_begin, g.d_r_node_idx,
         st.d_Color,
