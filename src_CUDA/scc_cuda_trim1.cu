@@ -85,10 +85,10 @@ __device__ int trim_once_node_device(
     int* d_count_trim_spec)
 {
     // === OpenMP: if (G_Color[n] == -2) continue; ===
-    if (d_Color[n] == SCC_FOUND) return 0;
+    if (__ldg(&d_Color[n]) == SCC_FOUND) return 0;
 
     // === int curr_color = G_Color[n]; ===
-    int curr_color = d_Color[n];
+    int curr_color = __ldg(&d_Color[n]);
 
     // === OpenMP: met_algo==11 && flag11==2 ===
     if (met_algo == 11 && flag11 == 2) {
@@ -115,14 +115,14 @@ __device__ int trim_once_node_device(
     }
 
     // === OpenMP: if (G_Color[n] != curr_color) return; ===
-    if (d_Color[n] != curr_color) return 0;
+    if (__ldg(&d_Color[n]) != curr_color) return 0;
 
     // === OpenMP: out-degree check ===
     int degree = 0;
     for (edge_t k_idx = d_begin[n]; k_idx < d_begin[n + 1]; k_idx++) {
         node_t k = d_node_idx[k_idx];
         if (k == n) continue;
-        if (d_Color[k] == curr_color) { degree = 1; break; }
+        if (__ldg(&d_Color[k]) == curr_color) { degree = 1; break; }
     }
 
     if (degree == 0) {
@@ -136,7 +136,7 @@ __device__ int trim_once_node_device(
     for (edge_t k_idx = d_r_begin[n]; k_idx < d_r_begin[n + 1]; k_idx++) {
         node_t k = d_r_node_idx[k_idx];
         if (k == n) continue;
-        if (d_Color[k] == curr_color) { degree = 1; break; }
+        if (__ldg(&d_Color[k]) == curr_color) { degree = 1; break; }
     }
 
     if (degree == 0) {
@@ -366,8 +366,8 @@ __global__ void trim_once_node_compact_kernel(
 
     for (int ix = warp_id; ix < num_targets; ix += num_warps) {
         node_t n = d_trim_targets[ix];
-        if (d_Color[n] == SCC_FOUND) continue;
-        int curr_color = d_Color[n];
+        if (__ldg(&d_Color[n]) == SCC_FOUND) continue;
+        int curr_color = __ldg(&d_Color[n]);
 
         // Method-specific checks (same as trim_once_node_device)
         if (met_algo == 11 && flag11 == 2) {
@@ -391,7 +391,7 @@ __global__ void trim_once_node_compact_kernel(
             local_count++;
             continue;
         }
-        if (d_Color[n] != curr_color) continue;
+        if (__ldg(&d_Color[n]) != curr_color) continue;
 
         // Warp-cooperative out-degree check: 32 lanes scan 32 edges per step
         bool found = false;
@@ -401,7 +401,7 @@ __global__ void trim_once_node_compact_kernel(
             edge_t k_idx = base + lane;
             bool alive = (k_idx < out_end) &&
                          (d_node_idx[k_idx] != n) &&
-                         (d_Color[d_node_idx[k_idx]] == curr_color);
+                         (__ldg(&d_Color[d_node_idx[k_idx]]) == curr_color);
             unsigned mask = __ballot_sync(0xffffffff, alive);
             if (mask) found = true;
         }
@@ -421,7 +421,7 @@ __global__ void trim_once_node_compact_kernel(
             edge_t k_idx = base + lane;
             bool alive = (k_idx < in_end) &&
                          (d_r_node_idx[k_idx] != n) &&
-                         (d_Color[d_r_node_idx[k_idx]] == curr_color);
+                         (__ldg(&d_Color[d_r_node_idx[k_idx]]) == curr_color);
             unsigned mask = __ballot_sync(0xffffffff, alive);
             if (mask) found = true;
         }
@@ -442,7 +442,7 @@ __global__ void trim_once_node_compact_kernel(
 
 //Kernel 3: do_local_trim1 — iterates over a work item's set
 
-__global__ void trim_once_node_local_set_kernel(
+__global__ void trim_once_node_local_set_kernel
     const edge_t* d_begin, const node_t* d_node_idx,
     const edge_t* d_r_begin, const node_t* d_r_node_idx,
     int* d_Color, int* d_SCC,
