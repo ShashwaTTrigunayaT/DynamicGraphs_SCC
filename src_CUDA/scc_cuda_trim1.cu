@@ -249,12 +249,14 @@ __global__ void trim_once_node_kernel(
 }
 
 // ======================================================================
-// compute_trim_targets_alive_counts_kernel — Fix 2 (compact-only)
+// compute_trim_targets_alive_counts_kernel — Fix 2d (warp-cooperative)
 //
-// ONLY processes nodes in the compact set (d_trim_targets), NOT all nodes.
-// This reduces work from 325K nodes → ~7,400 nodes = ~44× less work.
+// Warp-cooperative version: all 32 lanes in each warp share the edge
+// scanning for one node. Supernodes with 100K+ edges no longer stall
+// the entire block (each warp independently scans its node at 32× speed).
 //
-// The caller must zero out d_out/in_alive_count arrays before calling this.
+// Uses __shfl_xor_sync warp reduction to sum per-lane partial counts.
+// The caller zeroes d_out/in_alive_count arrays before launching.
 // ======================================================================
 __global__ void compute_trim_targets_alive_counts_kernel(
     const edge_t* d_begin, const node_t* d_node_idx,
@@ -263,24 +265,41 @@ __global__ void compute_trim_targets_alive_counts_kernel(
     int* d_out_alive_count, int* d_in_alive_count,
     const int* d_trim_targets, int num_targets)
 {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= num_targets) return;
+    int warp_id = (blockIdx.x * (blockDim.x / 32)) + (threadIdx.x / 32);
+    int lane = threadIdx.x & 31;
+    int num_warps = gridDim.x * (blockDim.x / 32);
 
-    node_t n = d_trim_targets[idx];
-    int color = d_Color[n];
-    int out_cnt = 0;
-    for (edge_t e = d_begin[n]; e < d_begin[n + 1]; e++) {
-        node_t k = d_node_idx[e];
-        if (k != n && d_Color[k] == color) out_cnt++;
-    }
-    int in_cnt = 0;
-    for (edge_t e = d_r_begin[n]; e < d_r_begin[n + 1]; e++) {
-        node_t k = d_r_node_idx[e];
-        if (k != n && d_Color[k] == color) in_cnt++;
-    }
+    for (int ix = warp_id; ix < num_targets; ix += num_warps) {
+        node_t n = d_trim_targets[ix];
+        if (d_Color[n] == SCC_FOUND) continue;
+        int color = d_Color[n];
 
-    d_out_alive_count[n] = out_cnt;
-    d_in_alive_count[n]  = in_cnt;
+        // ---- Out-degree: warp-cooperative scan ----
+        int out_lane = 0;
+        edge_t out_end = d_begin[n + 1];
+        for (edge_t e = d_begin[n] + lane; e < out_end; e += 32) {
+            node_t k = d_node_idx[e];
+            if (k != n && d_Color[k] == color) out_lane++;
+        }
+
+        // ---- In-degree: warp-cooperative scan ----
+        int in_lane = 0;
+        edge_t in_end = d_r_begin[n + 1];
+        for (edge_t e = d_r_begin[n] + lane; e < in_end; e += 32) {
+            node_t k = d_r_node_idx[e];
+            if (k != n && d_Color[k] == color) in_lane++;
+        }
+
+        // ---- Warp reduction: sum per-lane counts across all 32 lanes ----
+        #pragma unroll
+        for (int offset = 16; offset > 0; offset >>= 1) {
+            out_lane += __shfl_xor_sync(0xffffffff, out_lane, offset);
+            in_lane  += __shfl_xor_sync(0xffffffff, in_lane,  offset);
+        }
+        // After reduction, all 32 lanes have the same total — safe redundant write
+        d_out_alive_count[n] = out_lane;
+        d_in_alive_count[n]  = in_lane;
+    }
 }
 
 // ======================================================================
