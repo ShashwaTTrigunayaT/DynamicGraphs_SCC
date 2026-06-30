@@ -249,25 +249,24 @@ __global__ void trim_once_node_kernel(
 }
 
 // ======================================================================
-// compute_alive_counts_kernel — Fix 2
+// compute_trim_targets_alive_counts_kernel — Fix 2 (compact-only)
 //
-// For each node, counts neighbors (outgoing + incoming) sharing the same
-// color. Once computed, TRIM1 checks these counts (O(1)) instead of
-// rescannning all edges on every iteration.
+// ONLY processes nodes in the compact set (d_trim_targets), NOT all nodes.
+// This reduces work from 325K nodes → ~7,400 nodes = ~44× less work.
 //
-// When a node is trimmed, its neighbors' counts are decremented via
-// atomicAdd. This propagates the trim effect without rescannning.
+// The caller must zero out d_out/in_alive_count arrays before calling this.
 // ======================================================================
-__global__ void compute_alive_counts_kernel(
+__global__ void compute_trim_targets_alive_counts_kernel(
     const edge_t* d_begin, const node_t* d_node_idx,
     const edge_t* d_r_begin, const node_t* d_r_node_idx,
     const int* d_Color,
     int* d_out_alive_count, int* d_in_alive_count,
-    int num_nodes)
+    const int* d_trim_targets, int num_targets)
 {
-    int n = blockIdx.x * blockDim.x + threadIdx.x;
-    if (n >= num_nodes) return;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= num_targets) return;
 
+    node_t n = d_trim_targets[idx];
     int color = d_Color[n];
     int out_cnt = 0;
     for (edge_t e = d_begin[n]; e < d_begin[n + 1]; e++) {
@@ -471,26 +470,33 @@ int do_global_trim1(GPUState& st, const GPUGraph& g,
 }
 
 // ======================================================================
-// compute_trim1_alive_counts() — Fix 2
+// compute_trim1_alive_counts() — Fix 2 (compact-only)
 //
 // Called once before the compact trim loop to initialize alive-neighbor
-// counts. After this, the compact kernel checks d_out/in_alive_count[n]
-// (O(1)) instead of scanning all edges.
+// counts for nodes in the COMPACT SET only. Uses cudaMemset to zero out
+// the arrays first (so non-compact nodes have 0, which is safe).
 //
-// Must be called whenever d_Color changes globally (e.g., after the
-// full-scan TRIM1 phase switches to compact mode).
+// After this, the compact kernel checks d_out/in_alive_count[n]
+// (O(1)) instead of scanning all edges.
 // ======================================================================
 void compute_trim1_alive_counts(const GPUGraph& g, const GPUState& st)
 {
     int N = g.num_nodes;
+    // Zero out entire arrays first (non-compact nodes get 0)
+    CUDA_CHECK(cudaMemset(d_out_alive_count, 0, N * sizeof(int)));
+    CUDA_CHECK(cudaMemset(d_in_alive_count,  0, N * sizeof(int)));
+
+    int num_targets = d_trim_targets_count;
+    if (num_targets == 0) return;
+
     int block_size = 256;
-    int grid_size = (N + block_size - 1) / block_size;
-    compute_alive_counts_kernel<<<grid_size, block_size>>>(
+    int grid_size = (num_targets + block_size - 1) / block_size;
+    compute_trim_targets_alive_counts_kernel<<<grid_size, block_size>>>(
         g.d_begin, g.d_node_idx,
         g.d_r_begin, g.d_r_node_idx,
         st.d_Color,
         d_out_alive_count, d_in_alive_count,
-        N);
+        d_trim_targets, num_targets);
     CUDA_CHECK(cudaDeviceSynchronize());
     d_alive_count_initialized = 1;
 }
