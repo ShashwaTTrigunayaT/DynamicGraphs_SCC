@@ -544,6 +544,7 @@ public:
             int num_vertices = read_file(orig_fname, orig_edges);
             read_file(fname, insert_edges);
             string dataset_dir = fname.substr(0, lastPos);
+            if (dataset_dir.back() == '/') dataset_dir.pop_back();
             string dataset_name = dataset_dir.substr(dataset_dir.rfind('/') + 1);
             string scc_list_fname = "scc_lists/" + dataset_name + ".txt";
             int num_sccs = read_file1(scc_list_fname, scc_list, num_vertices);
@@ -592,6 +593,7 @@ public:
             int num_vertices = read_file(orig_fname, orig_edges);
             read_file(fname, insert_edges);
             string dataset_dir = fname.substr(0, lastPos);
+            if (dataset_dir.back() == '/') dataset_dir.pop_back();
             string dataset_name = dataset_dir.substr(dataset_dir.rfind('/') + 1);
             string scc_list_fname = "scc_lists/" + dataset_name + ".txt";
             int num_sccs = read_file1(scc_list_fname, scc_list, num_vertices);
@@ -637,6 +639,7 @@ public:
             int num_vertices = read_file(orig_fname, orig_edges);
             read_file(fname, insert_edges);
             string dataset_dir = fname.substr(0, lastPos);
+            if (dataset_dir.back() == '/') dataset_dir.pop_back();
             string dataset_name = dataset_dir.substr(dataset_dir.rfind('/') + 1);
             string scc_list_fname = "scc_lists/" + dataset_name + ".txt";
             int num_sccs = read_file1(scc_list_fname, scc_list, num_vertices);
@@ -659,6 +662,7 @@ public:
             string orig_fname = fname.substr(0, lastPos) + "/refined_edges.txt";
             int num_vertices = read_file(orig_fname, orig_edges);
             string dataset_dir = fname.substr(0, lastPos);
+            if (dataset_dir.back() == '/') dataset_dir.pop_back();
             string dataset_name = dataset_dir.substr(dataset_dir.rfind('/') + 1);
             string scc_list_fname = "scc_lists/" + dataset_name + ".txt";
             int num_sccs = read_file1(scc_list_fname, scc_list, num_vertices);
@@ -715,6 +719,7 @@ public:
             string orig_fname = fname.substr(0, lastPos) + "/refined_edges.txt";
             int num_vertices = read_file(orig_fname, orig_edges);
             string dataset_dir = fname.substr(0, lastPos);
+            if (dataset_dir.back() == '/') dataset_dir.pop_back();
             string dataset_name = dataset_dir.substr(dataset_dir.rfind('/') + 1);
             string scc_list_fname = "scc_lists/" + dataset_name + ".txt";
             int num_sccs = read_file1(scc_list_fname, scc_list, num_vertices);
@@ -733,6 +738,7 @@ public:
             string orig_fname = fname.substr(0, lastPos) + "/refined_edges.txt";
             int num_vertices = read_file(orig_fname, orig_edges);
             string dataset_dir = fname.substr(0, lastPos);
+            if (dataset_dir.back() == '/') dataset_dir.pop_back();
             string dataset_name = dataset_dir.substr(dataset_dir.rfind('/') + 1);
             string scc_list_fname = "scc_lists/" + dataset_name + ".txt";
             int num_sccs = read_file1(scc_list_fname, scc_list, num_vertices);
