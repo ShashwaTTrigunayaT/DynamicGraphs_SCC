@@ -442,7 +442,7 @@ __global__ void trim_once_node_compact_kernel(
 
 //Kernel 3: do_local_trim1 — iterates over a work item's set
 
-__global__ void trim_once_node_local_set_kernel
+__global__ void trim_once_node_local_set_kernel(
     const edge_t* d_begin, const node_t* d_node_idx,
     const edge_t* d_r_begin, const node_t* d_r_node_idx,
     int* d_Color, int* d_SCC,
