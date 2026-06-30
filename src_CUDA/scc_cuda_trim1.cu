@@ -536,7 +536,7 @@ void compute_trim1_alive_counts(const GPUGraph& g, const GPUState& st)
     if (grid_size == 0) {
         cudaDeviceProp props;
         cudaGetDeviceProperties(&props, 0);
-        grid_size = min(num_targets, props.multiProcessorCount);
+        grid_size = (num_targets < props.multiProcessorCount) ? num_targets : props.multiProcessorCount;
     }
     int actual_grid = (num_targets < 256) ? num_targets : grid_size;
     compute_trim_targets_alive_counts_kernel<<<actual_grid, block_size>>>(
