@@ -641,8 +641,14 @@ int main(int argc, char** argv)
 
             // ---------- Phase 2: GLOBAL BFS ----------
             // OpenMP: do_fw_bw_global_main(G, curr_color, curr_count, false)
+            // Skip GLOBAL_BFS on condensation graphs (methods 6, 7, 11) because
+            // the graph is a DAG — BFS can only find a single-node SCC, wasting
+            // all edge traversals on forwarding + backwarding through the DAG.
             int scc_size = 0;
-            if (met_algo == 2) {
+            bool skip_global_bfs = (met_algo_original == 6 ||
+                                     met_algo_original == 7 ||
+                                     met_algo_original == 11);
+            if (met_algo == 2 && !skip_global_bfs) {
                 initialize_global_fb(N);
                 scc_size = do_global_fw_bw_main(
                     st, gpuG,
@@ -650,13 +656,16 @@ int main(int argc, char** argv)
                     curr_count,          // base_count from trim_targets
                     -1,                  // good_init_pivot (-1 = not met_algo 6/11)
                     false);              // create_work_items = false
-            } else {  // method 22: skip GLOBAL_BFS
+            } else {  // method 22 or condensation graph: skip GLOBAL_BFS
                 // No GLOBAL_BFS — go straight to TRIM1/2 + WCC + GPU FB
                 // The SCC will be found during the FB phase.
-                printf("[CUDA] Skipping GLOBAL_BFS (method 22)\n");
+                if (met_algo == 22)
+                    printf("[CUDA] Skipping GLOBAL_BFS (method 22)\n");
+                else
+                    printf("[CUDA] Skipping GLOBAL_BFS (method %d, DAG condensation graph)\n", met_algo_original);
             }
             gettimeofday(&t_bfs, NULL);
-            if (met_algo == 2)
+            if (met_algo == 2 && !skip_global_bfs)
                 printf("[CUDA] First SCC size = %d\n", scc_size);
 
         // ---------------------------------------------------------------
@@ -735,11 +744,13 @@ int main(int argc, char** argv)
         double t2 = (t_compact.tv_sec - t_trim1.tv_sec) * 1000.0 +
                     (t_compact.tv_usec - t_trim1.tv_usec) * 0.001;
         double t3;
-        if (met_algo == 2) {
+        if (met_algo == 2 && !(met_algo_original == 6 ||
+                                met_algo_original == 7 ||
+                                met_algo_original == 11)) {
             t3 = (t_bfs.tv_sec - t_compact.tv_sec) * 1000.0 +
                  (t_bfs.tv_usec - t_compact.tv_usec) * 0.001;
         } else {
-            t3 = 0.0;  // method 22: skipped GLOBAL_BFS
+            t3 = 0.0;  // method 22 or condensation graph: skipped GLOBAL_BFS
         }
         double t4 = (t_trim12.tv_sec - t_bfs.tv_sec) * 1000.0 +
                     (t_trim12.tv_usec - t_bfs.tv_usec) * 0.001;
