@@ -138,7 +138,12 @@ void build_incremental_graph(
         string orig_fname = fname.substr(0, lastPos) + "/refined_edges.txt";
         int num_vertices = read_file(orig_fname, orig_edges);
         read_file(fname, insert_edges);
-        string scc_list_fname = fname.substr(0, lastPos) + "/scc_list.txt";
+        // Look in project-local scc_lists/ directory (dataset dir is unwritable)
+        // Same logic as OpenMP common_main.h: extract dataset name, look in scc_lists/
+        string dataset_dir = fname.substr(0, lastPos);
+        if (dataset_dir.back() == '/') dataset_dir.pop_back();
+        string dataset_name = dataset_dir.substr(dataset_dir.rfind('/') + 1);
+        string scc_list_fname = "scc_lists/" + dataset_name + ".txt";
         num_sccs = read_file1(scc_list_fname, h_scc_list, num_vertices);
 
         // GPU: filter cross-SCC edges, build CSR, find pivot
@@ -195,7 +200,11 @@ void build_incremental_graph(
         string orig_fname = fname.substr(0, lastPos) + "/refined_edges.txt";
         int num_vertices = read_file(orig_fname, orig_edges);
         read_file(fname, insert_edges);
-        string scc_list_fname = fname.substr(0, lastPos) + "/scc_list.txt";
+        // Same path logic as method 6: project-local scc_lists/ directory
+        string dataset_dir = fname.substr(0, lastPos);
+        if (dataset_dir.back() == '/') dataset_dir.pop_back();
+        string dataset_name = dataset_dir.substr(dataset_dir.rfind('/') + 1);
+        string scc_list_fname = "scc_lists/" + dataset_name + ".txt";
         num_sccs = read_file1(scc_list_fname, h_scc_list, num_vertices);
 
         create_scc_edges(orig_edges, insert_edges, scc_edges,
@@ -236,7 +245,11 @@ void build_incremental_graph(
         string orig_fname = fname.substr(0, lastPos) + "/refined_edges.txt";
         int num_vertices = read_file(orig_fname, orig_edges);
         read_file(fname, insert_edges);
-        string scc_list_fname = fname.substr(0, lastPos) + "/scc_list.txt";
+        // Same path logic as method 6: project-local scc_lists/ directory
+        string dataset_dir = fname.substr(0, lastPos);
+        if (dataset_dir.back() == '/') dataset_dir.pop_back();
+        string dataset_name = dataset_dir.substr(dataset_dir.rfind('/') + 1);
+        string scc_list_fname = "scc_lists/" + dataset_name + ".txt";
         num_sccs = read_file1(scc_list_fname, h_scc_list, num_vertices);
 
         // OpenMP: create_scc_edges (includes BFS levels + affect_level for met_algo==7)

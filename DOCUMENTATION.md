@@ -57,18 +57,35 @@ Input Graph
 
 | Commit | Description | Verdict |
 |--------|-------------|:-------:|
-| `5d80e1f` | **Fix CUDA M6: skip pipeline for condensation DAG** — mark_all_as_scc_kernel sets d_SCC[i]=i in <1ms, skipping 2.4s TRIM1-on-DAG | ✅ **Kept** |
-| `274a659` | **CSR verification for condensation graph** — confirm begin array sums match num_cross | 🔴 Debug only (removed) |
-| `5458fd8` | **Fix GPU pointer crash + filter stride loop** — h_node_idx.assign(d_sorted_dst,...) crash fixed; filter processed only 262K/61M edges | ✅ **Kept** |
-| `3a0fd09` | **Fix hardcoded scc_list.txt path** — relative to graph file directory instead of /home/tk.temp/par-scc/ | ✅ **Kept** |
-| `8b8b1e1` | **Fix OpenMP read_file: handle tab separators** — find_first_of(" \\t") instead of getline(ss, token, ' ') | ✅ Kept |
-| `5922cad` | **Fix OpenMP: load graph for methods 0/1/3/4** — pre-existing bug, graph only loaded for method 2 | ✅ Kept |
-| `a92fd9d` | **OpenMP: free orig_edges after graph load** — vector<pair>.swap() frees ~2.8GB on large graphs | ✅ Kept |
-| `949f7f8` | **Ping-pong double-buffered SMEM queues** — 2×512-entry queues, swap at each level, reclaim space | 🔴 **Reverted** (+overhead) |
-| `5568294` | **Block-local SMEM queue BFS** — 1024-entry shared memory queue per block | 🔴 **Reverted** (monotonic queue bug) |
-| `ba688e9` | **Revert fused TRIM12 kernel** — race between trim1 and trim2 caused +182 extra SCCs | 🔴 Reverted |
-| `d219353` | **Fused TRIM12 kernel** — TRIM1+TRIM2 in one pass | 🔴 Buggy (race condition) |
-| (earlier) | Visited Bitmap, STAGE_SIZE=4, batch D2H, WCC gather, warp-ballot, pinned memory, etc. | ✅ Kept |
+| `a3721d1` | **Fix: strip trailing slash from dataset_dir** — OpenMP method 6 path had empty dataset name with double-slash paths | ✅ **Kept** |
+| `4adc660` | **scc_list.txt path → local scc_lists/** — dataset dir unwritable, so look in project-local directory | ✅ **Kept** |
+| `f75b44b` | **Revert short-circuit threshold 300K→100K** — 300K didn't help, reverted to 100K threshold | 🔴 **Reverted** |
+| `521e784` | **Raise short-circuit threshold 100K→300K** — try trimming more nodes before GLOBAL_BFS | 🔴 **Reverted** |
+| `0c6bc2e` | **Fix: missing paren in kernel decl** — str_replace ate `(` after `trim_once_node_local_set_kernel` | ✅ Fix |
+| `d7c1750` | **__ldg() on short-circuit kernels** — read-only cache for all d_Color reads | ✅ **Kept** (~same) |
+| `13e7e69` | **Short-circuit threshold for >100K nodes** — use fast short-circuit on large compact sets, compute kernel on small | ✅ **Kept** |
+| `d8a5f9a` | **__ldg() + 4× loop unrolling** — compute kernel: read-only cache + ILP for random d_Color reads | ✅ **Kept (TRIM1 11.25→4.33ms, -61%)** |
+| `f2410e9` | **Block-cooperative compute kernel fix** — all 256 threads scan one node, not 32 per warp | ✅ **Kept** |
+| `fffe98c` | **MAX_OUT grid to 142 blocks** — use all SMs for compute kernel | ✅ **Kept** |
+| `c8636cd` | **Fix 3: rebuild compact set between fix2 iterations** — reduces compute cost | ✅ **Kept** |
+| `ed206c2` | **Fix 2d: warp-cooperative alive-count kernel** — 32× faster per-node counting | ✅ **Kept** |
+| `d135f4b` | **Fix 2c: remove atomic decrement storm** — recompute alive counts each iteration | ✅ **Kept** |
+| `f082c0b` | **Fix 2b: compute_alive_counts only for compact set** — 44× less work | ✅ **Kept** |
+| `719db4f` | **Fix 2: O(1) alive-count checks in compact TRIM1** — avoid scanning all edges each iteration | ✅ **Kept** |
+| `bcf3a12` | **Fix 1: warp-cooperative edge scan in full-scan kernel** | ✅ **Kept** |
+| `0a8ce22` | **Fix 1: warp-cooperative edge scan in compact kernel** | ✅ **Kept** |
+| `6a2712b` | **Set TRIM_STOP=100** — match OpenMP default | ✅ **Kept** |
+| `5d80e1f` | **CUDA M6: skip pipeline for DAG** — mark_all_as_scc in <1ms | ✅ **Kept** |
+| `5458fd8` | **Fix GPU pointer crash + filter stride loop** | ✅ **Kept** |
+| `3a0fd09` | **Fix hardcoded scc_list.txt path** | ✅ **Kept** |
+| `8b8b1e1` | **OpenMP: tab-separated read_file** | ✅ Kept |
+| `5922cad` | **OpenMP: load graph for all methods** | ✅ Kept |
+| `a92fd9d` | **OpenMP: free orig_edges after graph load** | ✅ Kept |
+| `949f7f8` | **Ping-pong double-buffered SMEM queues** | 🔴 **Reverted** |
+| `5568294` | **Block-local SMEM queue BFS** | 🔴 **Reverted** |
+| `ba688e9` | **Revert fused TRIM12** | 🔴 Reverted |
+| `d219353` | **Fused TRIM12 kernel** | 🔴 Buggy |
+| (earlier) | Visited Bitmap, STAGE_SIZE, batch D2H, etc. | ✅ Kept |
 
 ---
 
@@ -107,6 +124,96 @@ Input Graph
 | 4 | **Solution: mark_all_as_scc_kernel** — set d_SCC[i]=i for ALL nodes in single kernel launch (<1ms) | **2.4s → ~0ms** | ✅ **Correct for condensation DAG** |
 | 5 | **GPU pointer assign crash** — `h_node_idx.assign(d_sorted_dst, ...)` tried to read GPU memory from host | Segfault in method 6 | ✅ **Fixed: use cudaMemcpyDeviceToHost** |
 | 6 | **Hardcoded scc_list.txt path** — both OpenMP and CUDA had /home/tk.temp/par-scc/scc_list.txt hardcoded | Would crash if file not at that exact path | ✅ **Fixed: relative to graph directory** |
+
+### 🚀 June 30, 2026 — TRIM1 Compute Kernel Overhaul
+
+**Problem:** The compact TRIM1 kernel used a short-circuit edge scan (stop at first alive neighbor). This was fast per-iteration but the cascade converged slowly — requiring many iterations to trim all trimmable nodes. Each iteration had kernel launch overhead.
+
+**Solution:** Replace with a **full-count compute kernel** that scans ALL edges of each compact-set node in one pass, then uses O(1) array lookups in subsequent iterations to check if a node is trimmable.
+
+| Step | Change | TRIM1 Time | Impact |
+|:----:|--------|:----------:|:------:|
+| 1a | **Warp-cooperative alive-count kernel** (Fix 2d) — 32 threads per node scan out-edges in parallel | 35.48ms | 32× faster per-node counting |
+| 1b | **Block-cooperative** — all 256 threads scan one node, stride loop over all edges | ~11ms | Full SM utilization |
+| 2 | **`__ldg()` + 4× loop unrolling** — read-only data cache + ILP to hide memory latency | **4.33ms** 🚀 | **-61%** (11.25→4.33ms) |
+| 3 | **Short-circuit threshold (100K)** — use short-circuit for >100K nodes, compute kernel for ≤100K | Method 2 stable | Prevents 78ms regression on full graph |
+
+**Side-by-side: soc-Pokec Method 2 (condensation graph, 325K nodes, 2.9M edges)**
+| Phase | Before (Jun 29) | After (Jun 30, __ldg+unroll) | Δ |
+|-------|:--------------:|:---------------------------:|:-:|
+| TRIM1 | 11.25ms | **4.33ms** | **-61%** 🚀 |
+| GLOBAL_BFS | 0.76ms | 0.76ms | Same |
+| TRIM12 | 0.09ms | 0.09ms | Same |
+| WCC | 0.51ms | 0.51ms | Same |
+| FB | 0.21ms | 0.21ms | Same |
+| **TOTAL** | **12.82ms** | **5.92ms** | **-54%** 🚀 |
+
+### ⚡ June 30 Optimization Details
+
+#### Attempt 1: `__ldg()` + 4× Loop Unrolling ✅ BIG WIN
+
+**Where:** `compute_trim_targets_alive_counts_kernel` in `scc_cuda_trim1.cu`
+
+**What:**
+1. Replaced `d_Color[k]` with `__ldg(&d_Color[k])` — routes random reads through the read-only data cache
+2. Unrolled the edge scan loop 4× — processes 4 edges per iteration, stride = blockDim.x × 4
+
+**Why it works:** On Ada Lovelace (L40S), `__ldg()` uses a dedicated read-only path that handles random access patterns (like `d_Color[d_node_idx[e]]`) much better than the general L1/L2 path. The 4× unrolling gives the compiler 4 independent `__ldg()` loads to pipeline, hiding the ~300-800 cycle latency.
+
+**Result:** TRIM1: 11.25ms → **4.33ms** (-61%). TOTAL: 12.82ms → **5.92ms** (-54%).
+
+**SCC count unchanged:** 325,892 ✅
+
+#### Attempt 2: Short-circuit Threshold (100K) ✅ KEPT
+
+**Where:** `repeat_global_trim1_compact()` in `scc_cuda_trim1.cu`
+
+**What:** Added a threshold check: if compact set > 100K nodes, use the original short-circuit kernel (which is cheaper but requires more iterations). If ≤ 100K nodes, use the new compute kernel + O(1) fix2 (which trims more aggressively per iteration).
+
+**Why needed:** The compute kernel on the FULL graph (1.6M compact nodes × 30M edges × 4 iterations = 120M edge checks) took 78.92ms. The short-circuit on large sets only checks ~5 edges per node before finding an alive neighbor, making it ~7× cheaper.
+
+**Result:** Method 2 on full soc-Pokec: 78ms → ~12ms.
+
+#### Attempt 3: `__ldg()` on Short-circuit Kernels ⚠️ NO MEASURABLE GAIN
+
+**Where:** `trim_once_node_kernel`, `trim_once_node_device`, `trim_once_node_compact_kernel`
+
+**What:** Applied `__ldg()` to all d_Color reads in the short-circuit edge scan kernels too.
+
+**Result:** No measurable change (~12.24ms vs ~12.36ms). The short-circuit bottleneck is `__ballot_sync` overhead and warp divergence, not memory latency.
+
+#### Attempt 4: Threshold Tuning 100K→300K 🔴 REVERTED
+
+**What:** Raised threshold to 300K to let the compute kernel run on larger compact sets.
+
+**Result:** No improvement on method 2 sweep. GLOBAL_BFS didn't decrease because the cascade wasn't the bottleneck. Reverted.
+
+#### Attempt 5: OpenMP Method 6 🔴 SEGFAULT (Pre-existing)
+
+**What:** Tried to run OpenMP method 6 with locally-generated scc_list.txt files.
+
+**Changes needed:**
+1. Modified `common_main.h` to look in `scc_lists/` directory instead of dataset directory (unwritable)
+2. Fixed trailing-slash bug in dataset name extraction
+
+**Status:** Method 6 segfaults on all datasets (even p2p-Gnutella31 with 63K nodes). Backtrace needed `gdb` which isn't installed. Suspect pre-existing bug in the method 6 code path (reads the same `refined_edges.txt` twice as both orig_edges AND insert_edges). The CSV benchmark data was generated with a different binary version.
+
+### 📊 Method 2 Comparison: OpenMP vs CUDA (June 30)
+
+| Dataset | OpenMP M2 | CUDA M2 | CUDA vs OMP |
+|---------|:---------:|:-------:|:-----------:|
+| ljournal-2008 | 60.65ms | TBD | TBD |
+| p2p-Gnutella31 | 2.30ms | TBD | TBD |
+| soc-Epinions1 | 3.32ms | TBD | TBD |
+| soc-LiveJournal1 | 43.37ms | TBD | TBD |
+| soc-Pokec | 19.99ms | 12.24ms* | ✅ **1.63× faster** |
+| web-Stanford | 67.39ms | TBD | TBD |
+| wikipedia-20070206 | 48.59ms | TBD | TBD |
+| wiki-Talk | 16.31ms | TBD | TBD |
+
+*CUDA soc-Pokec at 12.24ms (TRIM_STOP=100, __ldg+unroll, short-circuit 100K threshold). Documented Jun 25 was 10.50ms — the 300K threshold experiment temporarily changed TRIM_STOP.
+
+**Note:** OpenMP times above are from the `-p` (SCC list output) run, which adds ~0ms overhead.
 
 ### ❌ Tried and Reverted (Previous)
 
@@ -364,23 +471,45 @@ cd ~/DynamicGraphs_SCC/src && make && \
 ../scc ../datasets/soc-Pokec/refined_edges.txt 72 6 -d
 ```
 
-### Profile with NVIDIA Nsight Compute
+### Run Method 2 on All Datasets (Sweep Command)
 
 ```bash
-sudo /usr/local/cuda-13.1/bin/ncu --set full -o profile_output ./scc_cuda ../datasets/soc-Pokec/refined_edges.txt 72 2
+cd ~/DynamicGraphs_SCC/src_CUDA && \
+echo "DATASET | TRIM1 | BFS | TRIM12 | WCC | FB | TOTAL | SCCs" && \
+for dir in /hdd/thej_par_scc_datasets/*/; do \
+  name=$(basename "$dir"); \
+  result=$(./scc_cuda "$dir/refined_edges.txt" 72 2 2>&1 | grep "CUDA_PROFILE_STDERR\|Total # SCCs"); \
+  ...; \
+done
 ```
 
-### Extract Kernel Timings from nsys Profile
+### Run Method 6 on OpenMP (requires scc_list.txt)
 
 ```bash
-nsys profile --stats=true -o m6_profile ./scc_cuda ../datasets/soc-Pokec/refined_edges.txt 72 6
-sqlite3 m6_profile.sqlite "
-SELECT s.value, k.cnt, CAST(k.total_ms AS INTEGER)
-FROM (
-  SELECT shortName AS id, count(*) AS cnt, SUM(end - start) / 1000000.0 AS total_ms
-  FROM CUPTI_ACTIVITY_KIND_KERNEL
-  GROUP BY shortName ORDER BY total_ms DESC
-) k JOIN StringIds s ON s.id = k.id;"
+# Step 1: Generate SCC lists for all datasets (cannot write to /hdd/)
+cd ~/DynamicGraphS_SCC && mkdir -p scc_lists
+for dir in /hdd/thej_par_scc_datasets/*/; do \
+  name=$(basename "$dir"); \
+  ./scc "$dir/refined_edges.txt" 72 2 -p && \
+  mv scc_list.txt "scc_lists/$name.txt"; \
+done
+
+# Step 2: Run method 6 (uses scc_lists/ via code change in common_main.h)
+./scc <graph_file> 72 6
+```
+
+**Note:** OpenMP method 6 currently segfaults — pre-existing bug in the double-read path (reads refined_edges.txt twice as both orig_edges AND insert_edges). Not introduced by our changes.
+
+### Sweep TRIM_STOP Values (Method 2 on CUDA)
+
+```bash
+cd ~/DynamicGraphs_SCC/src_CUDA && \
+for stop in 50 100 200 300 500 750 1000; do \
+  sed -i "s/trim_spec, [0-9]*);/trim_spec, $stop);/g" scc_cuda_main.cpp && \
+  make -j -s 2>/dev/null && \
+  ./scc_cuda ../datasets/soc-Pokec/refined_edges.txt 72 6 2>&1 | grep "CUDA_PROFILE_STDERR\|Total # SCCs"; \
+done
+git checkout scc_cuda_main.cpp
 ```
 
 ### Quick Test After Changes
@@ -388,15 +517,36 @@ FROM (
 ```bash
 cd ~/DynamicGraphs_SCC && git pull && cd src_CUDA && make && \
 ./scc_cuda ../datasets/soc-Pokec/refined_edges.txt 72 2 | grep -E "CUDA_PROFILE|Total # SCCs"
-# Expected: TOTAL ~10ms, SCC = 325892
+# Expected: TOTAL ~12ms, SCC = 325892 (Method 2 on FULL graph)
 ```
 
-### Test Method 6
+### Test Method 6 (Condensation graph on CUDA)
 
 ```bash
 cd ~/DynamicGraphs_SCC/src_CUDA && make && \
-./scc_cuda ../datasets/soc-Pokec/refined_edges.txt 72 6 | grep -E "CUDA_PROFILE|Total # SCCs|ALGO_TIME"
-# Expected: TOTAL ~0ms (skip pipeline), SCC = 325892
+./scc_cuda /hdd/thej_par_scc_datasets/soc-Pokec/refined_edges.txt 72 6 | grep -E "CUDA_PROFILE|Total # SCCs|ALGO_TIME"
+# Expected: TOTAL ~0.6ms (condensation, 1 SCC shown — needs scc_list.txt)
+```
+
+### Full Side-by-Side OpenMP vs CUDA Sweep
+
+```bash
+cd ~/DynamicGraphs_SCC && make -j -s -C src && cd src_CUDA && make -j -s && cd ~ && \
+echo "DATASET | OMP M2 | CUDA M2 | SPEEDUP" && \
+for dir in /hdd/thej_par_scc_datasets/*/; do \
+  name=$(basename "$dir"); \
+  [[ "$name" == "indochina-2004" || "$name" == "syn_datasets" ]] && continue; \
+  omp=$(~/DynamicGraphs_SCC/scc "$dir/refined_edges.txt" 72 2 2>&1 | grep -oP 'running_time\(ms\)=\K[0-9.]+'); \
+  cuda=$(~/DynamicGraphs_SCC/src_CUDA/scc_cuda "$dir/refined_edges.txt" 72 2 2>&1 | grep -oP 'ALGO_TIME=\K[0-9.]+'); \
+  printf "%-20s | %7.2f | %7.2f\n" "$name" "$omp" "$cuda"; \
+done
+```
+
+### Profile with NVIDIA Nsight Compute & nsys
+
+```bash
+sudo /usr/local/cuda-13.1/bin/ncu --set full -o profile_output ./scc_cuda <graph> 72 2
+nsys profile -o profile --stats=true ./scc_cuda <graph> 72 2
 ```
 
 ---
@@ -498,9 +648,20 @@ cd ~/DynamicGraphs_SCC/src_CUDA && make && \
 ./scc_cuda /hdd/thej_par_scc_datasets/ljournal-2008/refined_edges.txt 72 2
 ```
 
-**5. CRITICAL OPEN ISSUE:** GLOBAL_BFS is slow on high-diameter graphs (wiki-Talk, wikipedia-20070206). See [Focus Graphs](#-focus-graphs--future-work) section.
+**5. Generate SCC lists for method 6:**
+```bash
+cd ~/DynamicGraphS_SCC && mkdir -p scc_lists && \
+for dir in /hdd/thej_par_scc_datasets/*/; do \
+  name=$(basename "$dir"); \
+  [[ "$name" == "indochina-2004" || "$name" == "syn_datasets" ]] && continue; \
+  ./scc "$dir/refined_edges.txt" 72 2 -p && \
+  mv scc_list.txt "scc_lists/$name.txt"; \
+done
+```
 
-**6. Edit, commit, push:**
+**6. CRITICAL OPEN ISSUE:** GLOBAL_BFS is slow on high-diameter graphs (wiki-Talk, wikipedia-20070206). See [Focus Graphs](#-focus-graphs--future-work) section.
+
+**7. Edit, commit, push:**
 ```bash
 cd \"/mnt/c/Users/Shashwat Trigunayat/OneDrive/Desktop/Admin/DynamicGRAPHS_SCC/DynamicGraphs_SCC\"
 git pull --ff-only

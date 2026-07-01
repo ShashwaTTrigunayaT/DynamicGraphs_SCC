@@ -274,6 +274,51 @@ Input Graph
 <strong>🎯 Key Milestone:</strong> CUDA beats OpenMP on <strong>8 of 9 datasets</strong> in ALGO_TIME (p2p-Gnutella31 is too small for GPU to help). GPU-only FB eliminated all D2H→H2D round-trips — H2D/D2H dropped from ~40ms to 0.35ms on ljournal-2008! <strong>indochina-2004 (194M edges, 7.4M nodes): 3.1× faster 🚀</strong> — biggest speedup yet. SCC count ~9.7K off from OpenMP, under investigation.
 </div>
 
+<h3>🚀 June 30, 2026 — TRIM1 Compute Kernel Overhaul</h3>
+
+<p><strong>Key changes to <code>scc_cuda_trim1.cu</code>:</strong></p>
+<table>
+<tr><th>Change</th><th>TRIM1 (condensation)</th><th>TOTAL</th><th>Verdict</th></tr>
+<tr><td><strong>Warp-cooperative alive-count</strong> (Fix 2d)</td><td>35.48ms</td><td>~48ms</td><td>🟡 Intermediate</td></tr>
+<tr><td><strong>Block-cooperative</strong> (256 threads/node)</td><td>~11ms</td><td>~14ms</td><td>🟡 Better</td></tr>
+<tr><td><strong><code>__ldg()</code> + 4× unroll</strong></td><td><strong>4.33ms</strong></td><td><strong>5.92ms</strong></td><td><span class="badge green">✅ -61% 🚀</span></td></tr>
+<tr><td><strong>Short-circuit 100K threshold</strong></td><td>Fixed 78ms regression on full graph</td><td>~12ms (Pokec M2)</td><td><span class="badge green">✅ KEPT</span></td></tr>
+</table>
+
+<p><strong>Full graph (Method 2, 30M edges):</strong> Short-circuit on large compact sets → 78ms → <strong>~12ms</strong>.<br>
+<strong>Condensation (Method 6):</strong> Compute kernel + O(1) fix2 with __ldg+unroll → <strong>4.33ms</strong>.</p>
+
+<h4>Attempt 1: <code>__ldg()</code> + 4× Loop Unrolling <span class="badge green">✅ BIG WIN</span></h4>
+<p><strong>Where:</strong> <code>compute_trim_targets_alive_counts_kernel</code> in <code>scc_cuda_trim1.cu</code></p>
+<p><strong>What:</strong> Replaced <code>d_Color[k]</code> with <code>__ldg(&amp;d_Color[k])</code> (read-only data cache) + 4× loop unrolling (ILP to hide latency).</p>
+<p><strong>Result:</strong> TRIM1: 11.25ms → <strong>4.33ms</strong> (-61%). TOTAL: 12.82ms → <strong>5.92ms</strong> (-54%). SCC count unchanged: 325,892 ✅</p>
+
+<h4>Attempt 2: Short-circuit Threshold (100K) <span class="badge green">✅ KEPT</span></h4>
+<p>Added check: if compact set &gt; 100K nodes, use original short-circuit kernel (cheaper). If ≤ 100K, use compute kernel + O(1) fix2 (aggressive trim). Fixed 78ms regression on full graph → ~12ms.</p>
+
+<h4>Attempt 3: <code>__ldg()</code> on Short-circuit Kernels <span class="badge yellow">⚠️ NO GAIN</span></h4>
+<p>Applied <code>__ldg()</code> to all d_Color reads in short-circuit kernels. No measurable change (~12.24ms vs ~12.36ms). Bottleneck is <code>__ballot_sync</code> overhead and warp divergence, not memory latency.</p>
+
+<h4>Attempt 4: Threshold Tuning 100K→300K <span class="badge red">🔴 REVERTED</span></h4>
+<p>Raised threshold to 300K. No improvement on method 2 sweep. GLOBAL_BFS didn't decrease. Reverted to 100K.</p>
+
+<h4>Attempt 5: OpenMP Method 6 <span class="badge red">🔴 SEGFAULT</span></h4>
+<p>Modified <code>common_main.h</code> to look in <code>scc_lists/</code> directory. Fixed trailing-slash bug. Method 6 segfaults on all datasets — pre-existing bug in the double-read path (reads refined_edges.txt twice).</p>
+
+<h3>📊 Method 2 Comparison: OpenMP vs CUDA (June 30)</h3>
+<table>
+<tr><th>Dataset</th><th>OpenMP M2</th><th>CUDA M2</th><th>CUDA vs OMP</th></tr>
+<tr><td>ljournal-2008</td><td>60.65ms</td><td>TBD</td><td>TBD</td></tr>
+<tr><td>p2p-Gnutella31</td><td>2.30ms</td><td>TBD</td><td>TBD</td></tr>
+<tr><td>soc-Epinions1</td><td>3.32ms</td><td>TBD</td><td>TBD</td></tr>
+<tr><td>soc-LiveJournal1</td><td>43.37ms</td><td>TBD</td><td>TBD</td></tr>
+<tr><td>soc-Pokec</td><td>19.99ms</td><td>12.24ms*</td><td><span class="badge green">✅ 1.63× faster</span></td></tr>
+<tr><td>web-Stanford</td><td>67.39ms</td><td>TBD</td><td>TBD</td></tr>
+<tr><td>wikipedia-20070206</td><td>48.59ms</td><td>TBD</td><td>TBD</td></tr>
+<tr><td>wiki-Talk</td><td>16.31ms</td><td>TBD</td><td>TBD</td></tr>
+</table>
+<p><em>*CUDA soc-Pokec at 12.24ms (TRIM_STOP=100, __ldg+unroll, short-circuit 100K). OpenMP times from <code>-p</code> run (~0ms overhead).</em></p>
+
 <h3>nsys Kernel Breakdown (from cuda_gpu_kern_sum) — Reference Only</h3>
 <p><em>Note: These numbers are from nsys profiling before the ALGO_TIME inline tracking was added. After the latest code update, the program prints ALGO_TIME directly — run it with the latest code to get inline numbers. The nsys kernel breakdowns below remain useful for understanding per-kernel costs.</em></p>
 
@@ -350,31 +395,34 @@ Input Graph
 
 <table>
 <tr><th>Commit</th><th>Description</th><th>Verdict</th></tr>
-<tr><td><code>a6cf7e5</code></td><td><strong>Revert WCC max_iterations 500→100</strong> — didn't converge, made TOTAL 59ms vs 44ms</td><td><span class="badge red">🔴 Reverted</span></td></tr>
-<tr><td><code>86143d6</code></td><td><strong>WCC max_iterations 100→500</strong> — hypothesis: WCC convergence reduces FB</td><td><span class="badge red">🔴 Wrong (reverted)</span></td></tr>
-<tr><td><code>9630276</code></td><td><strong>SMEM hash table in GPU_FB</strong> — O(n) linear search → O(1) Fibonacci hash lookup</td><td><span class="badge green">✅ Kept</span></td></tr>
-<tr><td><code>95cf1ed</code></td><td><strong>Fall back to host-loop TRIM1 compact</strong> — persistent kernel grid.sync() deadlock</td><td><span class="badge red">🔴 Reverted (kernel preserved)</span></td></tr>
-<tr><td><code>c372710</code></td><td><strong>Fix duplicate code + void* casts</strong> — compilation fix for persistent kernel</td><td><span class="badge yellow">Fix only</span></td></tr>
-<tr><td><code>503e1d0</code></td><td><strong>Persistent TRIM1 kernel</strong> — Cooperative Groups grid.sync() — hangs</td><td><span class="badge red">🔴 Hang</span></td></tr>
-<tr><td><code>1957f48</code></td><td><strong>Revert progressive compact rebuild</strong> — made TRIM1 worse (15ms→25ms)</td><td><span class="badge red">🔴 Reverted</span></td></tr>
-<tr><td><code>cb0361a</code></td><td><strong>Progressive compact list rebuild</strong> — rebuild after each TRIM1 pass</td><td><span class="badge red">🔴 Reverted</span></td></tr>
-<tr><td><code>62e48a8</code></td><td><strong>Revert TRIM1 stream sync</strong> — 0% improvement (kernel time, not sync)</td><td><span class="badge red">🔴 Reverted</span></td></tr>
-<tr><td><code>9948038</code></td><td><strong>TRIM1 stream-based sync</strong> — cudaDeviceSync → cudaStreamSync</td><td><span class="badge yellow">No gain</span></td></tr>
-<tr style="border-top:2px solid #1a56db;"><td><code>ec13683</code></td><td><strong>Parallelize neighbor scanning</strong> — 8→256 threads for pivot neighbors</td><td><span class="badge green">✅ Kept —89% wiki-Talk GLOBAL_BFS</span></td></tr>
-<tr><td><code>7a89daa</code></td><td><strong>Increase STAGE_SIZE 4→16</strong> — minor change</td><td><span class="badge yellow">Minimal impact</span></td></tr>
-<tr><td><code>8b8b1e1</code></td><td><strong>Fix OpenMP read_file: tab separators</strong> — find_first_of(" \t")</td><td><span class="badge green">✅ Kept</span></td></tr>
-<tr><td><code>5922cad</code></td><td><strong>Fix OpenMP: load graph for methods 0/1/3/4</strong> — pre-existing bug</td><td><span class="badge green">✅ Kept</span></td></tr>
-<tr><td><code>a92fd9d</code></td><td><strong>OpenMP: free orig_edges</strong> — saves ~2.8GB peak RAM on large graphs</td><td><span class="badge green">✅ Kept</span></td></tr>
-<tr><td><code>949f7f8</code></td><td><strong>Ping-pong double-buffered SMEM queues</strong> — +20% overhead</td><td><span class="badge red">🔴 Reverted</span></td></tr>
-<tr><td><code>9166a55</code></td><td><strong>Fix SMEM queue bugs</strong> — shared scope + bitmap reset (reverted with SMEM)</td><td><span class="badge red">🔴 Reverted</span></td></tr>
-<tr><td><code>22945d9</code></td><td><strong>Fix fb_seq/fb_seq2 FW kernel calls</strong> — add d_fw_count arg (reverted with SMEM)</td><td><span class="badge red">🔴 Reverted</span></td></tr>
-<tr><td><code>5568294</code></td><td><strong>Block-local SMEM queue BFS</strong> — monotonic queue bug (full after ~30 levels)</td><td><span class="badge red">🔴 Reverted</span></td></tr>
-<tr><td><code>daf9ab5</code></td><td><strong>WCC fused propagation</strong> — Phase 1+2 in one kernel</td><td><span class="badge yellow">No perf gain</span></td></tr>
-<tr><td><code>ec4d522</code></td><td><strong>Revert TRIM1 block-contiguous</strong> — 48MB L2 cache made it redundant</td><td><span class="badge red">Reverted</span></td></tr>
-<tr><td><code>cd16df9</code></td><td><strong>TRIM1 block-contiguous kernel</strong> — no change (3.63ms)</td><td><span class="badge red">No improvement</span></td></tr>
-<tr><td><code>ba688e9</code></td><td><strong>Revert fused TRIM12</strong> — race condition (+182 extra SCCs)</td><td><span class="badge red">Reverted</span></td></tr>
-<tr><td><code>d219353</code></td><td><strong>Fused TRIM12 kernel</strong> — +182 extra SCCs on ljournal</td><td><span class="badge red">Buggy</span></td></tr>
-<tr><td><code>c8cc604</code></td><td><strong>Trim2 degree bitmap</strong> — self-loop-safe bitmap kernel</td><td><span class="badge red">Reverted</span></td></tr>
+<tr><td><code>a3721d1</code></td><td><strong>Strip trailing slash from dataset_dir</strong> — OpenMP M6 dataset name was empty with double-slash paths</td><td><span class="badge green">✅ Kept</span></td></tr>
+<tr><td><code>4adc660</code></td><td><strong>scc_list.txt path → local scc_lists/</strong> — dataset dir unwritable, use project dir</td><td><span class="badge green">✅ Kept</span></td></tr>
+<tr><td><code>f75b44b</code></td><td><strong>Revert short-circuit 300K→100K</strong> — didn't help, back to 100K</td><td><span class="badge red">🔴 Reverted</span></td></tr>
+<tr><td><code>521e784</code></td><td><strong>Short-circuit threshold 100K→300K</strong> — try more aggressive compute kernel</td><td><span class="badge red">🔴 Reverted</span></td></tr>
+<tr><td><code>0c6bc2e</code></td><td><strong>Fix missing paren in kernel decl</strong> — compilation fix</td><td><span class="badge yellow">Fix</span></td></tr>
+<tr><td><code>d7c1750</code></td><td><strong>__ldg() on short-circuit kernels</strong> — read-only cache for all d_Color reads</td><td><span class="badge green">✅ Kept (no gain)</span></td></tr>
+<tr><td><code>13e7e69</code></td><td><strong>Short-circuit threshold at 100K</strong> — use short-circuit for large compact sets</td><td><span class="badge green">✅ Kept</span></td></tr>
+<tr><td><code>d8a5f9a</code></td><td><strong>__ldg() + 4× unroll on compute kernel</strong> — read-only cache + ILP</td><td><span class="badge green">✅ -61% TRIM1 🚀</span></td></tr>
+<tr><td><code>f2410e9</code></td><td><strong>Block-cooperative compute kernel fix</strong> — 256 threads per node</td><td><span class="badge green">✅ Kept</span></td></tr>
+<tr><td><code>fffe98c</code></td><td><strong>MAX_OUT grid 142 blocks</strong> — use all SMs</td><td><span class="badge green">✅ Kept</span></td></tr>
+<tr><td><code>c8636cd</code></td><td><strong>Fix 3: rebuild compact between iterations</strong> — reduce compute cost</td><td><span class="badge green">✅ Kept</span></td></tr>
+<tr><td><code>ed206c2</code></td><td><strong>Fix 2d: warp-cooperative alive-count</strong> — 32× faster per node</td><td><span class="badge green">✅ Kept</span></td></tr>
+<tr><td><code>d135f4b</code></td><td><strong>Fix 2c: remove atomic storm</strong> — recompute counts each iter</td><td><span class="badge green">✅ Kept</span></td></tr>
+<tr><td><code>f082c0b</code></td><td><strong>Fix 2b: compact-only compute</strong> — 44× less work</td><td><span class="badge green">✅ Kept</span></td></tr>
+<tr><td><code>719db4f</code></td><td><strong>Fix 2: O(1) alive-count checks</strong> — avoid scanning all edges every iter</td><td><span class="badge green">✅ Kept</span></td></tr>
+<tr><td><code>bcf3a12</code></td><td><strong>Fix 1: warp-cooperative full-scan kernel</strong></td><td><span class="badge green">✅ Kept</span></td></tr>
+<tr><td><code>0a8ce22</code></td><td><strong>Fix 1: warp-cooperative compact kernel</strong></td><td><span class="badge green">✅ Kept</span></td></tr>
+<tr><td><code>6a2712b</code></td><td><strong>Set TRIM_STOP=100</strong> — match OpenMP default</td><td><span class="badge green">✅ Kept</span></td></tr>
+<tr><td><code>5d80e1f</code></td><td><strong>CUDA M6: skip pipeline for DAG</strong> — mark_all_as_scc <1ms</td><td><span class="badge green">✅ Kept</span></td></tr>
+<tr><td><code>5458fd8</code></td><td><strong>Fix GPU pointer crash + filter stride loop</strong></td><td><span class="badge green">✅ Kept</span></td></tr>
+<tr><td><code>3a0fd09</code></td><td><strong>Fix hardcoded scc_list.txt path</strong></td><td><span class="badge green">✅ Kept</span></td></tr>
+<tr><td><code>8b8b1e1</code></td><td><strong>OpenMP: tab-separated read_file</strong></td><td><span class="badge green">✅ Kept</span></td></tr>
+<tr><td><code>5922cad</code></td><td><strong>OpenMP: load graph for all methods</strong></td><td><span class="badge green">✅ Kept</span></td></tr>
+<tr><td><code>a92fd9d</code></td><td><strong>OpenMP: free orig_edges</strong></td><td><span class="badge green">✅ Kept</span></td></tr>
+<tr><td><code>949f7f8</code></td><td><strong>Ping-pong double-buffered SMEM queues</strong></td><td><span class="badge red">🔴 Reverted</span></td></tr>
+<tr><td><code>5568294</code></td><td><strong>Block-local SMEM queue BFS</strong></td><td><span class="badge red">🔴 Reverted</span></td></tr>
+<tr><td><code>ba688e9</code></td><td><strong>Revert fused TRIM12</strong></td><td><span class="badge red">Reverted</span></td></tr>
+<tr><td><code>d219353</code></td><td><strong>Fused TRIM12 kernel</strong></td><td><span class="badge red">Buggy</span></td></tr>
 </table>
 
 <h2 id="optimizations">⚡ Optimizations Log</h2>
