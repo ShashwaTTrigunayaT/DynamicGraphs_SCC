@@ -213,19 +213,36 @@ void create_work_items_from_wcc(gm_graph& G)
     }
     printf("  [DBG] CWI: loop1 done (first pool alloc)\n"); fflush(stdout);
     
-    #pragma omp parallel for  schedule(dynamic, 32)
-    for (int index = 0; index< wcc_candidate.size(); index++)
     {
-        node_t t4 = wcc_candidate[index];
-
-        if (G_Color[t4] == -2) continue;
-        node_t root = GET_WCC_ROOT(t4);
-        if (root == gm_graph::NIL_NODE) continue;
-
-        gm_spinlock_acquire_for_node(root);
-        wcc_sets[root]->insert(t4);
-        gm_spinlock_release_for_node(root);
-
+        int crash_idx = -1;
+        #pragma omp parallel for schedule(dynamic, 32)
+        for (int index = 0; index < (int)wcc_candidate.size(); index++)
+        {
+            node_t t4 = wcc_candidate[index];
+    
+            if (G_Color[t4] == -2) continue;
+            node_t root = GET_WCC_ROOT(t4);
+            if (root == gm_graph::NIL_NODE) continue;
+            if (root >= G_num_nodes) {
+                printf("  [DBG] CWI2-BAD: idx=%d t4=%u root=%u >= G_num_nodes=%d\n", index, (unsigned)t4, (unsigned)root, G_num_nodes);
+                fflush(stdout);
+                crash_idx = index;
+                continue;
+            }
+            if (wcc_sets[root] == NULL) {
+                printf("  [DBG] CWI2-BAD: idx=%d t4=%u root=%u wcc_sets[root] is NULL!\n", index, (unsigned)t4, (unsigned)root);
+                fflush(stdout);
+                crash_idx = index;
+                continue;
+            }
+            gm_spinlock_acquire_for_node(root);
+            wcc_sets[root]->insert(t4);
+            gm_spinlock_release_for_node(root);
+        }
+        if (crash_idx >= 0) {
+            printf("  [DBG] CWI2: loop2 completed with errors, last bad idx=%d\n", crash_idx);
+            fflush(stdout);
+        }
     }
     printf("  [DBG] CWI: loop2 done (insert nodes into root sets)\n"); fflush(stdout);
 
