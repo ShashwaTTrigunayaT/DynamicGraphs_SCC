@@ -16,7 +16,9 @@ BATCH_PCTS = [1, 3, 5, 7, 15]
 NUM_THREADS = "14"
 MODES = ["5", "6", "11"]
 SCC_BINARY = "scc.exe"  # Windows binary name
-MAKE_CMD = "mingw32-make"  # Windows uses mingw32-make, not make
+# Auto-detect make command (mingw32-make on Windows, make on Linux)
+import shutil
+MAKE_CMD = shutil.which("mingw32-make") or shutil.which("make") or "make"
 
 # The 16 graph files in the project root
 GRAPH_FILES = sorted(glob.glob("diameter_*.txt") + glob.glob("lcc_*.txt"))
