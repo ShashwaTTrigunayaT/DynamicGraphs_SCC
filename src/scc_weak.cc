@@ -198,11 +198,7 @@ void do_global_wcc(gm_graph& G)
 void create_work_items_from_wcc(gm_graph& G)
 {
     std::vector<node_t>& wcc_candidate = get_compact_trim_targets(); 
-
-#if M_TIME
-    struct timeval T1,T2;
-        gettimeofday(&T1, NULL);
-#endif
+    printf("  [DBG] CWI: wcc_candidate.size=%zu, G_num_nodes=%d\n", wcc_candidate.size(), G_num_nodes); fflush(stdout);
     
     #pragma omp parallel for
     for (int index = 0; index< wcc_candidate.size(); index++)
@@ -215,6 +211,7 @@ void create_work_items_from_wcc(gm_graph& G)
             wcc_sets[t4] = get_node_set_from_pool();
         }
     }
+    printf("  [DBG] CWI: loop1 done (first pool alloc)\n"); fflush(stdout);
     
     #pragma omp parallel for  schedule(dynamic, 32)
     for (int index = 0; index< wcc_candidate.size(); index++)
@@ -230,13 +227,8 @@ void create_work_items_from_wcc(gm_graph& G)
         gm_spinlock_release_for_node(root);
 
     }
+    printf("  [DBG] CWI: loop2 done (insert nodes into root sets)\n"); fflush(stdout);
 
-
-#if M_TIME
-        gettimeofday(&T2, NULL);
-        printf("WCC5: %6.3lf ms\n",  (T2.tv_usec-T1.tv_usec)*0.001 + (T2.tv_sec - T1.tv_sec)*10000);
-        gettimeofday(&T1, NULL);
-#endif
     // Create works
     #pragma omp parallel
     {
@@ -249,6 +241,7 @@ void create_work_items_from_wcc(gm_graph& G)
             node_t root = GET_WCC_ROOT(i);
             if (root == i)
             {
+                printf("  [DBG] CWI: creating work for root=%d, set_size=%zu\n", (int)root, wcc_sets[i]->size()); fflush(stdout);
                 assert(wcc_sets[i]!= NULL);
                 my_work* w1 = new my_work();
                 w1->color = G_Color[i];
@@ -260,13 +253,9 @@ void create_work_items_from_wcc(gm_graph& G)
         }
 
         int tid = gm_rt_thread_id();
+        printf("  [DBG] CWI: putting %zu works for tid=%d\n", small_works.size(), tid); fflush(stdout);
         work_q_put_all(tid, small_works);
     }
-#if M_TIME
-        gettimeofday(&T2, NULL);
-        printf("WCC6: %6.3lf ms\n",  (T2.tv_usec-T1.tv_usec)*0.001 + (T2.tv_sec - T1.tv_sec)*10000);
-        gettimeofday(&T1, NULL);
-#endif
-
+    printf("  [DBG] CWI: all done\n"); fflush(stdout);
 }
 
