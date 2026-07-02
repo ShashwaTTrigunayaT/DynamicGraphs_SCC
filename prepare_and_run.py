@@ -17,7 +17,8 @@ NUM_THREADS = "14"
 MODES = ["5", "6", "11"]
 # Auto-detect binary and make command (cross-platform: Linux vs Windows MinGW)
 import shutil
-SCC_BINARY = shutil.which("scc.exe") or shutil.which("scc") or "scc"
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__)) or "."
+SCC_BINARY = shutil.which("scc.exe") or shutil.which("scc") or os.path.join(SCRIPT_DIR, "scc")
 MAKE_CMD = shutil.which("mingw32-make") or shutil.which("make") or "make"
 
 # The 16 graph files in the project root
