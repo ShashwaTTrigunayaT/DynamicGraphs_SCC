@@ -261,6 +261,24 @@ def run_benchmarks(dataset_dirs):
     return results
 
 
+def read_existing_datasets():
+    """Read already-split datasets from syn_datasets/ without re-splitting."""
+    dataset_dirs = []
+    for d in sorted(glob.glob("syn_datasets/*/")):
+        refined = f"{d}refined_edges.txt"
+        insert = f"{d}insert_edges.txt"
+        if os.path.isfile(refined) and os.path.isfile(insert):
+            dir_name = d.rstrip("/")
+            # Parse: syn_datasets/{base_name}_{pct}pct
+            parts = os.path.basename(dir_name).rsplit("_", 1)
+            if len(parts) == 2 and parts[1].endswith("pct"):
+                base_name = parts[0]
+                pct = int(parts[1].replace("pct", ""))
+                dataset_dirs.append((dir_name, base_name, pct))
+    print(f"  Found {len(dataset_dirs)} existing datasets in syn_datasets/")
+    return dataset_dirs
+
+
 if __name__ == "__main__":
     if not os.path.isfile(SCC_BINARY):
         print(f"Building {SCC_BINARY}...")
