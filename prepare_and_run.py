@@ -15,9 +15,9 @@ import glob
 BATCH_PCTS = [1, 3, 5, 7, 15]
 NUM_THREADS = "14"
 MODES = ["5", "6", "11"]
-SCC_BINARY = "scc.exe"  # Windows binary name
-# Auto-detect make command (mingw32-make on Windows, make on Linux)
+# Auto-detect binary and make command (cross-platform: Linux vs Windows MinGW)
 import shutil
+SCC_BINARY = shutil.which("scc.exe") or shutil.which("scc") or "scc"
 MAKE_CMD = shutil.which("mingw32-make") or shutil.which("make") or "make"
 
 # The 16 graph files in the project root
