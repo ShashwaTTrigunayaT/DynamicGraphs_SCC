@@ -271,22 +271,31 @@ class my_main : public main_t
         // Method 2
         void do_baseline_global_wcc_fb()
         {
-            printf("  [DBG] PHASE: TRIM1\n"); fflush(stdout);
+            // trim repeatedly
+            PHASE_BEGIN("TRIM1");
             int trimmed = repeat_global_trim1(G);
-            printf("  [DBG] TRIM1 done, trimmed=%d\n", trimmed); fflush(stdout);
+            PHASE_END("TRIM1");
 
-            int curr_color = get_curr_color();
+
+            // global BFS
+            int curr_color = get_curr_color(); // -1
             assert(curr_color == -1);
             int curr_count = G_num_nodes - trimmed;
             if (analyze) printf("trimmed = %d\n", trimmed);
             if (curr_count == 0) {
-                printf("  [DBG] curr_count=0, returning\n"); fflush(stdout);
+                EMPTY_PHASE("GLOBAL_BFS");
+                EMPTY_PHASE("TRIM1");
+                EMPTY_PHASE("WCC");
+                EMPTY_PHASE("FB");
+                if (analyze) printf("First_SCC_size = 0\n");
+                if (analyze) printf("trimmed = 0\n", trimmed);
+                if (analyze) printf("SCC_size_from_WCC = %d\n", 0); // WCC never identifies a SCC
                 return;
             }
 
-            printf("  [DBG] PHASE: GLOBAL_BFS\n"); fflush(stdout);
+            PHASE_BEGIN("GLOBAL_BFS");
             int scc_size = do_fw_bw_global_main(G, curr_color, curr_count, false);
-            printf("  [DBG] GLOBAL_BFS done, scc_size=%d\n", scc_size); fflush(stdout);
+            PHASE_END("GLOBAL_BFS");
             if (analyze) printf("First_SCC_size = %d\n", scc_size);
 
             if(met_algo==11)
@@ -294,6 +303,7 @@ class my_main : public main_t
                 flag11=2;
                 for(int i=0;i<new_edge_nodes.size();i++)
                 {
+                    // cout<<G_SCC[new_edge_nodes[i]]<<" ";
                     if(G_SCC[new_edge_nodes[i]]<0)
                     {
                         cout<<"Helloooo"<<endl;
@@ -304,40 +314,40 @@ class my_main : public main_t
             }
             cout<<endl;
 
-            printf("  [DBG] PHASE: TRIM1_COMPACT\n"); fflush(stdout);
+            PHASE_BEGIN("TRIM1");
             trimmed = repeat_global_trim1_compact(G);
 #if USE_TRIM2
             {
-                printf("  [DBG] PHASE: TRIM2_NEW\n"); fflush(stdout);
-                int cnt = do_global_trim2_new(G);
-                printf("  [DBG] TRIM2_NEW done, cnt=%d\n", cnt); fflush(stdout);
-                trimmed += cnt;
-                printf("  [DBG] PHASE: TRIM1_COMPACT_AGAIN\n"); fflush(stdout);
-                trimmed += repeat_global_trim1_compact(G, 100);
+                int trim_total = 0;
+                trim_total = 0;
+                int cnt = do_global_trim2_new(G); 
+                //int cnt = do_global_trim2(G); 
+                //int cnt = repeat_global_trim2_new(G, 100); 
+                trim_total += cnt;
+                trim_total += repeat_global_trim1_compact(G, 100);
+                trimmed += trim_total;
             }
 #endif
-            printf("  [DBG] TRIM phases done, total_trimmed=%d\n", trimmed); fflush(stdout);
+            PHASE_END("TRIM1");
             curr_count = curr_count- trimmed - scc_size;
             if (analyze) printf("trimmed = %d\n", trimmed);
-            if (analyze) printf("SCC_size_from_WCC = %d\n", 0);
+            if (analyze) printf("SCC_size_from_WCC = %d\n", 0); // WCC never identifies a SCC
             if (curr_count == 0) {
-                printf("  [DBG] curr_count=0 after trim, returning\n"); fflush(stdout);
+                EMPTY_PHASE("WCC");
+                EMPTY_PHASE("FB");
                 return;
             }
 
-            printf("  [DBG] PHASE: WCC (remaining=%d nodes, G_num_nodes=%d, G.num_nodes()=%d)\n", 
-                   curr_count, G_num_nodes, G.num_nodes()); fflush(stdout);
-            printf("  [DBG] about to call do_global_wcc\n"); fflush(stdout);
+            PHASE_BEGIN("WCC");
             do_global_wcc(G);
-            printf("  [DBG] do_global_wcc done\n"); fflush(stdout);
-            printf("  [DBG] PHASE: CREATE_WORK_ITEMS\n"); fflush(stdout);
-            fflush(stdout);
             create_work_items_from_wcc(G);
-            printf("  [DBG] create_work_items_from_wcc done\n"); fflush(stdout);
             if (analyze) {printf("#queue_size = %d\n",work_q_size());}
-            printf("  [DBG] PHASE: FW_BW_DFS\n"); fflush(stdout);
+            PHASE_END("WCC");
+
+            PHASE_BEGIN("FB");
+            //start_workers_fw_bw(G, 64);
             start_workers_fw_bw_dfs(G, 40);
-            printf("  [DBG] FW_BW_DFS done\n"); fflush(stdout);
+            PHASE_END("FB");
         }
 
         // Trim1 + Tarjan 
