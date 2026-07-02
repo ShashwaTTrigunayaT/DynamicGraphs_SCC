@@ -325,10 +325,15 @@ class my_main : public main_t
                 return;
             }
 
-            printf("  [DBG] PHASE: WCC (remaining=%d nodes)\n", curr_count); fflush(stdout);
+            printf("  [DBG] PHASE: WCC (remaining=%d nodes, G_num_nodes=%d, G.num_nodes()=%d)\n", 
+                   curr_count, G_num_nodes, G.num_nodes()); fflush(stdout);
+            printf("  [DBG] about to call do_global_wcc\n"); fflush(stdout);
             do_global_wcc(G);
+            printf("  [DBG] do_global_wcc done\n"); fflush(stdout);
             printf("  [DBG] PHASE: CREATE_WORK_ITEMS\n"); fflush(stdout);
+            fflush(stdout);
             create_work_items_from_wcc(G);
+            printf("  [DBG] create_work_items_from_wcc done\n"); fflush(stdout);
             if (analyze) {printf("#queue_size = %d\n",work_q_size());}
             printf("  [DBG] PHASE: FW_BW_DFS\n"); fflush(stdout);
             start_workers_fw_bw_dfs(G, 40);
