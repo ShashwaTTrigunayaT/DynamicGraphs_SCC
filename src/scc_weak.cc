@@ -22,10 +22,12 @@ void init_node_set_pool(int sz) {
 }
 
 NODE_SET* get_node_set_from_pool() {
+    // Fallback: if pool is exhausted, allocate on demand
     int index = __sync_add_and_fetch(&pool_cnt, -1);
-    return node_set_pool[index];
-
-    assert(pool_cnt > 0);
+    if (index >= 0) {
+        return node_set_pool[index];
+    }
+    return new NODE_SET();
 }
 
 void initialize_WCC() {
