@@ -175,7 +175,12 @@ def split_graphs():
 
 
 def generate_scc_lists(dataset_dirs):
-    """Run mode 2 -p on each refined_edges.txt to generate SCC list, then copy to scc_lists/."""
+    """Run SCC on each refined_edges.txt to generate SCC list, then copy to scc_lists/.
+    
+    Uses mode 0 (Trim1 + FW-BW) which is the simplest baseline and works on all
+    graph types. Mode 2 (Trim1 + Global + Trim2 + WCC + FW-BW) crashes on
+    diameter/synthetic graphs due to a bug in Trim2/WCC/DFS code path.
+    """
     print_header("Generating SCC lists for all base graphs")
 
     for dir_name, base_name, pct in dataset_dirs:
@@ -192,7 +197,7 @@ def generate_scc_lists(dataset_dirs):
 
         print(f"  Computing SCC list for {dataset_name} ...", end=" ", flush=True)
         result = subprocess.run(
-            [SCC_BINARY, refined_path, "1", "2", "-p"],
+            [SCC_BINARY, refined_path, NUM_THREADS, "0", "-p"],
             capture_output=True, text=True, timeout=1200
         )
 
