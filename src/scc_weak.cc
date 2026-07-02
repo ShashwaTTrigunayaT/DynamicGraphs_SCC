@@ -22,12 +22,10 @@ void init_node_set_pool(int sz) {
 }
 
 NODE_SET* get_node_set_from_pool() {
-    // Fallback: if pool is exhausted, allocate on demand
     int index = __sync_add_and_fetch(&pool_cnt, -1);
-    if (index >= 0) {
-        return node_set_pool[index];
-    }
-    return new NODE_SET();
+    return node_set_pool[index];
+
+    assert(pool_cnt > 0);
 }
 
 void initialize_WCC() {
@@ -86,9 +84,20 @@ void propagate_color(gm_graph& G, std::vector<node_t>& wcc_candidate)
             node_t n = wcc_candidate[index];
             node_t min_val = G_WCC[n];
             if (G_Color[n] == -2) continue;
+            // Check forward edges (outgoing)
             for (edge_t k_idx = G.begin[n];k_idx < G.begin[n+1] ; k_idx ++) 
             {
                 node_t k = G.node_idx [k_idx];
+                if (G_Color[k] != G_Color[n]) continue;
+                if (G_WCC[k] < min_val) { 
+                    min_val = G_WCC[k];
+                    if (finished) finished = false;
+                }
+            }
+            // Check reverse edges (incoming) — needed for WCC on directed graphs
+            for (edge_t k_idx = G.r_begin[n];k_idx < G.r_begin[n+1] ; k_idx ++) 
+            {
+                node_t k = G.r_node_idx [k_idx];
                 if (G_Color[k] != G_Color[n]) continue;
                 if (G_WCC[k] < min_val) { 
                     min_val = G_WCC[k];
