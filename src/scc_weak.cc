@@ -94,16 +94,6 @@ void propagate_color(gm_graph& G, std::vector<node_t>& wcc_candidate)
                     if (finished) finished = false;
                 }
             }
-            // Check reverse edges (incoming) — needed for WCC on directed graphs
-            for (edge_t k_idx = G.r_begin[n];k_idx < G.r_begin[n+1] ; k_idx ++) 
-            {
-                node_t k = G.r_node_idx [k_idx];
-                if (G_Color[k] != G_Color[n]) continue;
-                if (G_WCC[k] < min_val) { 
-                    min_val = G_WCC[k];
-                    if (finished) finished = false;
-                }
-            }
             if (min_val != G_WCC[n]) G_WCC[n] = min_val;
         }
 
