@@ -262,20 +262,6 @@ public:
             }
         }
 
-        // Fast deduplicate parallel edges in the condensation graph
-        // Compact non-sentinel edges and remove duplicates via hash set
-        std::unordered_set<uint64_t> seen_edges;
-        size_t dedup_write = 0;
-        for (size_t i = 0; i < scc_edges.size(); i++) {
-            if (scc_edges[i].first + scc_edges[i].second != 0) {
-                uint64_t key = ((uint64_t)scc_edges[i].first << 32) | (uint32_t)scc_edges[i].second;
-                if (seen_edges.insert(key).second) {
-                    scc_edges[dedup_write++] = scc_edges[i];
-                }
-            }
-        }
-        scc_edges.resize(dedup_write);
-
         // struct timeval T6_1_new, T6_2_new;
         // gettimeofday(&T6_1_new, NULL);
         // if(met_algo==6)
