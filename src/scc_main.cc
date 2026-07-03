@@ -303,8 +303,7 @@ class my_main : public main_t
                 flag11=2;
                 for(int i=0;i<new_edge_nodes.size();i++)
                 {
-                    // cout<<G_SCC[new_edge_nodes[i]]<<" ";
-                    if(G_SCC[new_edge_nodes[i]]<0)
+                    if(new_edge_nodes[i]!=-1 && G_SCC[i]<0)
                     {
                         cout<<"Helloooo"<<endl;
                         flag11=1;
