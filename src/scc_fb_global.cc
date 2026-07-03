@@ -59,6 +59,7 @@ protected:
             count += thread_data[i].val0; 
             thread_data[i].val0 = 0;
         }
+        printf("DEBUG FW_LEVEL count=%d\n", count); fflush(stdout);
     }
 
     virtual void visit_rv(node_t k9) {}
