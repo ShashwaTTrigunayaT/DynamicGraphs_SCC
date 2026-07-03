@@ -66,7 +66,7 @@ if [ "$GEN_SCC" = "1" ]; then
 
     for dir in "$DATASETS_DIR"/*/; do
         name=$(basename "$dir")
-        [ "$name" = "indochina-2004" ] && { echo "  Skipping $name (no refined_edges.txt)"; continue; }
+        [ "$name" = "indochina-2004" ] && { echo "  Skipping $name (.mtx format only)"; continue; }
         [ "$name" = "syn_datasets" ] && { echo "  Skipping $name (synthetic)"; continue; }
 
         # Apply filter if specified
@@ -86,8 +86,8 @@ if [ "$GEN_SCC" = "1" ]; then
 
         echo "  [GEN] $name → $out ..."
         cd "$SCRIPT_DIR" && "$OMP_BIN" "$refined" "$THREADS" 2 -p 2>&1 | grep -E "running_time|Total # SCCs|TRIM1|GLOBAL_BFS|WCC|FB"
-        if [ -f "$SCRIPT_DIR/src/scc_list.txt" ]; then
-            mv "$SCRIPT_DIR/src/scc_list.txt" "$out"
+        if [ -f "$SCRIPT_DIR/scc_list.txt" ]; then
+            mv "$SCRIPT_DIR/scc_list.txt" "$out"
             echo "    ✅ $name: $(wc -l < "$out") lines"
         else
             echo "    ❌ $name: scc_list.txt not generated (check for crashes)"

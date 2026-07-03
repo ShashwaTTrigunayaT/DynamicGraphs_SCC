@@ -14,7 +14,7 @@ import glob
 
 BATCH_PCTS = [1, 3, 5, 7, 15]
 NUM_THREADS = "14"
-MODES = ["6", "11"]
+MODES = ["5", "6", "11"]
 # Auto-detect binary and make command (cross-platform: Linux vs Windows MinGW)
 import shutil
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__)) or "."
