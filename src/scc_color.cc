@@ -65,11 +65,10 @@ node_t choose_pivot_from_color(gm_graph& G, int color)
 {
     if(met_algo==11)
     {
-        std::vector<node_t> V=new_edge_nodes;
+        std::vector<node_t>& V = new_edge_nodes;
         for(node_t j=0;j<V.size(); j++)
         {
-            node_t i = V[j];
-            if (i!=-1 && (G_Color[i] == color)) return i;
+            if (V[j] != -1 && (G_Color[j] == color)) return j;
         }
     }
     else

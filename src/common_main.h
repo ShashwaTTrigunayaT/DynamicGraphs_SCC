@@ -261,6 +261,21 @@ public:
                     cout << "hey-hey-found" << endl;
             }
         }
+
+        // Deduplicate parallel edges in the condensation graph
+        // Compact non-sentinel edges to the front
+        size_t dedup_write = 0;
+        for (size_t i = 0; i < scc_edges.size(); i++) {
+            if (scc_edges[i].first + scc_edges[i].second != 0) {
+                if (dedup_write != i) scc_edges[dedup_write] = scc_edges[i];
+                dedup_write++;
+            }
+        }
+        scc_edges.resize(dedup_write);
+        // Sort and remove parallel duplicates
+        std::sort(scc_edges.begin(), scc_edges.end());
+        scc_edges.erase(std::unique(scc_edges.begin(), scc_edges.end()), scc_edges.end());
+
         // struct timeval T6_1_new, T6_2_new;
         // gettimeofday(&T6_1_new, NULL);
         // if(met_algo==6)
