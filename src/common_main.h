@@ -179,134 +179,84 @@ public:
 
     void create_scc_edges(vector<pair<int, int>> orig_edges, vector<pair<int, int>> insert_edges, vector<pair<int, int>> &scc_edges, int num_vertices, int num_sccs)
     {
-        DBG
         unordered_map<string, int> ump;
-        DBG
         int root_node = 0;
-        DBG
         vector<vector<int>> adj_list(num_sccs);
-        DBG
         level_ver.resize(num_sccs, 0);
-        DBG
         new_edge_nodes.resize(num_sccs, -1);
-        DBG
         affect_level.resize(num_sccs + 5, 0);
-        DBG
         queue<int> qu;
-        DBG
         vector<int> in_degree(num_sccs, 0);
-        DBG
         vector<int> unaffected_levels;
-        DBG
         int max_level = 0;
-        DBG
         scc_edges.resize(orig_edges.size() + insert_edges.size(), {0, 0});
-        DBG
         struct timeval T_insert1, T_insert2;
-        DBG
 
 #pragma omp parallel for
         for (int i = 0; i < orig_edges.size(); i++)
         {
-            DBG
             int ver1 = orig_edges[i].first;
-            DBG
             int ver2 = orig_edges[i].second;
-            DBG
             if (scc_list[ver1] != scc_list[ver2])
             {
-                DBG
                 scc_edges[i] = make_pair(scc_list[ver1], scc_list[ver2]);
-                DBG
                 if (met_algo == 7)
                 {
-                    DBG
                     adj_list[scc_list[ver1]].push_back(scc_list[ver2]);
-                    DBG
                     in_degree[scc_list[ver2]] += 1;
                 }
             }
         }
-        DBG
         if (met_algo == 7)
         {
-            DBG
             for (int i = 0; i < num_sccs; i++)
             {
-                DBG
                 if (in_degree[i] == 0 && adj_list[i].size() != 0)
                 {
-                    DBG
                     qu.push(i);
-                    DBG
                     level_ver[i] = 0;
                 }
             }
-            DBG
             BFS(adj_list, level_ver, qu, in_degree, &max_level);
-            DBG
         }
-        DBG
 
         gettimeofday(&T_insert1, NULL);
-        DBG
 #pragma omp parallel for
         for (int i = 0; i < insert_edges.size(); i++)
         {
-            DBG
             int ver1 = insert_edges[i].first;
-            DBG
             int ver2 = insert_edges[i].second;
-            DBG
             if (scc_list[ver1] != scc_list[ver2])
             {
-                DBG
                 scc_edges[orig_edges.size() + i] = make_pair(scc_list[ver1], scc_list[ver2]);
-                DBG
                 if (met_algo == 7)
                 {
-                    DBG
                     int scc1 = scc_list[ver1];
-                    DBG
                     int scc2 = scc_list[ver2];
-                    DBG
                     affect_level[min(level_ver[scc1], level_ver[scc2])] += 1;
-                    DBG
                     affect_level[max(level_ver[scc1], level_ver[scc2]) + 1] += -1;
                 }
             }
-            DBG
             if (met_algo == 11)
             {
-                DBG
                 new_edge_nodes[scc_list[ver1]] = 1;
             }
         }
-        DBG
         gettimeofday(&T_insert2, NULL);
-        DBG
         insert_runtime = (T_insert2.tv_sec - T_insert1.tv_sec) * 1000 + (T_insert2.tv_usec - T_insert1.tv_usec) * 0.001;
-        DBG
         if (met_algo == 7)
         {
-            DBG
             parallel_prefix_sum(affect_level);
-            DBG
             for (int i = 0; i < affect_level.size() && i <= max_level; i++)
             {
-                DBG
                 if (affect_level[i] == 0)
                 {
-                    DBG
                     unaffected_levels.push_back(i);
                 }
             }
-            DBG
             cout << "size of unaffected_levels:" << unaffected_levels.size() << endl;
-            DBG
             for (int i = 0; i < (unaffected_levels.size()) - 1; i++)
             {
-                DBG
                 if (unaffected_levels[i + 1] - unaffected_levels[i] > 1)
                     cout << "hey-hey-found" << endl;
             }
