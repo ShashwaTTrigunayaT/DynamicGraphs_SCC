@@ -7,7 +7,6 @@
 #include <unordered_set>
 
 
-
 extern int32_t* G_Color;
 extern node_t* G_SCC;
 extern int32_t  G_num_nodes;

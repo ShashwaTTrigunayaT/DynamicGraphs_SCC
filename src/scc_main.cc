@@ -95,8 +95,10 @@ class my_main : public main_t
 
         virtual bool prepare() 
         {
+            printf("DEBUG: prepare start\n"); fflush(stdout);
             gm_rt_initialize();
             G.make_reverse_edges();
+            printf("DEBUG: reverse_edges done, G_num_nodes=%d\n", G.num_nodes()); fflush(stdout);
 
             G_num_nodes = G.num_nodes();
             G_SCC= new node_t[G.num_nodes()];
@@ -113,6 +115,7 @@ class my_main : public main_t
             initialize_analyze();
             initialize_global_fb();
             initialize_WCC();
+            printf("DEBUG: prepare done\n"); fflush(stdout);
 
             return true;
         }
@@ -271,6 +274,7 @@ class my_main : public main_t
         // Method 2
         void do_baseline_global_wcc_fb()
         {
+            printf("DEBUG: do_baseline_global_wcc_fb started, G_num_nodes=%d\n", G_num_nodes); fflush(stdout);
             // trim repeatedly
             PHASE_BEGIN("TRIM1");
             int trimmed = repeat_global_trim1(G);
@@ -293,9 +297,11 @@ class my_main : public main_t
                 return;
             }
 
+            printf("DEBUG: starting GLOBAL_BFS, curr_count=%d\n", curr_count); fflush(stdout);
             PHASE_BEGIN("GLOBAL_BFS");
             int scc_size = do_fw_bw_global_main(G, curr_color, curr_count, false);
             PHASE_END("GLOBAL_BFS");
+            printf("DEBUG: GLOBAL_BFS done, scc_size=%d\n", scc_size); fflush(stdout);
             if (analyze) printf("First_SCC_size = %d\n", scc_size);
 
             if(met_algo==11)
@@ -337,16 +343,19 @@ class my_main : public main_t
                 return;
             }
 
+            printf("DEBUG: starting WCC, curr_count=%d\n", curr_count); fflush(stdout);
             PHASE_BEGIN("WCC");
             do_global_wcc(G);
             create_work_items_from_wcc(G);
             if (analyze) {printf("#queue_size = %d\n",work_q_size());}
             PHASE_END("WCC");
+            printf("DEBUG: WCC done, starting FB\n"); fflush(stdout);
 
             PHASE_BEGIN("FB");
             //start_workers_fw_bw(G, 64);
             start_workers_fw_bw_dfs(G, 40);
             PHASE_END("FB");
+            printf("DEBUG: FB done\n"); fflush(stdout);
         }
 
         // Trim1 + Tarjan 
