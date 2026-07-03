@@ -158,17 +158,24 @@ int do_fw_bw_global_main(gm_graph& G, int curr_color, int count, bool create_wor
     int bw_color = get_new_color();
 
     // do FW BFS
+    printf("DEBUG: FW_BFS prepare start, pivot=%d\n", pivot); fflush(stdout);
     fw_trim_global FW_BFS(G, base_color, fw_color);
     FW_BFS.prepare(pivot, gm_rt_get_num_threads());
+    printf("DEBUG: FW_BFS do_bfs_forward start\n"); fflush(stdout);
     FW_BFS.do_bfs_forward();
+    printf("DEBUG: FW_BFS do_bfs_forward done\n"); fflush(stdout);
 
     // result
     int fw_count = FW_BFS.get_fw_count();
+    printf("DEBUG: fw_count=%d\n", fw_count); fflush(stdout);
 
     // do BW BFS
+    printf("DEBUG: BW_BFS prepare start\n"); fflush(stdout);
     bw_trim_global BW_BFS(G, base_color, fw_color, bw_color, pivot);
     BW_BFS.prepare(pivot, gm_rt_get_num_threads());
+    printf("DEBUG: BW_BFS do_bfs_forward start\n"); fflush(stdout);
     BW_BFS.do_bfs_forward();
+    printf("DEBUG: BW_BFS do_bfs_forward done\n"); fflush(stdout);
 
     int bw_count = BW_BFS.get_bw_count();
     int scc_count = BW_BFS.get_scc_count();
