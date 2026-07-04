@@ -596,7 +596,15 @@ inline bool stream_lcc_to_file(
     std::ofstream out(filename);
     if (!out.is_open()) return false;
 
-    // Metadata headers removed - just pure edge list for compatibility with algorithm file readers
+    // Metadata headers removed - pure edge list for compatibility with algorithm file readers
+    int num_singletons = 0;
+    int num_small_sccs = 0;
+    if (explicit_singletons >= 0) {
+        for (int sz : sat_scc_sizes) {
+            if (sz == 1) num_singletons++;
+            else num_small_sccs++;
+        }
+    }
 
     
     for (int i = 0; i < lcc_size; i++) {
