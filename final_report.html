@@ -82,44 +82,6 @@
 <strong>Opts Catalogued:</strong> 5 BIG WINS 🚀, 12 KEPT ✅, 12 REVERTED 🔴
 </div>
 
-<div class="toc">
-<h3 style="margin-top:0;">📑 Contents</h3>
-<ol>
-  <li><a href="#summary">Executive Summary</a></li>
-  <li><a href="#bigwins">🚀 BIG WINS (Major Impact)</a></li>
-  <li><a href="#kept">✅ KEPT (Smaller Impact / Correctness)</a></li>
-  <li><a href="#reverted">🔴 REVERTED (Didn't Work / Regressed)</a></li>
-
-  <li><a href="#issues">🐛 Known Issues</a></li>
-  <li><a href="#quickref">📌 Quick Reference</a></li>
-</ol>
-</div>
-
-<!-- ================================================================ -->
-<h2 id="summary">Executive Summary</h2>
-<!-- ================================================================ -->
-
-<p>This report catalogues every optimization attempt on the CUDA GPU SCC pipeline. Each entry follows a structured format:</p>
-
-<div class="box" style="background:#f0f4ff;">
-<p><strong>Structure:</strong> <span class="label">Problem</span> → <span class="label">Change</span> → <span class="label">Effect</span> → <span class="label">Key Numbers</span> → <span class="label">Verdict</span></p>
-</div>
-
-<p><strong>Hardware:</strong> NVIDIA L40S 48GB (Ada Lovelace, sm_89, 142 SMs, 6MB L2 cache)<br>
-<strong>Baseline:</strong> OpenMP on 72 threads. All CUDA times are ALGO_TIME (GPU compute only, excluding H2D/D2H transfers).</p>
-
-<div class="diagram">
-Pipeline (Method 2):
-Input Graph → TRIM1 → COMPACT → GLOBAL BFS → TRIM1/2 → WCC → GPU Batch FB → ✅ SCCs
-                              ↓                          ↓             ↓
-                         BIG WIN #3                 KEPT #2      BIG WIN #1, #2
-                         (BFS Neighbor              (WCC Iter    (GPU-Only FB +
-                          Parallelization)           Limit Fix)    SMEM Hash Table)
-</div>
-
-
-
-
 <!-- ================================================================ -->
 <h2 id="bigwins">🚀 BIG WINS — Major Impact (All Kept)</h2>
 <!-- ================================================================ -->
@@ -550,73 +512,6 @@ Input Graph → TRIM1 → COMPACT → GLOBAL BFS → TRIM1/2 → WCC → GPU Bat
 
 
 
-
-<!-- ================================================================ -->
-<h2 id="issues">🐛 Known Issues</h2>
-<!-- ================================================================ -->
-
-<div class="box" style="border-left:4px solid #dc2626;">
-<div class="box-title">🔴 Issue 1: indochina-2004 SCC Gap (-4,675, 0.27%)</div>
-<p>After all fixes, CUDA reports <strong>1,744,376 SCCs</strong> vs OpenMP's 1,749,051. The gap is <strong>algorithmic</strong>: the level-by-level GPU batch kernel splits chain-like SCCs that the recursive CPU approach finds in one pass. Evidence: SMEM=16 test (gap drops to -1,881), WCC test (no change at 5000 iterations), color overflow test (colors peak at 39M, safe).</p>
-</div>
-
-<div class="box" style="border-left:4px solid #dc2626;">
-<div class="box-title">🔴 Issue 2: gm_graph Heap Corruption</div>
-<p><strong>Fix:</strong> <code>exit(0)</code> at end of main skips destructors. OS reclaims memory. Both CUDA and OpenMP binaries affected.</p>
-</div>
-
-<div class="box" style="border-left:4px solid #f59e0b;">
-<div class="box-title">🟡 Issue 3: OpenMP Method 2 Crashes on Large Graphs</div>
-<p>Use <strong>method 1</strong> for OpenMP on large graphs (skips TRIM12/WCC, correct SCC count).</p>
-</div>
-
-<div class="box" style="border-left:4px solid #f59e0b;">
-<div class="box-title">🟡 Issue 4: TRIM12 &amp; WCC Slower on GPU for Small Workloads</div>
-<p>Small workloads (8K-50K nodes) where kernel launch overhead dominates. Not worth optimizing — tiny absolute times.</p>
-</div>
-
-<div class="box" style="border-left:4px solid #f59e0b;">
-<div class="box-title">🟡 Issue 5: cuda_get_new_color() Not Thread-Safe</div>
-<p>Uses non-atomic <code>_cuda_color_used++</code>. Fix: use <code>#pragma omp atomic</code>.</p>
-</div>
-
-
-<!-- ================================================================ -->
-<h2 id="quickref">📌 Quick Reference</h2>
-<!-- ================================================================ -->
-
-<pre>
-# Pull, build, run on server:
-cd ~/DynamicGraphs_SCC && git pull && make -C src_CUDA
-
-# Method 2 on Pokec (expected: TOTAL ~10ms, SCC = 325,892):
-./src_CUDA/scc_cuda ../datasets/soc-Pokec/refined_edges.txt 72 2 | grep -E "CUDA_PROFILE|Total # SCCs|ALGO_TIME"
-
-# Method 2 on indochina-2004 (expected: ALGO ~588ms, SCC = 1,744,376):
-./src_CUDA/scc_cuda /hdd/thej_par_scc_datasets/indochina-2004/refined_edges.txt 72 2 | grep -E "CUDA_PROFILE|Total #|GPU_FB|ALGO_TIME"
-
-# ALGO_TIME only:
-./src_CUDA/scc_cuda &lt;graph_file&gt; 72 2 | grep ALGO_TIME
-
-# Build & Run OpenMP:
-cd ~/DynamicGraphs_SCC/src && make &amp;&amp; ../scc &lt;graph_file&gt; 72 2 -d
-
-# Edit, commit, push (Windows):
-cd "/mnt/c/Users/Shashwat Trigunayat/OneDrive/Desktop/Admin/DynamicGRAPHS_SCC/DynamicGraphs_SCC"
-git pull --ff-only
-git add &lt;file&gt; &amp;&amp; git commit -m "description" &amp;&amp; git push
-</pre>
-
-<div class="box" style="background:#f0f4ff;border-color:#1a56db;">
-<strong>Files referenced in this report:</strong><br>
-<code>scc_cuda_fb_gpu.cu</code> — GPU Batch FB kernel + scatter + bug fixes (BIG WINS #1, #2; KEPT #1)<br>
-<code>scc_cuda_fb_global.cu</code> — GLOBAL_BFS kernels (BIG WIN #3; KEPT #8, #9)<br>
-<code>scc_cuda_trim1.cu</code> — TRIM1 kernels (BIG WIN #4; KEPT #3, #6)<br>
-<code>scc_cuda_weak.cu</code> — WCC kernel (KEPT #2, #7)<br>
-<code>scc_cuda_incremental_kernels.cu</code> — M6 GPU condensation builder (KEPT #4, #5)<br>
-<code>scc_cuda.h</code> — CUDA_TIMED_MEMCPY macro (BIG WIN #5)<br>
-<code>common_main.h</code> — OpenMP fixes (KEPT #10)
-</div>
 
 <br>
 <div style="text-align:center;color:#888;font-size:10pt;">Generated July 2026 — DynamicGraphs SCC Final Optimization Report</div>
