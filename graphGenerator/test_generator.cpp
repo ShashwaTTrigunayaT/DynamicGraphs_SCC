@@ -27,6 +27,19 @@ int main()
     // 1M nodes: 300K LCC + 300K singletons + 400K small SCCs, 10M edges
     generate_lcc_graph_to_file(1000000, 30, 10000000, -1, 30);
 
+    // Diameter graphs (chain structure, sparse edges between layers)
+    printf("\n=== Diameter graphs (100K nodes, varying diameter) ===\n");
+    generate_diameter_graph_to_file(30, 100000, 10, 10000);   // dia=30, 10K SCCs
+    generate_diameter_graph_to_file(40, 100000, 10, 10000);   // dia=40, 10K SCCs
+    generate_diameter_graph_to_file(70, 100000, 10, 10000);   // dia=70, 10K SCCs
+    generate_diameter_graph_to_file(100, 100000, 10, 10000);  // dia=100, 10K SCCs
+
+    printf("\n=== Diameter graphs (500K nodes, varying diameter) ===\n");
+    generate_diameter_graph_to_file(30, 500000, 10, 50000);   // dia=30, 50K SCCs
+    generate_diameter_graph_to_file(40, 500000, 10, 50000);   // dia=40, 50K SCCs
+    generate_diameter_graph_to_file(70, 500000, 10, 50000);   // dia=70, 50K SCCs
+    generate_diameter_graph_to_file(100, 500000, 10, 50000);  // dia=100, 50K SCCs
+
     printf("\nDone!\n");
     return 0;
 }
