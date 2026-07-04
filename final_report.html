@@ -633,12 +633,32 @@ cooperative_groups::grid_group grid = cooperative_groups::this_grid();
 <h3 class="reverted-heading">2. Block-Local SMEM Queue BFS</h3>
 <p><span class="section-label">Problem.</span> 1024-entry shared memory frontier queue for per-component FB. The queue's tail pointer grew monotonically without resetting &mdash; after ~30 levels the queue filled up and new nodes couldn't be added.</p>
 
+<pre><span class="co">// SMEM queue: tail pointer only grows, never resets between BFS levels</span>
+__shared__ <span class="kw">int</span> s_queue_tail;
+__shared__ <span class="kw">int</span> s_queue[1024];
+
+<span class="co">// After ~30 levels, s_queue_tail hits 1024 — all subsequent adds silently fail</span>
+<span class="kw">if</span> (i &lt; comp_size &amp;&amp; atomicCAS(&amp;d_Color[k], base_color, fw_color) == base_color) {
+    <span class="kw">int</span> pos = atomicAdd(&amp;s_queue_tail, 1);
+    <span class="co">// BUG: no bounds check — pos can exceed 1024 on deep BFS graphs</span>
+    s_queue[pos] = k_pos;
+}</pre>
+
 <p class="verdict"><span class="status-dot dot-red"></span> Monotonic queue bug. Code preserved for reference.</p>
 
 <hr class="opt-divider">
 
 <h3 class="reverted-heading">3. Ping-Pong Double-Buffered SMEM Queues</h3>
 <p><span class="section-label">Problem.</span> Two 512-entry queues swapped each level to fix the monotonic bug. <strong>+20% overhead</strong> (29ms &rarr; 35ms) on wiki-Talk due to extra SMEM management cost and reduced effective queue depth.</p>
+
+<pre><span class="co">// Two 512-entry queues swapped each level</span>
+__shared__ <span class="kw">int</span> s_qA[512];
+__shared__ <span class="kw">int</span> s_qB[512];
+<span class="co">// ... level loop swaps read/write pointers ...</span>
+
+<span class="co">// Problem: only 512 entries vs 1024 in single-queue version.</span>
+<span class="co">// Dense BFS frontiers overflow 512 quickly, causing stalls.</span>
+<span class="co">// Extra SMEM management + reduced depth = +20% overhead.</span></pre>
 
 <p class="verdict"><span class="status-dot dot-red"></span> 20% regression. Hash table approach (Major Impact #2) solved this fundamentally.</p>
 
@@ -647,12 +667,29 @@ cooperative_groups::grid_group grid = cooperative_groups::this_grid();
 <h3 class="reverted-heading">4. Fused TRIM12 Kernel</h3>
 <p><span class="section-label">Problem.</span> TRIM1 + TRIM2 in a single kernel pass. Produced <strong>+182 wrong SCCs</strong> on ljournal-2008 due to a race condition between the degree-0 removal and the 2-node detection phases.</p>
 
+<pre><span class="co">// Fused TRIM1+2: degree-0 removal changes d_Color[n] = SCC_FOUND,</span>
+<span class="co">// then same thread checks for 2-node SCC — but d_Color[n] is now -2!</span>
+<span class="co">// The check_navigator for the 2-node phase reads the wrong color.</span>
+<span class="kw">if</span> (degree == 0) {
+    d_Color[n] = SCC_FOUND;   <span class="co">// TRIM1 just killed this node</span>
+    d_SCC[n] = n;
+} <span class="kw">else</span> <span class="kw">if</span> (...) {           <span class="co">// TRIM2 check now sees -2, not curr_color</span>
+    <span class="co">// 2-node detection logic — skipped because color was changed</span>
+}</pre>
+
 <p class="verdict"><span class="status-dot dot-red"></span> Wrong SCCs. Race condition between TRIM1 and TRIM2 in the same kernel.</p>
 
 <hr class="opt-divider">
 
 <h3 class="reverted-heading">5. Threshold Tuning 100K &rarr; 300K</h3>
 <p><span class="section-label">Problem.</span> Raised the short-circuit threshold to let the compute kernel run on larger compact sets. No improvement on method 2 sweep &mdash; GLOBAL_BFS didn't decrease because the cascade wasn't the bottleneck.</p>
+
+<pre><span class="co">// Changed threshold from 100K to 300K:</span>
+<span class="co">// if (d_trim_targets_count &gt; 100000)  →  if (d_trim_targets_count &gt; 300000)</span>
+<span class="co">//</span>
+<span class="co">// Expected: more nodes go through the compute kernel, faster cascade.</span>
+<span class="co">// Actual: GLOBAL_BFS didn't decrease — the cascade wasn't the bottleneck.</span>
+<span class="co">// The bottleneck was the per-iteration short-circuit scan, not iteration count.</span></pre>
 
 <p class="verdict"><span class="status-dot dot-red"></span> Reverted to 100K. No benefit from higher threshold.</p>
 
@@ -661,12 +698,25 @@ cooperative_groups::grid_group grid = cooperative_groups::this_grid();
 <h3 class="reverted-heading">6. __ldg() on Short-circuit Kernels</h3>
 <p><span class="section-label">Problem.</span> Applied <code>__ldg()</code> to all d_Color reads in short-circuit TRIM1 kernels. No measurable change (~12.24ms vs ~12.36ms). The bottleneck is <code>__ballot_sync</code> overhead and warp divergence, not memory latency.</p>
 
+<pre><span class="co">// Added __ldg() to short-circuit kernel (no effect):</span>
+<span class="co">// if (__ldg(&amp;d_Color[d_node_idx[k_idx]]) == curr_color)</span>
+<span class="co">//</span>
+<span class="co">// Profiling showed __ballot_sync() accounts for 60% of the kernel time.</span>
+<span class="co">// Memory latency is NOT the bottleneck for short-circuit kernels —</span>
+<span class="co">// they only scan ~5 edges per node before finding an alive neighbor.</span></pre>
+
 <p class="verdict"><span class="status-dot dot-red"></span> No measurable gain. Bottleneck is warp divergence, not memory latency.</p>
 
 <hr class="opt-divider">
 
 <h3 class="reverted-heading">7. WCC max_iterations 100 &rarr; 500 (Early Attempt)</h3>
 <p><span class="section-label">Problem.</span> Early attempt to increase WCC iterations. WCC 4.58ms &rarr; 20.99ms. Still didn't converge at 500 on indochina-2004 (needs 209). Later fixed properly with the 100K limit (Moderate #2).</p>
+
+<pre><span class="co">// Early attempt: only 500 iterations, not enough for large graphs</span>
+<span class="co">// int max_iterations = 500;  // indochina-2004 needs 209</span>
+<span class="co">//</span>
+<span class="co">// WCC stopped at 500 with warning, SCC count still 1,739,373</span>
+<span class="co">// (pre-fix baseline). Later fixed with max_iterations = 100000.</span></pre>
 
 <p class="verdict"><span class="status-dot dot-red"></span> Still didn't converge. Only the full 100K limit worked.</p>
 
@@ -675,12 +725,33 @@ cooperative_groups::grid_group grid = cooperative_groups::this_grid();
 <h3 class="reverted-heading">8. TRIM1 Stream Sync</h3>
 <p><span class="section-label">Problem.</span> Switched <code>cudaDeviceSynchronize</code> to <code>cudaStreamSynchronize</code> on a dedicated stream. <strong>0% improvement</strong> &mdash; nsys showed 200us/pass was actual kernel execution, not sync overhead.</p>
 
+<pre><span class="co">// Before: blocking sync</span>
+CUDA_CHECK(cudaDeviceSynchronize());
+
+<span class="co">// After: stream sync (no improvement — kernel time dominates)</span>
+CUDA_CHECK(cudaStreamSynchronize(trim_stream));
+
+<span class="co">// nsys breakdown per pass:</span>
+<span class="co">//   kernel execution: 198us  (99%)</span>
+<span class="co">//   sync overhead:      2us  (1%)</span></pre>
+
 <p class="verdict"><span class="status-dot dot-red"></span> No gain. Kernel execution, not sync overhead, was the bottleneck.</p>
 
 <hr class="opt-divider">
 
 <h3 class="reverted-heading">9. Progressive Compact Rebuild</h3>
 <p><span class="section-label">Problem.</span> Rebuilt the compact list between TRIM1 passes to reduce work. Each rebuild costs ~200us (same as a full scan) due to sync overhead. <strong>TRIM1 15ms &rarr; 25ms</strong> &mdash; worse.</p>
+
+<pre><span class="co">// Rebuild compact set after each iteration to reduce grid size:</span>
+<span class="kw">do</span> {
+    count = do_global_trim1_compact(...);
+    total_count += count;
+    <span class="co">// Rebuild: filters out SCC_FOUND nodes, shrinks d_trim_targets</span>
+    create_trim1_compact(st, g);  <span class="co">// costs ~200us per rebuild</span>
+} <span class="kw">while</span> (count &gt; TRIM_STOP);
+
+<span class="co">// Problem: rebuild cost (~200us) equals the savings from reduced grid.</span>
+<span class="co">// Over 25 iterations, rebuild overhead adds 5ms — net regression.</span></pre>
 
 <p class="verdict"><span class="status-dot dot-red"></span> Regression. Build cost negated any reduction in per-iteration scanning.</p>
 
@@ -689,12 +760,29 @@ cooperative_groups::grid_group grid = cooperative_groups::this_grid();
 <h3 class="reverted-heading">10. Hybrid FB GPU Path</h3>
 <p><span class="section-label">Problem.</span> GPU-based per-component SCC decomposition. <strong>18x slower than CPU</strong> (760ms vs 43ms). Host-side FB with D2H was cheaper than GPU kernel launches for small components.</p>
 
+<pre><span class="co">// Per-component GPU kernel launch pattern:</span>
+<span class="kw">for</span> (CUDAMyWork* w : small_works) {
+    <span class="co">// cudaMemcpy D2H + kernel launch + cudaMemcpy H2D</span>
+    <span class="co">// For small components (~500 nodes), kernel launch latency</span>
+    <span class="co">// (~10us) dominates over actual compute (~1us).</span>
+    gpu_fb_kernel&lt;&lt;&lt;1, 256&gt;&gt;&gt;(...);
+}
+<span class="co">// vs CPU: just pointer arithmetic + recursion — no launch overhead</span></pre>
+
 <p class="verdict"><span class="status-dot dot-red"></span> 18x slower. GPU kernel launch overhead dominates for small components.</p>
 
 <hr class="opt-divider">
 
 <h3 class="reverted-heading">11. WCC max_iterations 5000 (No Effect on SCC)</h3>
 <p><span class="section-label">Problem.</span> Tested with max_iterations=5000 on indochina-2004. WCC time doubled from 234ms &rarr; 535ms. SCC count unchanged (1,744,396 vs 1,744,376 &mdash; within noise). Proved that WCC convergence was NOT the remaining cause of the SCC gap.</p>
+
+<pre><span class="co">// Diagnostic test: max_iterations = 5000 (vs 100000 in working version)</span>
+<span class="co">// int max_iterations = 5000;</span>
+<span class="co">//</span>
+<span class="co">// Result:</span>
+<span class="co">//   WCC time: 234ms → 535ms (+129%)</span>
+<span class="co">//   SCC count: 1,744,396 vs 1,744,376 (within ±20 noise)</span>
+<span class="co">// Conclusion: WCC convergence is not the cause of the -4,675 gap.</span></pre>
 
 <p class="verdict"><span class="status-dot dot-red"></span> No effect on SCC count, 2x slower. Proved the gap is not in WCC.</p>
 
@@ -703,6 +791,15 @@ cooperative_groups::grid_group grid = cooperative_groups::this_grid();
 <h3 class="reverted-heading">12. TRIM1 Block-Contiguous Access Grouping</h3>
 <p><span class="section-label">Problem.</span> Proposed grouping edges by destination node for contiguous d_Color reads. No improvement &mdash; the L40S's 48MB L2 cache already absorbs the random-access pattern.</p>
 
+<pre><span class="co">// Proposed: sort edges by destination node so d_Color accesses are contiguous</span>
+<span class="co">// for (int e = begin[n]; e &lt; begin[n+1]; e += stride) {</span>
+<span class="co">//     If edges[n] = [5, 100, 5, 100, ...] → group by dest</span>
+<span class="co">//     Then d_Color[5], d_Color[5] hit L1 instead of bouncing</span>
+<span class="co">// }</span>
+<span class="co">//</span>
+<span class="co">// Reality: d_Color array is 6.4MB. L40S L2 is 48MB.</span>
+<span class="co">// The entire working set fits in L2. No L1 optimization needed.</span></pre>
+
 <p class="verdict"><span class="status-dot dot-red"></span> No improvement. 48MB L2 makes this unnecessary.</p>
 
 <hr class="opt-divider">
@@ -710,12 +807,30 @@ cooperative_groups::grid_group grid = cooperative_groups::this_grid();
 <h3 class="reverted-heading">13. Edge-Centric BFS</h3>
 <p><span class="section-label">Problem.</span> Proposed expanding frontier by iterating over ALL edges in parallel instead of frontier-based expansion. 2-3x slower &mdash; processes many more edges than necessary.</p>
 
+<pre><span class="co">// Edge-centric: all threads iterate ALL edges, check if src is in frontier</span>
+<span class="co">// for (int e = tid; e &lt; num_edges; e += stride) {</span>
+<span class="co">//     if (d_Color[d_node_idx[e]] == base_color) // src check</span>
+<span class="co">//         d_Color[dst] = fw_color;</span>
+<span class="co">// }</span>
+<span class="co">//</span>
+<span class="co">// Problem: processes ALL M edges every level, even when frontier = 1 node.</span>
+<span class="co">// Frontier-based only processes edges of frontier nodes (= M/|frontier|).</span></pre>
+
 <p class="verdict"><span class="status-dot dot-red"></span> 2-3x slower. Frontier-based approach is more efficient.</p>
 
 <hr class="opt-divider">
 
 <h3 class="reverted-heading">14. Warp-Aggregated Atomics in Compact Build</h3>
-<p><span class="section-label">Problem.</span> Replaced per-thread atomicAdd with warp-level tree reduction. Regression &mdash; shuffle overhead outweighed atomic contention savings on smaller compact sets. (Note: later succeeded as Moderate #11 with a different implementation using ballot instead of tree reduction.)</p>
+<p><span class="section-label">Problem.</span> Replaced per-thread atomicAdd with warp-level tree reduction. Regression &mdash; shuffle overhead outweighed atomic contention savings on smaller compact sets.</p>
+
+<pre><span class="co">// Tree reduction approach (failed):</span>
+<span class="kw">int</span> lane = threadIdx.x &amp; 31;
+<span class="kw">unsigned</span> mask = __ballot_sync(0xffffffff, active);
+<span class="co">// Used __shfl_down to sum mask bits across warp — high shuffle latency</span>
+<span class="co">// Actual: __popc(mask) is a single PTX instruction, much faster</span>
+
+<span class="co">// Succeeded later as Moderate #11 using __popc instead of shuffle tree</span>
+<span class="kw">int</span> warp_count = __popc(mask);  <span class="co">// single instruction vs tree reduction</span></pre>
 
 <p class="verdict"><span class="status-dot dot-red"></span> Regression. Succeeded later as Moderate #11 with ballot approach.</p>
 
@@ -724,12 +839,30 @@ cooperative_groups::grid_group grid = cooperative_groups::this_grid();
 <h3 class="reverted-heading">15. CPU Offload GLOBAL_BFS</h3>
 <p><span class="section-label">Problem.</span> For small frontiers (1-5 nodes per level), proposed running BFS on CPU instead of launching a GPU kernel. <strong>45ms vs 13.5ms GPU</strong> (3.4x worse).</p>
 
+<pre><span class="co">// CPU offload guard:</span>
+<span class="kw">if</span> (queue_size &lt; 10) {
+    <span class="co">// Run BFS on CPU: download d_Color, scan edges, upload results</span>
+    <span class="co">// Each offload: D2H + CPU scan + H2D ≈ 45ms total</span>
+    <span class="co">// GPU: kernel launch + async D2H ≈ 13.5ms (pipelined)</span>
+}
+<span class="co">// GPU wins because async stream hides transfer behind kernel execution</span></pre>
+
 <p class="verdict"><span class="status-dot dot-red"></span> 3.4x slower. GPU launches in parallel even with small workloads.</p>
 
 <hr class="opt-divider">
 
 <h3 class="reverted-heading">16. __ldg() Without Unrolling (Initial Attempt)</h3>
 <p><span class="section-label">Problem.</span> Applied <code>__ldg()</code> without loop unrolling. ~1% improvement (within noise). The real gain came from pairing __ldg() with 4x unrolling to pipeline independent loads (see Major Impact #4).</p>
+
+<pre><span class="co">// Initial attempt: __ldg() only, no unrolling</span>
+<span class="kw">for</span> (edge_t e = d_begin[n] + tid; e &lt; out_end; e += stride) {
+    <span class="kw">if</span> (__ldg(&amp;d_Color[d_node_idx[e]]) == color) out_cnt++;
+}
+<span class="co">// ~1% gain (within noise) — one __ldg() issued per iteration,</span>
+<span class="co">// memory latency still dominates because there's no ILP.</span>
+
+<span class="co">// Major Impact #4: 4x unrolling issues 4 __ldg() per iteration,</span>
+<span class="co">// memory controller pipelines them → 4x throughput → -61%.</span></pre>
 
 <p class="verdict"><span class="status-dot dot-red"></span> ~1% (within noise). Succeeded as Major Impact #4 when paired with unrolling.</p>
 
@@ -738,12 +871,31 @@ cooperative_groups::grid_group grid = cooperative_groups::this_grid();
 <h3 class="reverted-heading">17. WCC Fused Propagation (Initial GPU Attempt)</h3>
 <p><span class="section-label">Problem.</span> Fused WCC phases into a single kernel. Only 8K nodes active &mdash; 23% SM utilization. The kernel was bandwidth-bound and the fused approach didn't improve occupancy.</p>
 
-<p class="verdict"><span class="status-dot dot-red"></span> Low utilization. Succeeded later as Moderate #7 after other fixes made it viable.</p>
+<pre><span class="co">// Fused kernel: Phase 1 (min root) + Phase 2 (path compression) in one pass</span>
+wcc_propagate_fused_kernel&lt;&lt;&lt;grid, 256&gt;&gt;&gt;(...);
+<span class="co">//</span>
+<span class="co">// Problem: only 8K nodes active at WCC phase (after trim + BFS).</span>
+<span class="co">// With 256 threads/block, that's 32 blocks on 142 SMs = 23% utilization.</span>
+<span class="co">// Kernel is bandwidth-bound — fusing doesn't improve occupancy.</span>
+<span class="co">// Later succeeded as Moderate #7 after other pipeline stages were fixed.</span></pre>
+
+<p class="verdict"><span class="status-dot dot-red"></span> Low utilization. Succeeded later as Moderate #7 after other fixes.</p>
 
 <hr class="opt-divider">
 
 <h3 class="reverted-heading">18. Spanning Forest SCC (Method 12)</h3>
 <p><span class="section-label">Problem.</span> Multi-pivot FW-BW spanning tree approach with union-find on GPU. <strong>11x slower</strong> than OpenMP on wiki-Talk. Non-deterministic SCC counts across runs due to race conditions in union-find path compression.</p>
+
+<pre><span class="co">// Multi-pivot approach: each pivot runs concurrent FW/BW BFS</span>
+<span class="co">// Discovered SCCs merged via union-find:</span>
+<span class="kw">while</span> (pivot &lt; N) {
+    fw_bfs(pivot);  bw_bfs(pivot);
+    scc_set = intersect(fw_set, bw_set);
+    <span class="co">// Merge into union-find — non-deterministic due to race conditions</span>
+    union_find_merge(scc_set);  <span class="co">// path compression races across pivots</span>
+}
+<span class="co">// Problem: 11x slower than sequential FW-BW on CPU.</span>
+<span class="co">// Union-find races produce different SCC counts on each run.</span></pre>
 
 <p class="verdict"><span class="status-dot dot-red"></span> 11x slower. Non-deterministic SCC counts. Algorithmic complexity exceeds trim-based approach.</p>
 
