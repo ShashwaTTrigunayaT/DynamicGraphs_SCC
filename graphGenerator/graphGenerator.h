@@ -535,11 +535,13 @@ inline auto generate_diameter_graph(
 
 inline bool stream_lcc_to_file(
     int num_nodes, int lcc_size, long long num_edges,
-    int seed, const std::string& filename)
+    int seed, const std::string& filename,
+    int explicit_singletons = -1)
 {
     if (lcc_size < 1) lcc_size = 1;
     if (lcc_size > num_nodes) lcc_size = num_nodes;
     int satellite_count = num_nodes - lcc_size;
+    if (explicit_singletons > satellite_count) explicit_singletons = satellite_count;
     long long base_edges = num_nodes;
     long long extra = num_edges - base_edges;
     if (extra < 0) extra = 0;
@@ -561,24 +563,59 @@ inline bool stream_lcc_to_file(
     
     
     std::vector<int> sat_scc_sizes;
-    int remaining_nodes = satellite_count;
-    while (remaining_nodes > 0) {
-        int max_sz = std::min(remaining_nodes, std::max(1, 200));
-        int sz = (std::rand() % max_sz) + 1;
-        sat_scc_sizes.push_back(sz);
-        remaining_nodes -= sz;
+    if (explicit_singletons >= 0) {
+        // New: explicit_singletons singletons + remaining in small SCCs (size 2-5)
+        int small_scc_nodes = satellite_count - explicit_singletons;
+        if (small_scc_nodes < 0) small_scc_nodes = 0;
+        int remaining_nodes = small_scc_nodes;
+        while (remaining_nodes > 0) {
+            int max_sz = std::min(remaining_nodes, 5);
+            int min_sz = 2;
+            int sz = (remaining_nodes <= max_sz) ? remaining_nodes : (std::rand() % (max_sz - min_sz + 1)) + min_sz;
+            sat_scc_sizes.push_back(sz);
+            remaining_nodes -= sz;
+        }
+        // Add singletons as size-1
+        for (int i = 0; i < explicit_singletons; i++) {
+            sat_scc_sizes.push_back(1);
+        }
+        // Shuffle so structure isn't clumped
+        std::random_shuffle(sat_scc_sizes.begin(), sat_scc_sizes.end());
+    } else {
+        // Old behavior: random SCCs of size 1-200
+        int remaining_nodes = satellite_count;
+        while (remaining_nodes > 0) {
+            int max_sz = std::min(remaining_nodes, std::max(1, 200));
+            int sz = (std::rand() % max_sz) + 1;
+            sat_scc_sizes.push_back(sz);
+            remaining_nodes -= sz;
+        }
     }
     int num_sat_sccs = (int)sat_scc_sizes.size();
     
     std::ofstream out(filename);
     if (!out.is_open()) return false;
 
+    int num_singletons = 0;
+    int num_small_sccs = 0;
+    if (explicit_singletons >= 0) {
+        for (int sz : sat_scc_sizes) {
+            if (sz == 1) num_singletons++;
+            else num_small_sccs++;
+        }
+    }
+
     out << "% graph_type: lcc\n% nodes: " << num_nodes
         << "\n% edges: " << num_edges
         << "\n% lcc_size: " << lcc_size
         << "\n% satellite_nodes: " << satellite_count
-        << "\n% satellite_sccs: " << num_sat_sccs
-        << "\n% sat_to_giant_edges: " << sat_to_giant
+        << "\n% satellite_sccs: " << num_sat_sccs;
+    if (explicit_singletons >= 0) {
+        out << "\n% singletons: " << num_singletons
+            << "\n% small_sccs: " << num_small_sccs
+            << "\n% small_scc_nodes: " << (satellite_count - num_singletons);
+    }
+    out << "\n% sat_to_giant_edges: " << sat_to_giant
         << "\n% intra_giant_edges: " << intra_giant << "\n";
 
     
@@ -627,21 +664,31 @@ inline bool stream_lcc_to_file(
     std::cout << "Written " << filename
               << " (" << num_edges << " edges, "
               << num_nodes << " nodes, LCC=" << lcc_size
-              << ", " << num_sat_sccs << " satellite SCCs)\n";
+              << ", " << num_sat_sccs << " satellite SCCs";
+    if (explicit_singletons >= 0) {
+        std::cout << ", " << num_singletons << " singletons, "
+                  << num_small_sccs << " small SCCs";
+    }
+    std::cout << ")\n";
     return true;
 }
 
 
 
 inline bool generate_lcc_graph_to_file(
-    int num_nodes, int lcc_percent, long long num_edges, int seed = -1)
+    int num_nodes, int lcc_percent, long long num_edges, int seed = -1,
+    int singleton_percent = 0)
 {
     if (num_nodes < 2) num_nodes = 2;
     if (lcc_percent < 1) lcc_percent = 1;
-    if (lcc_percent > 99) lcc_percent = 99;  
+    if (lcc_percent > 99) lcc_percent = 99;
+    if (singleton_percent < 0) singleton_percent = 0;
+    if (lcc_percent + singleton_percent > 99) singleton_percent = 99 - lcc_percent;
     int lcc_size = num_nodes * lcc_percent / 100;
     if (lcc_size < 1) lcc_size = 1;
     if (lcc_size > num_nodes - 1) lcc_size = num_nodes - 1;
+    int singleton_count = num_nodes * singleton_percent / 100;
+    if (singleton_percent > 0 && singleton_count < 1) singleton_count = 1;
     long long min_edges = num_nodes;
     if (num_edges < min_edges) num_edges = min_edges;
     if (seed == -1) seed = (int)std::time(nullptr);
@@ -650,7 +697,14 @@ inline bool generate_lcc_graph_to_file(
     std::string name = "lcc_" + std::to_string(lcc_percent) + "pct_"
                        + std::to_string(num_nodes) + "_"
                        + std::to_string(num_edges) + ".txt";
-    bool ok = stream_lcc_to_file(num_nodes, lcc_size, num_edges, seed, name);
+    if (singleton_percent > 0) {
+        name = "lcc_" + std::to_string(lcc_percent) + "pct_"
+               + std::to_string(singleton_percent) + "single_"
+               + std::to_string(num_nodes) + "_"
+               + std::to_string(num_edges) + ".txt";
+    }
+    int es = (singleton_percent > 0) ? singleton_count : -1;
+    bool ok = stream_lcc_to_file(num_nodes, lcc_size, num_edges, seed, name, es);
     return ok;
 }
 
