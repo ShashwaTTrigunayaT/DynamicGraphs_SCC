@@ -89,7 +89,7 @@
   <li><a href="#bigwins">🚀 BIG WINS (Major Impact)</a></li>
   <li><a href="#kept">✅ KEPT (Smaller Impact / Correctness)</a></li>
   <li><a href="#reverted">🔴 REVERTED (Didn't Work / Regressed)</a></li>
-  <li><a href="#performance">📊 Performance Summary</a></li>
+
   <li><a href="#issues">🐛 Known Issues</a></li>
   <li><a href="#quickref">📌 Quick Reference</a></li>
 </ol>
@@ -117,19 +117,7 @@ Input Graph → TRIM1 → COMPACT → GLOBAL BFS → TRIM1/2 → WCC → GPU Bat
                           Parallelization)           Limit Fix)    SMEM Hash Table)
 </div>
 
-<h3>Final Benchmark Quick Reference</h3>
-<table>
-<tr><th>Dataset</th><th>Edges</th><th>OpenMP</th><th>CUDA ALGO</th><th>Speedup</th></tr>
-<tr><td>p2p-Gnutella31</td><td>148K</td><td>2.63ms</td><td>4.67ms</td><td><span class="badge yellow">0.6×</span></td></tr>
-<tr><td>soc-Epinions1</td><td>509K</td><td>4.87ms</td><td><strong>3.46ms</strong></td><td><span class="badge green">1.4×</span></td></tr>
-<tr><td>web-Stanford</td><td>2.3M</td><td>69.65ms</td><td><strong>31.08ms</strong></td><td><span class="badge green">2.2× 🚀</span></td></tr>
-<tr><td>wiki-Talk</td><td>5.0M</td><td>13.68ms</td><td><strong>5.35ms</strong></td><td><span class="badge green">2.6× 🚀</span></td></tr>
-<tr><td>soc-Pokec</td><td>30.6M</td><td>17.53ms</td><td><strong>10.50ms</strong></td><td><span class="badge green">1.7×</span></td></tr>
-<tr><td>wikipedia-20070206</td><td>45.0M</td><td>52.90ms</td><td><strong>41.87ms</strong></td><td><span class="badge green">1.3×</span></td></tr>
-<tr><td>soc-LiveJournal1</td><td>68.5M</td><td>44.09ms</td><td><strong>23.63ms</strong></td><td><span class="badge green">1.9×</span></td></tr>
-<tr><td>ljournal-2008</td><td>78.0M</td><td>50.82ms</td><td><strong>28.34ms</strong></td><td><span class="badge green">1.8× 🚀</span></td></tr>
-<tr style="background:#d1fae5;"><td><strong>indochina-2004</strong></td><td><strong>194M</strong></td><td>~3,200ms</td><td><strong>~588ms</strong></td><td><span class="badge green"><strong>4.8× 🚀🚀</strong></span></td></tr>
-</table>
+
 
 
 <!-- ================================================================ -->
@@ -560,47 +548,7 @@ Input Graph → TRIM1 → COMPACT → GLOBAL BFS → TRIM1/2 → WCC → GPU Bat
 </div>
 
 
-<!-- ================================================================ -->
-<h2 id="performance">📊 Performance Summary</h2>
-<!-- ================================================================ -->
 
-<h3>indochina-2004 (7.4M nodes, 194M edges) — Final Numbers</h3>
-<table>
-<tr><th>Metric</th><th>Value</th></tr>
-<tr><td><strong>CUDA ALGO_TIME</strong></td><td><strong>~588ms</strong> (GPU compute only)</td></tr>
-<tr><td><strong>CUDA TOTAL (wall)</strong></td><td><strong>~660ms</strong> (incl. H2D/D2H ~33ms)</td></tr>
-<tr><td><strong>OpenMP TOTAL</strong></td><td>~3,200ms</td></tr>
-<tr><td><strong>Speedup</strong></td><td><strong>~4.8× faster</strong></td></tr>
-<tr><td><strong>WCC (largest phase)</strong></td><td>193-239ms</td></tr>
-<tr><td><strong>TRIM1 (second largest)</strong></td><td>203ms</td></tr>
-<tr><td><strong>GPU batch kernel</strong></td><td>26ms kernel + 15ms scatter (~7% of total)</td></tr>
-<tr><td><strong>Levels converged</strong></td><td>~1,150 (fully converged, 0 leftover)</td></tr>
-<tr><td><strong>SCC count (CUDA)</strong></td><td>1,744,376 (vs OpenMP 1,749,051)</td></tr>
-<tr><td><strong>SCC gap</strong></td><td><strong>-4,675 (0.27%)</strong> — algorithmic, understood</td></tr>
-</table>
-
-<h3>Optimization Impact Timeline</h3>
-<table>
-<tr><th>Date</th><th>Change</th><th>indochina-2004 ALGO</th><th>Cumulative</th></tr>
-<tr><td>Jun 25</td><td>Baseline (with D2H→H2D FB)</td><td>~1,052ms</td><td>—</td></tr>
-<tr><td>Jun 25</td><td>GPU-Only FB (eliminate FB transfers)</td><td>~1,050ms</td><td>FB faster (-99% H2D/D2H)</td></tr>
-<tr><td>Jun 29</td><td>SMEM Hash Table (+ all GLOBAL_BFS opts)</td><td>~780ms</td><td>-26% from FB improvements</td></tr>
-<tr><td>Jun 30</td><td>__ldg() + 4× unroll TRIM1 + 100K threshold</td><td>~720ms</td><td>TRIM1 -61%</td></tr>
-<tr><td>Jul 4</td><td>GPU batch kernel bug fixes (4 fixes)</td><td><strong>~588ms</strong></td><td><strong>-45% from baseline 🚀</strong></td></tr>
-<tr><td colspan="4"><em>Note: Time improvements on indochina-2004 are approximate — many optimizations were measured on smaller datasets (Pokec, ljournal-2008, web-Stanford) where the per-phase impact was directly measurable. The ~588ms final number includes all cumulative improvements plus thermal/run-to-run variation.</em></td></tr>
-</table>
-
-<h3>Per-Phase Comparison (ljournal-2008 — 78M edges)</h3>
-<table>
-<tr><th>Phase</th><th>Before (D2H FB)</th><th>After (GPU-Only FB)</th><th>Δ</th></tr>
-<tr><td>TRIM1</td><td>3.71ms</td><td>3.71ms</td><td>Same</td></tr>
-<tr><td>GLOBAL_BFS</td><td>15.74ms</td><td>15.74ms</td><td>Same</td></tr>
-<tr><td>TRIM12</td><td>2.54ms</td><td>2.54ms</td><td>Same</td></tr>
-<tr><td>WCC</td><td>4.25ms</td><td>4.25ms</td><td>Same</td></tr>
-<tr style="background:#d1fae5;"><td><strong>FB</strong></td><td><strong>~42ms (with transfers)</strong></td><td><strong>2.35ms</strong></td><td><span class="badge green">-94% 🚀</span></td></tr>
-<tr style="background:#fee2e2;"><td><strong>H2D/D2H</strong></td><td><strong>40.40ms</strong></td><td><strong>0.35ms</strong></td><td><span class="badge green">-99% 🚀</span></td></tr>
-<tr style="font-weight:600;"><td><strong>TOTAL</strong></td><td><strong>69.26ms</strong></td><td><strong>28.69ms</strong></td><td><span class="badge green">-59%</span></td></tr>
-</table>
 
 
 <!-- ================================================================ -->
