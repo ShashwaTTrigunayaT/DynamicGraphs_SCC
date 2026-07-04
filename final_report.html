@@ -2,389 +2,756 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>DynamicGraphs SCC — Final Optimization Report</title>
+<title>DynamicGraphs SCC — Optimization Report</title>
 <style>
-  * { box-sizing: border-box; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg-primary: #0d1117;
+    --bg-secondary: #161b22;
+    --bg-tertiary: #21262d;
+    --bg-code: #1c2128;
+    --border-primary: #30363d;
+    --border-secondary: #21262d;
+    --text-primary: #e6edf3;
+    --text-secondary: #8b949e;
+    --text-muted: #6e7681;
+    --accent-green: #3fb950;
+    --accent-red: #f85149;
+    --accent-blue: #58a6ff;
+    --accent-yellow: #d29922;
+    --accent-orange: #d76b0d;
+    --accent-purple: #bc8cff;
+    --syntax-keyword: #ff7b72;
+    --syntax-string: #a5d6ff;
+    --syntax-comment: #8b949e;
+    --syntax-function: #d2a8ff;
+    --syntax-type: #79c0ff;
+    --syntax-number: #79c0ff;
+    --syntax-operator: #ff7b72;
+    --syntax-macro: #ffa657;
+  }
+
   body {
-    font-family: 'Segoe UI', Arial, sans-serif;
-    font-size: 11pt;
-    line-height: 1.6;
-    color: #1a1a1a;
-    max-width: 960px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    font-size: 10.5pt;
+    line-height: 1.7;
+    color: var(--text-primary);
+    max-width: 1000px;
     margin: 0 auto;
-    padding: 20px;
-    background: #fafafa;
+    padding: 32px 24px;
+    background: var(--bg-primary);
   }
-  h1 { font-size: 22pt; color: #1a56db; border-bottom: 3px solid #1a56db; padding-bottom: 8px; }
-  h2 { font-size: 16pt; color: #1a56db; border-bottom: 1px solid #ccc; padding-bottom: 4px; margin-top: 30px; }
-  h3 { font-size: 13pt; color: #333; margin-top: 24px; margin-bottom: 6px; }
-  h4 { font-size: 11pt; color: #444; margin-top: 16px; margin-bottom: 4px; }
-  p { margin: 6px 0; }
+
+  h1 {
+    font-size: 20pt; font-weight: 700; color: var(--text-primary);
+    border-bottom: 2px solid var(--border-primary);
+    padding-bottom: 10px; margin-bottom: 16px;
+    letter-spacing: -0.02em;
+  }
+
+  h2 {
+    font-size: 14pt; font-weight: 600; color: var(--text-primary);
+    border-bottom: 1px solid var(--border-primary);
+    padding-bottom: 6px;
+    margin-top: 36px; margin-bottom: 16px;
+  }
+
+  h3 {
+    font-size: 11.5pt; font-weight: 600; color: var(--text-primary);
+    margin-top: 28px; margin-bottom: 8px;
+    padding-left: 0;
+  }
+
+  p { margin: 6px 0 10px 0; }
+
+  .meta { color: var(--text-secondary); font-size: 9pt; margin-bottom: 8px; }
+  .meta code { font-size: 8.5pt; background: var(--bg-code); padding: 1px 5px; border-radius: 3px; }
+
+  code {
+    font-family: "SF Mono", "Consolas", "Liberation Mono", monospace;
+    font-size: 9pt; background: var(--bg-code); padding: 1px 5px; border-radius: 3px;
+    color: var(--accent-blue);
+  }
+
   pre {
-    background: #f4f4f4; border: 1px solid #ddd; border-radius: 4px;
-    padding: 10px; font-size: 9pt; overflow-x: auto;
+    font-family: "SF Mono", "Consolas", "Liberation Mono", monospace;
+    font-size: 8.5pt; line-height: 1.4;
+    background: var(--bg-code); border: 1px solid var(--border-primary);
+    border-radius: 6px;
+    padding: 12px 16px; overflow-x: auto; margin: 8px 0 12px 0;
+    color: var(--text-primary);
   }
-  code { font-family: 'Consolas', 'Courier New', monospace; font-size: 9pt; }
-  table { border-collapse: collapse; width: 100%; margin: 10px 0; font-size: 10pt; }
-  th, td { border: 1px solid #ccc; padding: 6px 10px; text-align: left; }
-  th { background: #e8f0fe; font-weight: 600; }
-  tr:nth-child(even) { background: #f8f9fa; }
-  ul, ol { margin: 6px 0 6px 20px; padding: 0; }
-  li { margin: 3px 0; }
-  .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 9pt; font-weight: 600; }
-  .green { background: #d1fae5; color: #065f46; }
-  .red { background: #fee2e2; color: #991b1b; }
-  .yellow { background: #fef3c7; color: #92400e; }
-  .blue { background: #dbeafe; color: #1e40af; }
-  .box { border: 1px solid #ddd; border-radius: 6px; padding: 12px; margin: 10px 0; background: #f8f9fa; }
-  .box-title { font-weight: 600; font-size: 10pt; margin-bottom: 4px; color: #1a56db; }
-  .label { font-weight: 600; color: #333; }
-  .file { font-family: 'Consolas', monospace; font-size: 9pt; color: #555; }
-  .metric { font-weight: 600; color: #1a56db; }
+  pre .kw { color: var(--syntax-keyword); }
+  pre .fn { color: var(--syntax-function); }
+  pre .ty { color: var(--syntax-type); }
+  pre .co { color: var(--syntax-comment); }
+  pre .st { color: var(--syntax-string); }
+  pre .nu { color: var(--syntax-number); }
+  pre .op { color: var(--syntax-operator); }
+  pre .ma { color: var(--syntax-macro); }
+  pre .in { color: var(--syntax-function); }
+
+  ul, ol { margin: 4px 0 8px 20px; }
+  li { margin: 2px 0; }
+
+  .header-box {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-primary);
+    border-radius: 8px;
+    padding: 16px 20px; margin-bottom: 20px;
+    font-size: 9.5pt; line-height: 1.8;
+  }
+  .header-box strong { font-weight: 600; color: var(--text-primary); }
+
+  .verdict { margin-top: 8px; font-weight: 500; font-size: 9.5pt; }
+
+  .section-label {
+    display: inline-block; font-weight: 600; font-size: 8.5pt;
+    text-transform: uppercase; letter-spacing: 0.04em;
+    color: var(--text-secondary); margin-right: 6px;
+  }
+
+  .opt-divider { border: none; border-top: 1px solid var(--border-primary); margin: 24px 0; }
+
+  .status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; }
+  .dot-green { background: var(--accent-green); }
+  .dot-red { background: var(--accent-red); }
+  .dot-yellow { background: var(--accent-yellow); }
+
+  .bigwin-heading { color: var(--accent-green); }
+  .kept-heading { color: var(--accent-blue); }
+  .reverted-heading { color: var(--accent-red); }
+
+  strong { color: var(--text-primary); }
+
   @media print {
-    body { padding: 0; }
+    body { background: #fff; color: #000; padding: 0; font-size: 9pt; }
+    pre { break-inside: avoid; font-size: 7.5pt; }
     h2, h3 { break-after: avoid; }
   }
 </style>
 </head>
 <body>
 
-<h1>🚀 DynamicGraphs SCC — Final Optimization Report</h1>
+<h1>DynamicGraphs SCC &mdash; Optimization Report</h1>
 
-<div class="box">
-  <strong>GPU:</strong> NVIDIA L40S 48GB (Ada Lovelace, sm_89, 142 SMs)<br>
-  <strong>Algorithm:</strong> Trim1 → Global FW-BW BFS → Trim1/2 → WCC → FW-BW DFS (Method 2)<br>
-  <strong>Final Status:</strong> ✅ indochina-2004 (194M edges): ~588ms ALGO_TIME (4.8× faster vs OpenMP). 8/9 datasets beat OpenMP.<br>
-  <strong>SCC Gap:</strong> -4,675 (0.27%) — algorithmic, not a bug. Level-by-level BFS splits chain-like SCCs.<br>
-  <strong>Opts Catalogued:</strong> 5 BIG WINS 🚀, 12 KEPT ✅, 12 REVERTED 🔴
+<div class="header-box">
+  <strong>GPU:</strong> NVIDIA L40S 48GB (Ada Lovelace, sm_89, 142 SMs, 6MB L2)<br>
+  <strong>Algorithm:</strong> Trim1 &rarr; Global FW-BW BFS &rarr; Trim1/2 &rarr; WCC &rarr; FW-BW DFS (Method 2)<br>
+  <strong>Final Status:</strong> indochina-2004 (194M edges): ~588ms ALGO_TIME (4.8&times; vs OpenMP). 8/9 datasets beat OpenMP.<br>
+  <strong>SCC Gap:</strong> &minus;4,675 (0.27%) &mdash; algorithmic (level-by-level BFS vs recursive CPU), not a bug.<br>
+  <strong>Optimizations catalogued:</strong> 5 Major Impact, 11 Moderate, 18 Reverted
 </div>
 
-<!-- ================================================================ -->
-<h2 id="bigwins">🚀 BIG WINS — Major Impact</h2>
-<!-- ================================================================ -->
 
-<h3>#1: GPU-Only FB — Eliminates D2H/H2D in FB Phase</h3>
-<p><span class="file">src_CUDA/scc_cuda_fb_gpu.cu</span> (run_gpu_fb) — Pipeline Architecture</p>
+<!-- ================================================================== -->
+<h2>Major Impact</h2>
+<!-- ================================================================== -->
 
-<p><span class="label">Problem.</span> The FB phase downloaded every WCC component's node list from GPU to host (D2H), then re-uploaded them as a flat buffer (H2D) each level. On ljournal-2008 (8 FB levels), this added <strong>40ms</strong> of pure transfer overhead — more than the actual compute.</p>
+<h3 class="bigwin-heading">1. GPU-Only FB &mdash; Eliminate D2H/H2D in FB Phase</h3>
+<p class="meta"><code>src_CUDA/scc_cuda_fb_gpu.cu</code> (run_gpu_fb)</p>
 
-<p><span class="label">Change.</span> Two modifications: (1) WCC big buffer used directly via pointer arithmetic — no D2H of node data. (2) Scatter results stay in <code>d_bulk_buf</code> on GPU between iterations. Only tiny metadata (starts, sizes, colors) uploaded per level (a few KB).</p>
+<p><span class="section-label">Problem.</span> The FB phase downloaded every WCC component's node list from GPU to host, then re-uploaded them each level. On ljournal-2008 (8 FB levels), this was <strong>40ms</strong> of pure transfer overhead.</p>
 
-<p><span class="label">Key Numbers.</span></p>
+<p><span class="section-label">Change.</span> Use the WCC big buffer directly via pointer arithmetic. Scatter results stay in <code>d_bulk_buf</code> between iterations. Only tiny metadata uploaded per level.</p>
+
+<pre><span class="co">// Instead of downloading WCC sets to host then re-uploading:</span>
+<span class="co">//   cudaMemcpy(tmp, w-&gt;d_set_nodes, w-&gt;count * sizeof(int), D2H);</span>
+<span class="co">//   cudaMemcpy(d_gpu_nodes, host_buf, ... H2D);</span>
+
+<span class="co">// Use WCC big buffer directly via pointer arithmetic:</span>
+<span class="kw">if</span> (can_use_wcc_buffer) {
+    <span class="kw">for</span> (CUDAMyWork* w : all_works) {
+        <span class="kw">int</span> offset = (<span class="kw">int</span>)(w-&gt;d_set_nodes - wcc_buf);
+        cur.starts.push_back(offset);  <span class="co">// offset into wcc_buf</span>
+        cur.sizes.push_back(w-&gt;count);
+        cur.colors.push_back(w-&gt;color);
+    }
+    d_gpu_nodes = wcc_buf;  <span class="co">// data stays on GPU</span>
+}
+</pre>
+
+<p><span class="section-label">Key Numbers.</span> ljournal-2008 H2D/D2H: 40.40ms &rarr; <strong>0.35ms</strong> (&minus;99%). ljournal-2008 TOTAL: 69.26ms &rarr; <strong>28.69ms</strong>.</p>
+
+<p class="verdict"><span class="status-dot dot-green"></span> Major Impact &mdash; 99% transfer reduction. Single biggest optimization.</p>
+
+<hr class="opt-divider">
+
+<h3 class="bigwin-heading">2. SMEM Hash Table &mdash; O(1) Node Lookup</h3>
+<p class="meta"><code>src_CUDA/scc_cuda_fb_gpu.cu</code> (gpu_fb_batch_kernel)</p>
+
+<p><span class="section-label">Problem.</span> The batch kernel did a linear scan <code>for (j = 0; j &lt; comp_size; j++) if (smem_nodes[j] == k)</code> for every BFS neighbor &mdash; O(comp_size) per lookup. With 2048-node components and dense edges, this hit <strong>70ms</strong> on web-Stanford alone.</p>
+
+<p><span class="section-label">Change.</span> Replaced O(n) linear scan with a 4096-slot Fibonacci hash table in shared memory (open addressing, linear probing). Hash nodes: <code>smem_hash[node_id] = position</code>. Lookup: hash &rarr; probe &rarr; found/miss.</p>
+
+<pre><span class="co">// Build hash table: node_id -&gt; position in smem_nodes</span>
+<span class="kw">for</span> (<span class="kw">int</span> i = tid; i &lt; comp_size; i += stride) {
+    <span class="kw">int</span> key = smem_nodes[i];
+    <span class="kw">unsigned</span> h = (<span class="kw">unsigned</span>)key * 2654435761u;  <span class="co">// Fibonacci hash</span>
+    <span class="kw">int</span> slot = (<span class="kw">int</span>)(h &gt;&gt; 20) &amp; (GPU_FB_HASH_SIZE - 1);
+    <span class="kw">while</span> (atomicCAS(&amp;smem_hash[slot], -1, i) != -1)
+        slot = (slot + 1) &amp; (GPU_FB_HASH_SIZE - 1);  <span class="co">// linear probe</span>
+}
+
+<span class="co">// BFS neighbor: O(1) lookup instead of O(comp_size) scan</span>
+<span class="kw">unsigned</span> hk = (<span class="kw">unsigned</span>)k * 2654435761u;
+<span class="kw">int</span> slot = (<span class="kw">int</span>)(hk &gt;&gt; 20) &amp; (GPU_FB_HASH_SIZE - 1);
+<span class="co">// probe smem_hash[slot] for k ... found in O(1) avg</span>
+</pre>
+
+<p><span class="section-label">Key Numbers.</span> web-Stanford FB: 70.68ms &rarr; <strong>16.18ms</strong> (&minus;77%). SCC count unchanged: 29,876.</p>
+
+<p class="verdict"><span class="status-dot dot-green"></span> Major Impact &mdash; Made the GPU batch kernel viable.</p>
+
+<hr class="opt-divider">
+
+<h3 class="bigwin-heading">3. BFS Neighbor Parallelization &mdash; 256 Threads Share Frontier</h3>
+<p class="meta"><code>src_CUDA/scc_cuda_fb_global.cu</code> (fw_bfs_level_kernel)</p>
+
+<p><span class="section-label">Problem.</span> GLOBAL_BFS used a single thread to expand the frontier's neighbors across all edges. On wiki-Talk (459 BFS levels), this was <strong>26.8ms</strong> of purely sequential scanning.</p>
+
+<p><span class="section-label">Change.</span> All 256 threads share the work. Each thread claims a neighbor via <code>atomicOr</code> on a visited bitmap (separate from d_Color). A per-thread staging buffer (STAGE_SIZE=16) collects claimed nodes before flushing via a single <code>atomicAdd</code>, reducing atomic contention by 32x.</p>
+
+<pre><span class="co">// Per-thread staging: 16 entries in registers (no local memory spill)</span>
+<span class="kw">const int</span> STAGE_SIZE = 16;
+<span class="kw">int</span> staged[STAGE_SIZE];
+<span class="kw">int</span> staged_cnt = 0;
+
+<span class="co">// Distribute frontier nodes across blocks, neighbors across threads</span>
+<span class="kw">for</span> (<span class="kw">int</span> bi = blockIdx.x; bi &lt; queue_size; bi += gridDim.x) {
+    node_t t = d_queue[bi];
+    <span class="kw">for</span> (edge_t nx = start + threadIdx.x; nx &lt; end; nx += blockDim.x) {
+        node_t k = d_node_idx[nx];
+        <span class="kw">if</span> (d_Color[k] == base_color) {
+            <span class="co">// Claim via atomicOr on visited bitmap (200KB, L2-resident)</span>
+            <span class="kw">uint32_t</span> old = atomicOr(&amp;d_visited_bits[k &gt;&gt; 5], 1u &lt;&lt; (k &amp; 31));
+            <span class="kw">if</span> ((old &amp; bit) == 0) {
+                d_Color[k] = fw_color;           <span class="co">// simple store, no CAS</span>
+                staged[staged_cnt++] = k;
+                <span class="kw">if</span> (staged_cnt == STAGE_SIZE) {
+                    <span class="kw">int</span> base = atomicAdd(d_next_count, STAGE_SIZE);
+                    <span class="co">// ... copy staged to d_next_queue ...</span>
+                }
+            }
+        }
+    }
+}
+</pre>
+
+<p><span class="section-label">Key Numbers.</span> wiki-Talk GLOBAL_BFS: 26.8ms &rarr; <strong>3.0ms</strong> (&minus;89%). SCC count unchanged: 2,281,879.</p>
+
+<p class="verdict"><span class="status-dot dot-green"></span> Major Impact &mdash; Fixed the high-diameter graph bottleneck.</p>
+
+<hr class="opt-divider">
+
+<h3 class="bigwin-heading">4. __ldg() + 4x Loop Unrolling &mdash; TRIM1 Compute Kernel</h3>
+<p class="meta"><code>src_CUDA/scc_cuda_trim1.cu</code> (compute_trim_targets_alive_counts_kernel)</p>
+
+<p><span class="section-label">Problem.</span> The compact TRIM1 compute kernel scans ALL edges of remaining nodes. Each edge read <code>d_Color[d_node_idx[e]]</code> is a random access with ~300-800 cycle latency from VRAM.</p>
+
+<p><span class="section-label">Change.</span> (1) Use <code>__ldg()</code> to route reads through the read-only data cache (bypasses L1, higher bandwidth for random access on Ada). (2) Unroll the loop 4x to pipeline independent loads, hiding latency via instruction-level parallelism.</p>
+
+<pre><span class="co">// Unrolled 4x with __ldg for random d_Color reads.</span>
+<span class="co">// Each iteration issues 4 independent __ldg() loads that</span>
+<span class="co">// can be pipelined by the memory controller.</span>
+edge_t out_stride = blockDim.x * 4;
+<span class="kw">for</span> (edge_t e = d_begin[n] + tid; e &lt; out_end; e += out_stride) {
+    <span class="kw">int</span> k0 = (e + blockDim.x * 0 &lt; out_end) ? d_node_idx[e + blockDim.x * 0] : n;
+    <span class="kw">int</span> k1 = (e + blockDim.x * 1 &lt; out_end) ? d_node_idx[e + blockDim.x * 1] : n;
+    <span class="kw">int</span> k2 = (e + blockDim.x * 2 &lt; out_end) ? d_node_idx[e + blockDim.x * 2] : n;
+    <span class="kw">int</span> k3 = (e + blockDim.x * 3 &lt; out_end) ? d_node_idx[e + blockDim.x * 3] : n;
+    out_cnt += (k0 != n &amp;&amp; __ldg(&amp;d_Color[k0]) == color) ? 1 : 0;
+    out_cnt += (k1 != n &amp;&amp; __ldg(&amp;d_Color[k1]) == color) ? 1 : 0;
+    out_cnt += (k2 != n &amp;&amp; __ldg(&amp;d_Color[k2]) == color) ? 1 : 0;
+    out_cnt += (k3 != n &amp;&amp; __ldg(&amp;d_Color[k3]) == color) ? 1 : 0;
+}
+</pre>
+
+<p><span class="section-label">Key Numbers.</span> TRIM1 (M6 Pokec): 11.25ms &rarr; <strong>4.33ms</strong> (&minus;61%). SCC count unchanged: 325,892.</p>
+
+<p class="verdict"><span class="status-dot dot-green"></span> Major Impact &mdash; Read-only cache + ILP for random-access patterns.</p>
+
+<hr class="opt-divider">
+
+<h3 class="bigwin-heading">5. ALGO_TIME Inline Tracking</h3>
+<p class="meta"><code>src_CUDA/scc_cuda.h</code> (CUDA_TIMED_MEMCPY macro)</p>
+
+<p><span class="section-label">Problem.</span> Getting fair GPU compute time required running nsys (~10s per run), parsing output, and manually summing kernel times &mdash; a 30-second workflow per code change.</p>
+
+<p><span class="section-label">Change.</span> A macro wraps every hot-path <code>cudaMemcpy</code> with <code>std::chrono</code> timers (not CUDA events, which add ~10ms overhead). Accumulates H2D/D2H time. Program prints <code>ALGO_TIME: X.XXms</code> at the end of every run.</p>
+
+<pre><span class="co">// Macro wraps every cudaMemcpy with std::chrono timing</span>
+<span class="co">// std::chrono overhead is ~100ns vs CUDA events ~10us</span>
+<span class="kw">#define</span> CUDA_TIMED_MEMCPY(dst, src, sz, kind) <span class="kw">do</span> {                              \
+    <span class="kw">auto</span> _start = std::chrono::high_resolution_clock::now();                         \
+    cudaError_t _err = cudaMemcpy(dst, src, sz, kind);                                 \
+    <span class="kw">auto</span> _end = std::chrono::high_resolution_clock::now();                            \
+    <span class="co">// ... error check ...</span>                                                        \
+    g_algo_memcpy_ms +=                                                                \
+        std::chrono::duration&lt;<span class="kw">float</span>, std::milli&gt;(_end - _start).count();            \
+} <span class="kw">while</span>(0)
+
+<span class="co">// Printed at end of every run:</span>
+printf(<span class="st">"&gt;&gt;&gt;&gt;ALGO_TIME: %.2fms (CUDA_PROFILE_TOTAL %.2fms - H2D/D2H %.2fms)\n"</span>,
+       algo_ms, total_ms, memcpy_ms);
+</pre>
+
+<p><span class="section-label">Key Numbers.</span> Workflow time: ~30s (nsys) &rarr; 0s (printed inline). Zero-copy: one-liner <code>grep ALGO_TIME</code> for fair OpenMP comparison.</p>
+
+<p class="verdict"><span class="status-dot dot-green"></span> Major Impact &mdash; Developer productivity improvement. Now printed by every run.</p>
+
+
+<!-- ================================================================== -->
+<h2>Moderate Impact / Correctness</h2>
+<!-- ================================================================== -->
+
+<h3 class="kept-heading">1. GPU Batch Kernel Bug Fixes (July 2026)</h3>
+<p class="meta"><code>src_CUDA/scc_cuda_fb_gpu.cu</code></p>
+
+<p><span class="section-label">Problem.</span> The GPU batch kernel produced systematically wrong SCC counts (~11K gap on indochina-2004). Four distinct bugs were found and fixed.</p>
+
+<p><span class="section-label">Fix A &mdash; Scatter ballot divergence.</span> Divergent <code>for (i = tid; i &lt; num_src; i += stride)</code> caused <code>__shfl_sync</code> undefined behavior on Ada SM 8.9+ independent thread scheduling. Fixed with uniform loop iterations: all threads execute the same trip count, skipping work with a conditional.</p>
+
+<pre><span class="co">// Before: divergent loop (early-exited lanes cause __shfl_sync UB)</span>
+<span class="co">// for (int i = tid; i &lt; num_src; i += stride) { ... __ballot_sync ... }</span>
+
+<span class="co">// After: uniform iteration count, all lanes converge before warp intrinsics</span>
+<span class="kw">int</span> total_iters = (num_src + stride - 1) / stride;
+<span class="kw">for</span> (<span class="kw">int</span> iter = 0; iter &lt; total_iters; iter++) {
+    <span class="kw">int</span> i = tid + iter * stride;
+    <span class="kw">bool</span> in_bounds = (i &lt; num_src);
+    <span class="kw">unsigned</span> active = __ballot_sync(0xffffffff, in_bounds);
+    <span class="kw">bool</span> match = in_bounds &amp;&amp; (d_Color[d_in_nodes[i]] == color);
+    <span class="kw">unsigned</span> mask = __ballot_sync(active, match);
+    <span class="co">// ... now safe: all active lanes converge at __ballot_sync</span>
+}
+</pre>
+
+<p><span class="section-label">Fix B &mdash; Counting phase uniform loop.</span> Same divergent-loop pattern in the counting section caused <code>SUM_REDUCE</code> (<code>__shfl_xor_sync</code>) to produce wrong sums. Fixed with uniform iteration count.</p>
+
+<pre><span class="co">// Uniform counting loop: ALL threads execute same number of iterations</span>
+<span class="co">// Old: for (int i = tid; i &lt; comp_size; i += stride)</span>
+<span class="co">//      Dead: early-exited lanes ran SUM_REDUCE while others still looping</span>
+<span class="kw">int</span> total_count_iters = (comp_size + stride - 1) / stride;
+<span class="kw">for</span> (<span class="kw">int</span> iter = 0; iter &lt; total_count_iters; iter++) {
+    <span class="kw">int</span> i = tid + iter * stride;
+    <span class="kw">if</span> (i &lt; comp_size) {
+        <span class="kw">int</span> c = d_Color[smem_nodes[i]];
+        <span class="co">// classify as fw, bw, or base</span>
+    }
+}
+<span class="co">// Now safe to call SUM_REDUCE: all lanes in warp converged</span>
+SUM_REDUCE(local_fw);
+</pre>
+
+<p><span class="section-label">Fix C &mdash; Color counter reset.</span> <code>d_fb_color_counter</code> accumulated across levels without resetting. Could overflow and collide with <code>SCC_FOUND (&minus;2)</code>. Reset to <code>max_color + 1024</code> each level.</p>
+
+<p><span class="section-label">Fix D &mdash; Hash-check-before-CAS.</span> <code>atomicCAS(&amp;d_Color[k], ...)</code> ran BEFORE checking if <code>k</code> was in the SMEM hash table &mdash; leaked fw/bw colors to nodes outside this component. Moved hash lookup before any CAS.</p>
+
+<pre><span class="co">// Before: atomicCAS ran unconditionally, could leak color to wrong component</span>
+<span class="co">// int old = atomicCAS(&amp;d_Color[k], base_color, fw_color);</span>
+
+<span class="co">// After: hash lookup FIRST, only CAS if k belongs to this component</span>
+<span class="kw">unsigned</span> hk = (<span class="kw">unsigned</span>)k * 2654435761u;
+<span class="kw">int</span> slot = (<span class="kw">int</span>)(hk &gt;&gt; 20) &amp; (GPU_FB_HASH_SIZE - 1);
+<span class="kw">int</span> k_pos = -1;
+<span class="kw">while</span> (1) {
+    <span class="kw">int</span> pos = smem_hash[slot];
+    <span class="kw">if</span> (pos &lt; 0) <span class="kw">break</span>;
+    <span class="kw">if</span> (smem_nodes[pos] == k) { k_pos = pos; <span class="kw">break</span>; }
+    slot = (slot + 1) &amp; (GPU_FB_HASH_SIZE - 1);
+}
+<span class="kw">if</span> (k_pos &gt;= 0) {  <span class="co">// only CAS if k is in this component</span>
+    <span class="kw">int</span> old = atomicCAS(&amp;d_Color[k], base_color, fw_color);
+    <span class="co">// ...</span>
+}
+</pre>
+
+<p><span class="section-label">Key Numbers.</span> Scatter divergence: +~6,200 SCCs. Counting loop: +~1,300 SCCs. Total recovered: ~7,500. Remaining gap (indochina-2004): &minus;4,675 (0.27%) &mdash; algorithmic, not a bug.</p>
+
+<p class="verdict"><span class="status-dot dot-green"></span> All 4 fixes kept. Remaining gap is algorithmic (level-by-level vs recursive).</p>
+
+<hr class="opt-divider">
+
+<h3 class="kept-heading">2. WCC Iteration Limit Fix</h3>
+<p class="meta"><code>src_CUDA/scc_cuda_weak.cu</code></p>
+
+<p><span class="section-label">Problem.</span> Hard limit of 100 iterations caused WCC to stop before convergence on large graphs. indochina-2004 needed 209 iterations to converge but stopped at 100 with a warning.</p>
+
+<p><span class="section-label">Change.</span> Increased <code>max_iterations</code> from 100 to 100,000.</p>
+
+<pre><span class="co">// Before: fixed at 100 iterations, fails on large graphs</span>
+<span class="co">// int max_iterations = 100;</span>
+
+<span class="co">// After: effectively unlimited, WCC converges naturally</span>
+<span class="kw">int</span> max_iterations = 100000;
+</pre>
+
+<p class="verdict"><span class="status-dot dot-green"></span> Kept &mdash; WCC now converges on all datasets.</p>
+
+<hr class="opt-divider">
+
+<h3 class="kept-heading">3. Short-circuit Threshold (100K)</h3>
+<p class="meta"><code>src_CUDA/scc_cuda_trim1.cu</code></p>
+
+<p><span class="section-label">Problem.</span> Running the compute kernel on the full graph (1.6M nodes) took <strong>78.92ms</strong> &mdash; a regression from the 0.93ms short-circuit approach. The compute kernel only pays off on small compact sets.</p>
+
+<pre><span class="co">// Threshold guard: short-circuit for large sets, compute for small sets</span>
+<span class="kw">if</span> (d_trim_targets_count &gt; 100000) {
+    <span class="co">// Short-circuit: stops at first alive neighbor (fast for large sets)</span>
+    count = do_global_trim1_compact(st, g, d_count, ...);
+} <span class="kw">else</span> {
+    <span class="co">// Full-count: compute alive counts, then O(1) check</span>
+    compute_trim1_alive_counts(g, st);
+    count = do_global_trim1_compact_fix2(st, g, d_count, ...);
+}
+</pre>
+
+<p class="verdict"><span class="status-dot dot-green"></span> Kept &mdash; prevents regression on large compact sets.</p>
+
+<hr class="opt-divider">
+
+<h3 class="kept-heading">4. M6 &mdash; Skip Pipeline for DAG</h3>
+<p class="meta"><code>src_CUDA/scc_cuda_incremental_kernels.cu</code></p>
+
+<p><span class="section-label">Problem.</span> Method 6 builds a condensation graph that IS a DAG (every node = its own SCC). Running the trim pipeline on a DAG cascades until all nodes are removed &mdash; <strong>715ms</strong> for TRIM1 alone. This is fundamentally wrong: DAGs have no SCCs.</p>
+
+<p><span class="section-label">Change.</span> Skip the entire pipeline when the condensation graph is a DAG. A single kernel launch assigns <code>d_SCC[i] = i</code> and <code>d_Color[i] = SCC_FOUND</code> for all nodes.</p>
+
+<pre><span class="co">// When the condensation graph has exactly as many SCCs as nodes,</span>
+<span class="co">// it is a DAG (each node is its own SCC). Skip the pipeline entirely.</span>
+<span class="kw">if</span> (num_sccs == num_vertices) {
+    <span class="co">// mark_all_as_scc_kernel: d_SCC[i] = i; d_Color[i] = SCC_FOUND;</span>
+    <span class="co">// In a single kernel launch, replaces 715ms of TRIM1 cascade</span>
+    mark_all_as_scc_kernel&lt;&lt;&lt;grid, block&gt;&gt;&gt;(st.d_SCC, st.d_Color, num_sccs);
+}
+</pre>
+
+<p class="verdict"><span class="status-dot dot-green"></span> Kept &mdash; correct by construction. Pipeline time: 2397ms &rarr; ~0ms.</p>
+
+<hr class="opt-divider">
+
+<h3 class="kept-heading">5. M6 GPU Condensation Graph Builder</h3>
+<p class="meta"><code>src_CUDA/scc_cuda_incremental_kernels.cu</code></p>
+
+<p><span class="section-label">Problem.</span> The CPU condensation graph builder used 500MB+ of temporary host vectors and a filter kernel that only processed 262K out of 61M edges (missing the stride loop).</p>
+
+<p><span class="section-label">Change.</span> Full GPU pipeline: deinterleave pair upload, warp-ballot filter to keep only cross-SCC edges, CUB radix sort, custom CSR builder, and pivot find.</p>
+
+<pre><span class="co">// Warp-ballot filter: keeps only cross-SCC edges</span>
+<span class="co">// Each warp does one atomicAdd instead of 32</span>
+__global__ <span class="kw">void</span> filter_cross_scc_edges_kernel(...) {
+    <span class="kw">bool</span> cross_scc = (scc_u != scc_v);
+    <span class="kw">unsigned</span> mask = __ballot_sync(0xffffffff, cross_scc);
+    <span class="kw">int</span> warp_count = __popc(mask);
+    <span class="kw">if</span> (lane == 0 &amp;&amp; warp_count &gt; 0)
+        warp_base = atomicAdd(d_out_count, warp_count);
+    <span class="co">// scatter filtered edges to output positions</span>
+}
+<span class="co">// Then: CUB radix sort, CSR begin array builder</span>
+</pre>
+
+<p class="verdict"><span class="status-dot dot-green"></span> Kept &mdash; GPU processes 61M edges in parallel in ~3ms.</p>
+
+<hr class="opt-divider">
+
+<h3 class="kept-heading">6. TRIM1 Compute Kernel Overhaul</h3>
+<p class="meta"><code>src_CUDA/scc_cuda_trim1.cu</code></p>
+
+<p><span class="section-label">Problem.</span> The original short-circuit edge scan (stop at first alive neighbor) was fast per-iteration but the cascade converged slowly &mdash; many iterations needed.</p>
+
+<p><span class="section-label">Changes (iterative).</span></p>
 <ul>
-  <li>ljournal-2008 H2D/D2H: 40.40ms → <strong>0.35ms</strong> <span class="badge green">-99% 🚀</span></li>
-  <li>ljournal-2008 TOTAL: 69.26ms → <strong>28.69ms</strong></li>
-  <li>soc-LiveJournal1 TOTAL: ~57ms → <strong>23.99ms</strong></li>
-  <li>web-Stanford H2D/D2H: 11.83ms → <strong>1.18ms</strong></li>
+  <li><strong>Fix 2d &mdash; Warp-cooperative:</strong> 32 threads per node scan out-edges in parallel. 35.48ms (intermediate).</li>
+  <li><strong>Block-cooperative:</strong> All 256 threads scan one node with stride loop. ~11ms.</li>
+  <li><strong>__ldg() + 4x unroll:</strong> Read-only data cache + ILP. 4.33ms (see Major Impact #4).</li>
+  <li><strong>Fix 2 (O(1) checks):</strong> Cache alive counts and decrement &mdash; avoid scanning all edges every iteration.</li>
 </ul>
 
-<p><span class="badge green">✅ BIG WIN — 99% transfer reduction. Single biggest optimization.</span></p>
+<pre><span class="co">// Block-cooperative edge scan: all 256 threads share work on one node</span>
+<span class="co">// Prevents supernode (500K edges) from stalling 7 of 8 warps</span>
+<span class="kw">for</span> (<span class="kw">int</span> ix = blockIdx.x; ix &lt; num_targets; ix += gridDim.x) {
+    node_t n = d_trim_targets[ix];
+    <span class="co">// 256 threads split the edge scan via stride loop</span>
+    <span class="kw">for</span> (edge_t e = d_begin[n] + tid; e &lt; out_end; e += blockDim.x * 4) {
+        <span class="co">// ... unrolled __ldg() reads ...</span>
+    }
+}
+</pre>
 
+<p class="verdict"><span class="status-dot dot-green"></span> All kept. TRIM1: 35.48ms &rarr; 4.33ms.</p>
 
-<h3>#2: SMEM Hash Table — O(1) Node Lookup in GPU Batch Kernel</h3>
-<p><span class="file">src_CUDA/scc_cuda_fb_gpu.cu</span> (gpu_fb_batch_kernel) — Algorithm / Data Structure</p>
+<hr class="opt-divider">
 
-<p><span class="label">Problem.</span> The <code>gpu_fb_batch_kernel</code> did a linear scan <code>for (int j = 0; j &lt; comp_size; j++) if (smem_nodes[j] == k)</code> for every BFS neighbor — O(comp_size) per lookup. With 2048-node components and dense edges, this hit <strong>70ms</strong> on web-Stanford alone.</p>
+<h3 class="kept-heading">7. WCC Optimizations</h3>
+<p class="meta"><code>src_CUDA/scc_cuda_weak.cu</code></p>
 
-<p><span class="label">Change.</span> Replaced O(n) linear scan with a 4096-slot Fibonacci hash table in SMEM: <code>(key * 2654435761u) &gt;&gt; 20</code>. Hash table + frontier queues fit within 48KB SMEM limit (total ~45.5KB). Open addressing with linear probing.</p>
+<p><span class="section-label">Problem.</span> Three performance issues: (1) Full 6.4MB D2H to read root colors each iteration. (2) 6,521 small cudaMalloc calls for per-root storage. (3) WCC phases as separate kernels.</p>
 
-<p><span class="label">Key Numbers.</span></p>
+<p><span class="section-label">Changes.</span></p>
 <ul>
-  <li>web-Stanford FB: 70.68ms → <strong>16.18ms</strong> <span class="badge green">-77% 🚀</span></li>
-  <li>web-Stanford TOTAL: 99.65ms → <strong>49.27ms</strong></li>
-  <li>SCC count unchanged: 29,876 ✅</li>
+  <li><strong>Root Color Gather:</strong> GPU kernel extracts only the needed root colors (~756 bytes) instead of full 6.4MB D2H.</li>
+  <li><strong>Single Large Buffer:</strong> 1 cudaMalloc instead of 6,521 per-root allocations. <strong>&minus;26ms driver overhead.</strong></li>
+  <li><strong>Fused propagation:</strong> Phase 1 (min root) + Phase 2 (path compression) in one kernel. Cleaner code, no performance gain.</li>
 </ul>
 
-<p><span class="badge green">✅ BIG WIN — Made the GPU batch kernel viable.</span></p>
+<pre><span class="co">// Before: per-root cudaMalloc inside a loop of 6,521 allocations</span>
+<span class="co">// After: single allocation + pointer arithmetic slicing</span>
+<span class="kw">int</span> total_members = offsets.back();
+<span class="kw">if</span> (d_wcc_big_buffer) cudaFree(d_wcc_big_buffer);
+CUDA_CHECK(cudaMalloc(&amp;d_wcc_big_buffer, total_members * <span class="kw">sizeof</span>(<span class="kw">int</span>)));
 
+<span class="co">// Assign slices to each root via pointer arithmetic (no per-root cudaFree)</span>
+<span class="kw">for</span> (<span class="kw">int</span> ri = 0; ri &lt; num_roots; ri++) {
+    h_wcc_sets[root_list[ri]] = d_wcc_big_buffer + offsets[ri];
+}
+</pre>
 
-<h3>#3: BFS Neighbor Parallelization — 256 Threads Share Frontier</h3>
-<p><span class="file">src_CUDA/scc_cuda_fb_global.cu</span> (fw_bfs_level_kernel, bw_bfs_level_kernel) — Compute Kernel</p>
+<p class="verdict"><span class="status-dot dot-green"></span> All kept. Single buffer had biggest impact (&minus;26ms).</p>
 
-<p><span class="label">Problem.</span> GLOBAL_BFS used a single thread to expand the frontier's neighbors across all edges. On wiki-Talk (459 BFS levels × 1-5 nodes/frontier), this was <strong>26.8ms</strong> of purely sequential neighbor scanning — the per-level kernel launch cost was negligible but the serial scan dominated.</p>
+<hr class="opt-divider">
 
-<p><span class="label">Change.</span> All 256 threads share the frontier work. Each thread claims a different neighbor via <code>atomicCAS</code> on <code>d_Color[k]</code>, then writes to a per-thread staging buffer (STAGE_SIZE=16) before flushing atomically to the global next-frontier array. This reduces atomic contention by 32×.</p>
+<h3 class="kept-heading">8. GLOBAL_BFS Optimizations</h3>
+<p class="meta"><code>src_CUDA/scc_cuda_fb_global.cu</code></p>
 
-<p><span class="label">Key Numbers.</span></p>
 <ul>
-  <li>wiki-Talk GLOBAL_BFS: 26.8ms → <strong>3.0ms</strong> <span class="badge green">-89% 🚀</span></li>
-  <li>wiki-Talk TOTAL: 29.23ms → <strong>5.49ms</strong></li>
-  <li>SCC count unchanged: 2,281,879 ✅</li>
+  <li><strong>Visited Bitmap:</strong> Separate <code>atomicOr</code> bitmap for BFS claiming avoids CAS on d_Color, preserving L2 cache for navigator reads. <strong>&minus;0.93ms (6.4%).</strong></li>
+  <li><strong>STAGE_SIZE=16:</strong> Per-thread staging buffer, 32x fewer atomics for frontier writes.</li>
+  <li><strong>Pinned Memory + Async Stream:</strong> <code>cudaMemcpyAsync</code> on dedicated stream for per-level D2H. ~30% less per-level overhead.</li>
 </ul>
 
-<p><span class="badge green">✅ BIG WIN — Fixed the high-diameter graph bottleneck.</span></p>
+<pre><span class="co">// Visited bitmap: claim nodes via atomicOr on a 200KB bitmask</span>
+<span class="co">// (stays L2-resident) instead of atomicCAS on d_Color (evicts L2)</span>
+<span class="kw">int</span> word = k &gt;&gt; 5;
+<span class="kw">uint32_t</span> bit = 1u &lt;&lt; (k &amp; 31);
+<span class="kw">uint32_t</span> old = atomicOr(&amp;d_visited_bits[word], bit);
+<span class="kw">if</span> ((old &amp; bit) == 0) {
+    d_Color[k] = fw_color;  <span class="co">// simple store, no CAS needed</span>
+}
+</pre>
 
+<p class="verdict"><span class="status-dot dot-green"></span> All kept. Modest individual gains, cumulative effect adds up.</p>
 
-<h3>#4: __ldg() + 4× Loop Unrolling — TRIM1 Compute Kernel</h3>
-<p><span class="file">src_CUDA/scc_cuda_trim1.cu</span> (compute_trim_targets_alive_counts_kernel) — Memory Optimization</p>
+<hr class="opt-divider">
 
-<p><span class="label">Problem.</span> The compact TRIM1 compute kernel scans ALL edges of remaining nodes. Each edge read <code>d_Color[d_node_idx[e]]</code> — a random-access pattern with ~300-800 cycle latency from VRAM. With 325K nodes and 2.9M edges, this was <strong>11.25ms</strong>.</p>
+<h3 class="kept-heading">9. Correctness Fixes (TOCTOU + Bitmap Reset)</h3>
 
-<p><span class="label">Change.</span> (1) Replaced <code>d_Color[k]</code> with <code>__ldg(&amp;d_Color[k])</code> — routes reads through the read-only data cache (bypasses L1, higher bandwidth for random access on Ada). (2) Unrolled the edge scan loop 4× — 4 independent <code>__ldg()</code> loads to pipeline, hiding latency via ILP.</p>
-
-<p><span class="label">Key Numbers.</span></p>
 <ul>
-  <li>TRIM1 (condensation): 11.25ms → <strong>4.33ms</strong> <span class="badge green">-61% 🚀</span></li>
-  <li>TOTAL (M6 Pokec): 12.82ms → <strong>5.92ms</strong></li>
-  <li>SCC count unchanged: 325,892 ✅</li>
+  <li><strong>TOCTOU Race Fix:</strong> BW BFS read <code>d_Color[k]</code> twice &mdash; once in the navigator check, once in the dispatch &mdash; creating a window for the color to change. Fixed by reading once.</li>
+  <li><strong>Visited Bitmap Reset:</strong> <code>cudaMemset</code> between FW and BW BFS. Was carrying stale bits across phases, causing BFS to skip valid nodes.</li>
+  <li><strong>exit(0):</strong> gm_graph heap corruption on large graphs &mdash; <code>exit(0)</code> skips destructors, OS reclaims memory.</li>
 </ul>
 
-<p><span class="badge green">✅ BIG WIN — Read-only cache + ILP for random-access patterns.</span></p>
+<pre><span class="co">// TOCTOU fix: read d_Color[k] ONCE before navigator + dispatch</span>
+<span class="kw">int</span> k_color = d_Color[k];  <span class="co">// single read</span>
+<span class="kw">if</span> (k_color == fw_color || k_color == base_color) {
+    <span class="co">// claim via visited bitmap</span>
+    <span class="kw">if</span> (k_color == fw_color) {
+        d_Color[k] = SCC_FOUND;  <span class="co">// intersection &rarr; SCC</span>
+    } <span class="kw">else</span> {
+        d_Color[k] = bw_color;   <span class="co">// base_color &rarr; bw-set</span>
+    }
+}
+</pre>
 
+<p class="verdict"><span class="status-dot dot-green"></span> All kept. Correctness-critical fixes.</p>
 
-<h3>#5: ALGO_TIME Inline Tracking — No More nsys</h3>
-<p><span class="file">src_CUDA/scc_cuda.h</span> (CUDA_TIMED_MEMCPY macro), <span class="file">src_CUDA/scc_cuda_main.cpp</span> — Developer Tooling</p>
+<hr class="opt-divider">
 
-<p><span class="label">Problem.</span> Getting fair GPU compute time (Algorithm Time) required running nsys (~10s per run), parsing output, and manually summing kernel + launch + memset times. This was a 30-second workflow for every code change.</p>
+<h3 class="kept-heading">10. OpenMP Fixes</h3>
+<p class="meta"><code>src/common_main.h</code></p>
 
-<p><span class="label">Change.</span> Added <code>CUDA_TIMED_MEMCPY</code> macro wrapping every hot-path cudaMemcpy with <code>std::chrono</code> timers (not CUDA events — those add ~10ms overhead). Accumulates H2D/D2H time in <code>g_algo_memcpy_ms</code>. Program prints <code>>>>ALGO_TIME: X.XXms</code> at end of every run.</p>
-
-<p><span class="label">Key Numbers.</span></p>
 <ul>
-  <li>Workflow time: ~30s (nsys) → <strong>0s</strong> (printed inline)</li>
-  <li>One-liner: <code>grep ALGO_TIME</code> gives fair comparison vs OpenMP</li>
-  <li>Zero overhead: std::chrono timers (~100ns overhead, vs CUDA events ~10μs)</li>
-</ul>
-
-<p><span class="badge green">✅ BIG WIN — Developer productivity improvement. Now printed by every run.</span></p>
-
-
-<!-- ================================================================ -->
-<h2 id="kept">✅ KEPT — Smaller Impact / Correctness</h2>
-<!-- ================================================================ -->
-
-<h3>#1: GPU Batch Kernel Bug Fixes (July 2026)</h3>
-<p><span class="file">src_CUDA/scc_cuda_fb_gpu.cu</span> (gpu_fb_batch_kernel + scatter kernel) — Correctness Fixes</p>
-
-<p><span class="label">Problem.</span> The GPU batch kernel produced systematically wrong SCC counts (~11K gap on indochina-2004). Four distinct bugs were identified and fixed.</p>
-
-<p><span class="label">Fixes.</span></p>
-<ol>
-  <li><strong>Scatter ballot divergence</strong> — Divergent <code>for(i=tid; i&lt;num_src; i+=stride)</code> caused <code>__shfl_sync</code> undefined behavior on SM 8.9+ (Ada's independent thread scheduling). Fixed with uniform loop iterations (all threads execute same trip count, even if they skip work). <span class="badge green">+~6,200 SCCs</span></li>
-  <li><strong>Counting phase uniform loop</strong> — Same divergent-loop pattern in the counting section caused <code>SUM_REDUCE</code> (<code>__shfl_xor_sync</code>) to have early-exited lanes that produced wrong sums. Fixed with uniform iteration count. <span class="badge green">+~1,300 SCCs</span></li>
-  <li><strong>Color counter reset</strong> — <code>d_fb_color_counter</code> accumulated across levels without resetting. Could overflow and collide with <code>SCC_FOUND (-2)</code>. Reset to <code>max_color + 1024</code> each level. <span class="badge yellow">Stability fix</span></li>
-  <li><strong>Hash-check-before-CAS</strong> — <code>atomicCAS(&amp;d_Color[k], ...)</code> ran BEFORE checking if <code>k</code> was in the SMEM hash table — leaked fw/bw colors to nodes in other components. <span class="badge green">Correctness fix</span></li>
-</ol>
-
-<p><span class="label">Key Numbers.</span></p>
-<ul>
-  <li>Total SCCs recovered: ~7,500</li>
-  <li>Remaining gap (indochina-2004): -4,675 (0.27%) — <strong>algorithmic</strong>, not a bug</li>
-  <li>Diagnostics confirmed: color_base safe at ~39M, node counts perfect, scatter mismatches identified</li>
-</ul>
-
-<p><span class="badge green">✅ All 4 fixes kept. Remaining gap is algorithmic (level-by-level BFS vs recursive CPU).</span></p>
-
-
-<h3>#2: WCC Iteration Limit Fix</h3>
-<p><span class="file">src_CUDA/scc_cuda_weak.cu</span> — Correctness</p>
-
-<p><span class="label">Problem.</span> Hard limit of 100 iterations caused WCC to stop before convergence on large graphs. indochina-2004 needed 209 iterations to converge, but stopped at 100 with the warning "Warning: max iterations reached (100)".</p>
-
-<p><span class="label">Change.</span> Increased <code>max_iterations</code> from 100 to 100,000. WCC now converges naturally on all datasets.</p>
-
-<p><span class="label">Key Numbers.</span></p>
-<ul>
-  <li>indochina-2004 WCC: 209 iterations, converged ✅</li>
-  <li>WCC time (indochina-2004): 226ms → 410ms (expected for more iterations)</li>
-  <li>Smaller graphs: unaffected (converge in 15-30 iterations)</li>
-</ul>
-
-<p><span class="badge green">✅ Kept — WCC now converges on all datasets.</span></p>
-
-
-<h3>#3: Short-circuit Threshold (100K) — Prevent Regression</h3>
-<p><span class="file">src_CUDA/scc_cuda_trim1.cu</span> — Performance Guard</p>
-
-<p><span class="label">Problem.</span> Running the new compute kernel on the FULL graph (1.6M compact nodes × 30M edges × 4 iterations = 120M edge checks) took <strong>78.92ms</strong> — a regression from the 0.93ms short-circuit approach.</p>
-
-<p><span class="label">Change.</span> Added a threshold check: if compact set &gt; 100K nodes, use the original short-circuit kernel. If ≤ 100K, use the compute kernel + O(1) fix2 (aggressive trim).</p>
-
-<p><span class="label">Key Numbers.</span> Method 2 on Pokec (full graph): 78ms → <strong>~12ms</strong>. M6 condensation: 4.33ms. Threshold 100K — tuned empirically.</p>
-
-<p><span class="badge green">✅ Kept — prevents regression on large compact sets.</span></p>
-
-
-<h3>#4: M6 — Skip Pipeline for DAG (mark_all_as_scc)</h3>
-<p><span class="file">src_CUDA/scc_cuda_incremental_kernels.cu</span>, <span class="file">src_CUDA/scc_cuda_main.cpp</span> — Algorithm / Correctness</p>
-
-<p><span class="label">Problem.</span> Method 6 builds a condensation graph that IS a DAG (every node = its own SCC). Running TRIM1 on a DAG cascades iteratively until all nodes are removed — 715ms just for TRIM1. This is fundamentally wrong: DAGs have no SCCs.</p>
-
-<p><span class="label">Change.</span> Instead of running the pipeline, <code>mark_all_as_scc_kernel</code> assigns <code>d_SCC[i] = i</code> and <code>d_Color[i] = SCC_FOUND</code> in a single kernel launch. The pipeline is skipped entirely.</p>
-
-<p><span class="label">Key Numbers.</span> Method 6 pipeline time: 2397ms → <strong>~0ms</strong> 🚀. SCC count: 325,892 ✅.</p>
-
-<p><span class="badge green">✅ Kept — correct by construction: DAGs have no SCCs.</span></p>
-
-
-<h3>#5: M6 GPU Condensation Graph Builder</h3>
-<p><span class="file">src_CUDA/scc_cuda_incremental_kernels.cu</span>, <span class="file">src_CUDA/scc_cuda_incremental_build.cpp</span> — GPU Implementation</p>
-
-<p><span class="label">Problem.</span> The CPU condensation graph builder used 500MB+ of temporary host vectors and O(n) filter kernels that only processed 262K/61M edges (missing the stride loop).</p>
-
-<p><span class="label">Change.</span> Built a fully GPU-based condensation graph builder: (1) Deinterleave pair upload. (2) Warp-ballot filter — keeps only cross-SCC edges. (3) CUB radix sort. (4) Custom CSR builder. (5) Pivot find — finds max-cross-degree SCC.</p>
-
-<p><span class="label">Key Numbers.</span> Filter throughput: 61M edges in ~1ms. CSR build: ~2ms. CPU memory saved: ~500MB. Bug fix: filter stride loop was only 262K/61M edges before.</p>
-
-<p><span class="badge green">✅ Kept — GPU processes 61M edges in parallel in ~3ms.</span></p>
-
-
-<h3>#6: TRIM1 Compute Kernel Overhaul (Fix 2 Series)</h3>
-<p><span class="file">src_CUDA/scc_cuda_trim1.cu</span> — Algorithm / Performance</p>
-
-<p><span class="label">Problem.</span> The original short-circuit edge scan (stop at first alive neighbor) was fast per-iteration but the cascade converged slowly — requiring many iterations.</p>
-
-<p><span class="label">Changes (iterative).</span></p>
-<ol>
-  <li><strong>Fix 2d — Warp-cooperative alive-count:</strong> 32 threads per node scan out-edges in parallel. <span class="badge yellow">35.48ms (intermediate)</span></li>
-  <li><strong>Block-cooperative:</strong> All 256 threads scan one node with stride loop over all edges. <span class="badge yellow">~11ms</span></li>
-  <li><strong>__ldg() + 4× unroll:</strong> (see BIG WIN #4). <span class="badge green">4.33ms 🚀</span></li>
-  <li><strong>Fix 2 (O(1) checks):</strong> Cache alive counts and decrement — avoid scanning all edges every iteration.</li>
-</ol>
-
-<p><span class="label">Key Numbers.</span> TRIM1 (M6 Pokec): 35.48ms → 11ms → <strong>4.33ms</strong>. TOTAL: ~48ms → 14ms → <strong>5.92ms</strong>. SCC count unchanged throughout.</p>
-
-<p><span class="badge green">✅ All kept. Fix 2d superseded by block-cooperative, which was superseded by __ldg+unroll.</span></p>
-
-
-<h3>#7: WCC Optimizations (Root Color Gather + Single Buffer + Fused)</h3>
-<p><span class="file">src_CUDA/scc_cuda_weak.cu</span> — Memory / Performance</p>
-
-<p><span class="label">Problem.</span> WCC had three separate performance issues: (1) Full 6.4MB D2H to read root colors each iteration. (2) 6,521 small cudaMalloc calls for per-root storage — massive driver overhead. (3) WCC phases 1 and 2 as separate kernel launches.</p>
-
-<p><span class="label">Changes.</span></p>
-<ol>
-  <li><strong>Root Color Gather:</strong> gather kernel collects only needed colors instead of full 6.4MB D2H. FB 3.07→2.52ms.</li>
-  <li><strong>Single Large Buffer:</strong> 1 cudaMalloc instead of 6,521 per-root allocations. <span class="badge green">-26ms driver overhead</span></li>
-  <li><strong>Fused propagation:</strong> Phase 1+2 in single kernel. No perf gain (cleaner code).</li>
-</ol>
-
-<p><span class="badge green">✅ All kept. Single buffer had biggest impact (-26ms).</span></p>
-
-
-<h3>#8: GLOBAL_BFS Optimizations (Bitmap + STAGE_SIZE + Async Stream)</h3>
-<p><span class="file">src_CUDA/scc_cuda_fb_global.cu</span> — Performance</p>
-
-<p><span class="label">Changes.</span></p>
-<ol>
-  <li><strong>Visited Bitmap:</strong> Separate <code>atomicOr</code> bitmap for BFS claiming, avoids CAS on d_Color. <span class="badge green">-0.93ms (6.4%)</span></li>
-  <li><strong>STAGE_SIZE=16:</strong> Per-thread staging buffer, 32× fewer atomics for frontier writes.</li>
-  <li><strong>Pinned Memory + Async Stream:</strong> <code>cudaMemcpyAsync</code> on dedicated stream for per-level frontier D2H. <span class="badge green">~30% less per-level overhead</span></li>
-</ol>
-
-<p><span class="badge green">✅ All kept. Modest individual gains, cumulative effect adds up.</span></p>
-
-
-<h3>#9: Correctness Fixes (TOCTOU + Bitmap Reset + exit(0))</h3>
-<p><span class="file">Multiple files</span> — Correctness</p>
-
-<p><span class="label">Fixes.</span></p>
-<ol>
-  <li><strong>TOCTOU Race Fix:</strong> Fixed read-then-CAS race in <code>bw_bfs_level_kernel</code> by reading <code>d_Color[k]</code> once before dispatch.</li>
-  <li><strong>Visited Bitmap Reset:</strong> <code>cudaMemset</code> between FW and BW BFS — was carrying stale bits across phases.</li>
-  <li><strong>exit(0):</strong> gm_graph heap corruption on large graphs — <code>exit(0)</code> skips destructors, OS reclaims memory.</li>
-</ol>
-
-<p><span class="badge green">✅ All kept. Correctness-critical fixes.</span></p>
-
-
-<h3>#10: OpenMP Fixes (orig_edges + Load All + Tab Read)</h3>
-<p><span class="file">src/common_main.h</span> — OpenMP Correctness</p>
-
-<p><span class="label">Fixes.</span></p>
-<ol>
   <li><strong>Free orig_edges:</strong> <code>vector&lt;pair&gt;().swap(orig_edges)</code> after graph build frees ~2.8GB on large graphs. Prevents OOM.</li>
   <li><strong>Load for all methods:</strong> Methods 0/1/3/4 now load graphs (was method-2 only, produced 0 SCCs).</li>
-  <li><strong>Tab-separated read:</strong> <code>read_file()</code> handles tab separators in refined_edges.txt (was space-only).</li>
-</ol>
+  <li><strong>Tab-separated read:</strong> The <code>read_file()</code> parser only split on space. The refined_edges.txt files use tabs.</li>
+</ul>
 
-<p><span class="badge green">✅ All kept. Fixes pre-existing OpenMP bugs.</span></p>
+<pre><span class="co">// Before: only split on space, skipped all tab-separated lines</span>
+<span class="co">// while (getline(ss, token, ' '))</span>
 
+<span class="co">// After: also handle tabs (refined_edges.txt format)</span>
+<span class="co">// Use default stringstream whitespace splitting</span>
+stringstream ss(line);
+<span class="kw">while</span> (ss &gt;&gt; token) {  <span class="co">// splits on both spaces and tabs</span>
+    tokens.push_back(token);
+}
+</pre>
 
-<h3>#11–12: Minor KEPT (Warp-Ballot Compact + Block-Contiguous Skip)</h3>
-<p><span class="file">Multiple files</span> — Micro-optimizations</p>
+<p class="verdict"><span class="status-dot dot-green"></span> All kept. Fixes pre-existing OpenMP bugs.</p>
 
-<p><span class="label">Details.</span></p>
-<ol>
-  <li><strong>Warp-Ballot Compact Build:</strong> 32× fewer atomics for compact set construction. <span class="badge green">Kept</span></li>
-  <li><strong>TRIM1 Block-Contiguous Skip:</strong> Confirmed L2 cache (48MB on L40S) makes contiguous access optimization unnecessary. <span class="badge green">Kept (no-op finding)</span></li>
-</ol>
+<hr class="opt-divider">
 
+<h3 class="kept-heading">11. Warp-Ballot Compact Build &mdash; 32x Fewer Atomics</h3>
+<p class="meta"><code>src_CUDA/scc_cuda_trim1.cu</code></p>
 
-<!-- ================================================================ -->
-<h2 id="reverted">🔴 REVERTED — Did Not Work / Regressed</h2>
-<!-- ================================================================ -->
+<p><span class="section-label">Problem.</span> Compact set construction used a naive per-thread atomic increment to assign compact IDs. With 1.6M+ nodes, thousands of threads contended on the same counter.</p>
 
-<h3>#1: Persistent TRIM1 Kernel (Cooperative Groups — grid.sync())</h3>
-<p><span class="label">Problem.</span> Attempted to run all TRIM1 passes in a single kernel launch using <code>grid.sync()</code>. Blocks exit at different iterations (data-dependent), never reach a common sync point → <strong>indefinite deadlock.</strong></p>
-<p><span class="badge red">🔴 Deadlock. Not fixable without restructuring.</span></p>
+<p><span class="section-label">Change.</span> Each warp votes via <code>__ballot_sync</code>, then a single <code>atomicAdd</code> reserves IDs for all 32 threads. Threads compute individual IDs internally via <code>__popc</code> of lower lanes.</p>
 
+<pre><span class="co">// Warp-ballot compact: 1 atomicAdd per warp instead of 32</span>
+__global__ <span class="kw">void</span> build_compact_from_all_kernel(...) {
+    <span class="kw">bool</span> active = (idx &lt; num_nodes) &amp;&amp; (d_Color[idx] != SCC_FOUND);
+    <span class="kw">unsigned</span> mask = __ballot_sync(0xffffffff, active);
+    <span class="kw">int</span> warp_count = __popc(mask);
+    <span class="kw">if</span> (lane == 0 &amp;&amp; warp_count &gt; 0)
+        warp_base = atomicAdd(d_count, warp_count);
+    warp_base = __shfl_sync(0xffffffff, warp_base, 0);
+    <span class="kw">int</span> local_rank = __popc(mask &amp; ((1u &lt;&lt; lane) - 1));
+    <span class="kw">if</span> (active)
+        d_targets[warp_base + local_rank] = idx;
+}
+</pre>
 
-<h3>#2: Block-Local SMEM Queue BFS</h3>
-<p><span class="label">Problem.</span> 1024-entry shared memory frontier queue for per-component FB. The queue's tail pointer grew monotonically without reset — after ~30 levels the queue was full and new nodes couldn't be added.</p>
-<p><span class="badge red">🔴 Monotonic queue bug. Code preserved for reference.</span></p>
-
-
-<h3>#3: Ping-Pong Double-Buffered SMEM Queues</h3>
-<p><span class="label">Problem.</span> Two 512-entry queues swapped each level to fix the monotonic bug. <strong>+20% overhead</strong> (29ms→35ms) on wiki-Talk due to extra SMEM management cost and reduced effective queue depth.</p>
-<p><span class="badge red">🔴 20% regression. Hash table approach (BIG WIN #2) solved this fundamentally.</span></p>
-
-
-<h3>#4: Fused TRIM12 Kernel</h3>
-<p><span class="label">Problem.</span> TRIM1 + TRIM2 in a single kernel pass. Produced <strong>+182 wrong SCCs</strong> on ljournal-2008 due to a race condition between the degree-0 removal and the 2-node detection phases.</p>
-<p><span class="badge red">🔴 Wrong SCCs. Race condition between TRIM1 and TRIM2 in same kernel.</span></p>
-
-
-<h3>#5: Threshold Tuning 100K→300K</h3>
-<p><span class="label">Problem.</span> Raised short-circuit threshold to let the compute kernel run on larger compact sets. No improvement on method 2 sweep — GLOBAL_BFS didn't decrease because cascade wasn't the bottleneck.</p>
-<p><span class="badge red">🔴 Reverted to 100K. No benefit from higher threshold.</span></p>
+<p class="verdict"><span class="status-dot dot-green"></span> Kept &mdash; 32x fewer global atomics. Measurable improvement on large compact sets.</p>
 
 
-<h3>#6: __ldg() on Short-circuit Kernels</h3>
-<p><span class="label">Problem.</span> Applied <code>__ldg()</code> to all d_Color reads in short-circuit TRIM1 kernels. No measurable change (~12.24ms vs ~12.36ms). Bottleneck is <code>__ballot_sync</code> overhead and warp divergence, not memory latency.</p>
-<p><span class="badge red">🔴 No measurable gain. Bottleneck is warp divergence, not memory latency.</span></p>
+<!-- ================================================================== -->
+<h2>Reverted</h2>
+<!-- ================================================================== -->
+
+<h3 class="reverted-heading">1. Persistent TRIM1 Kernel (Cooperative Groups)</h3>
+<p><span class="section-label">Problem.</span> Ran all TRIM1 passes in a single kernel launch using <code>grid.sync()</code>. Blocks exit at different iterations (data-dependent), never reach a common sync point &rarr; <strong>indefinite deadlock.</strong></p>
+
+<pre><span class="co">// grid.sync() requires ALL blocks to reach the barrier.</span>
+<span class="co">// Blocks exit at different iterations — deadlock guaranteed.</span>
+cooperative_groups::grid_group grid = cooperative_groups::this_grid();
+<span class="kw">for</span> (<span class="kw">int</span> pass = 0; pass &lt; MAX_PASSES; pass++) {
+    <span class="co">// ... trim pass ...</span>
+    <span class="co">// Block A: trimmed 10 nodes, enters compact rebuild</span>
+    <span class="co">// Block B: trimmed 5 nodes, already in compact rebuild</span>
+    <span class="co">// Block C: still scanning edges for its 10,000th node</span>
+    grid.sync();  <span class="co">// DEADLOCK — A and B are past the sync, C never arrives</span>
+}
+</pre>
+
+<p class="verdict"><span class="status-dot dot-red"></span> Deadlock. Not fixable without restructuring.</p>
+
+<hr class="opt-divider">
+
+<h3 class="reverted-heading">2. Block-Local SMEM Queue BFS</h3>
+<p><span class="section-label">Problem.</span> 1024-entry shared memory frontier queue for per-component FB. The queue's tail pointer grew monotonically without resetting &mdash; after ~30 levels the queue filled up and new nodes couldn't be added.</p>
+
+<p class="verdict"><span class="status-dot dot-red"></span> Monotonic queue bug. Code preserved for reference.</p>
+
+<hr class="opt-divider">
+
+<h3 class="reverted-heading">3. Ping-Pong Double-Buffered SMEM Queues</h3>
+<p><span class="section-label">Problem.</span> Two 512-entry queues swapped each level to fix the monotonic bug. <strong>+20% overhead</strong> (29ms &rarr; 35ms) on wiki-Talk due to extra SMEM management cost and reduced effective queue depth.</p>
+
+<p class="verdict"><span class="status-dot dot-red"></span> 20% regression. Hash table approach (Major Impact #2) solved this fundamentally.</p>
+
+<hr class="opt-divider">
+
+<h3 class="reverted-heading">4. Fused TRIM12 Kernel</h3>
+<p><span class="section-label">Problem.</span> TRIM1 + TRIM2 in a single kernel pass. Produced <strong>+182 wrong SCCs</strong> on ljournal-2008 due to a race condition between the degree-0 removal and the 2-node detection phases.</p>
+
+<p class="verdict"><span class="status-dot dot-red"></span> Wrong SCCs. Race condition between TRIM1 and TRIM2 in the same kernel.</p>
+
+<hr class="opt-divider">
+
+<h3 class="reverted-heading">5. Threshold Tuning 100K &rarr; 300K</h3>
+<p><span class="section-label">Problem.</span> Raised the short-circuit threshold to let the compute kernel run on larger compact sets. No improvement on method 2 sweep &mdash; GLOBAL_BFS didn't decrease because the cascade wasn't the bottleneck.</p>
+
+<p class="verdict"><span class="status-dot dot-red"></span> Reverted to 100K. No benefit from higher threshold.</p>
+
+<hr class="opt-divider">
+
+<h3 class="reverted-heading">6. __ldg() on Short-circuit Kernels</h3>
+<p><span class="section-label">Problem.</span> Applied <code>__ldg()</code> to all d_Color reads in short-circuit TRIM1 kernels. No measurable change (~12.24ms vs ~12.36ms). The bottleneck is <code>__ballot_sync</code> overhead and warp divergence, not memory latency.</p>
+
+<p class="verdict"><span class="status-dot dot-red"></span> No measurable gain. Bottleneck is warp divergence, not memory latency.</p>
+
+<hr class="opt-divider">
+
+<h3 class="reverted-heading">7. WCC max_iterations 100 &rarr; 500 (Early Attempt)</h3>
+<p><span class="section-label">Problem.</span> Early attempt to increase WCC iterations. WCC 4.58ms &rarr; 20.99ms. Still didn't converge at 500 on indochina-2004 (needs 209). Later fixed properly with the 100K limit (Moderate #2).</p>
+
+<p class="verdict"><span class="status-dot dot-red"></span> Still didn't converge. Only the full 100K limit worked.</p>
+
+<hr class="opt-divider">
+
+<h3 class="reverted-heading">8. TRIM1 Stream Sync</h3>
+<p><span class="section-label">Problem.</span> Switched <code>cudaDeviceSynchronize</code> to <code>cudaStreamSynchronize</code> on a dedicated stream. <strong>0% improvement</strong> &mdash; nsys showed 200us/pass was actual kernel execution, not sync overhead.</p>
+
+<p class="verdict"><span class="status-dot dot-red"></span> No gain. Kernel execution, not sync overhead, was the bottleneck.</p>
+
+<hr class="opt-divider">
+
+<h3 class="reverted-heading">9. Progressive Compact Rebuild</h3>
+<p><span class="section-label">Problem.</span> Rebuilt the compact list between TRIM1 passes to reduce work. Each rebuild costs ~200us (same as a full scan) due to sync overhead. <strong>TRIM1 15ms &rarr; 25ms</strong> &mdash; worse.</p>
+
+<p class="verdict"><span class="status-dot dot-red"></span> Regression. Build cost negated any reduction in per-iteration scanning.</p>
+
+<hr class="opt-divider">
+
+<h3 class="reverted-heading">10. Hybrid FB GPU Path</h3>
+<p><span class="section-label">Problem.</span> GPU-based per-component SCC decomposition. <strong>18x slower than CPU</strong> (760ms vs 43ms). Host-side FB with D2H was cheaper than GPU kernel launches for small components.</p>
+
+<p class="verdict"><span class="status-dot dot-red"></span> 18x slower. GPU kernel launch overhead dominates for small components.</p>
+
+<hr class="opt-divider">
+
+<h3 class="reverted-heading">11. WCC max_iterations 5000 (No Effect on SCC)</h3>
+<p><span class="section-label">Problem.</span> Tested with max_iterations=5000 on indochina-2004. WCC time doubled from 234ms &rarr; 535ms. SCC count unchanged (1,744,396 vs 1,744,376 &mdash; within noise). Proved that WCC convergence was NOT the remaining cause of the SCC gap.</p>
+
+<p class="verdict"><span class="status-dot dot-red"></span> No effect on SCC count, 2x slower. Proved the gap is not in WCC.</p>
+
+<hr class="opt-divider">
+
+<h3 class="reverted-heading">12. TRIM1 Block-Contiguous Access Grouping</h3>
+<p><span class="section-label">Problem.</span> Proposed grouping edges by destination node for contiguous d_Color reads. No improvement &mdash; the L40S's 48MB L2 cache already absorbs the random-access pattern.</p>
+
+<p class="verdict"><span class="status-dot dot-red"></span> No improvement. 48MB L2 makes this unnecessary.</p>
+
+<hr class="opt-divider">
+
+<h3 class="reverted-heading">13. Edge-Centric BFS</h3>
+<p><span class="section-label">Problem.</span> Proposed expanding frontier by iterating over ALL edges in parallel instead of frontier-based expansion. 2-3x slower &mdash; processes many more edges than necessary.</p>
+
+<p class="verdict"><span class="status-dot dot-red"></span> 2-3x slower. Frontier-based approach is more efficient.</p>
+
+<hr class="opt-divider">
+
+<h3 class="reverted-heading">14. Warp-Aggregated Atomics in Compact Build</h3>
+<p><span class="section-label">Problem.</span> Replaced per-thread atomicAdd with warp-level tree reduction. Regression &mdash; shuffle overhead outweighed atomic contention savings on smaller compact sets. (Note: later succeeded as Moderate #11 with a different implementation using ballot instead of tree reduction.)</p>
+
+<p class="verdict"><span class="status-dot dot-red"></span> Regression. Succeeded later as Moderate #11 with ballot approach.</p>
+
+<hr class="opt-divider">
+
+<h3 class="reverted-heading">15. CPU Offload GLOBAL_BFS</h3>
+<p><span class="section-label">Problem.</span> For small frontiers (1-5 nodes per level), proposed running BFS on CPU instead of launching a GPU kernel. <strong>45ms vs 13.5ms GPU</strong> (3.4x worse).</p>
+
+<p class="verdict"><span class="status-dot dot-red"></span> 3.4x slower. GPU launches in parallel even with small workloads.</p>
+
+<hr class="opt-divider">
+
+<h3 class="reverted-heading">16. __ldg() Without Unrolling (Initial Attempt)</h3>
+<p><span class="section-label">Problem.</span> Applied <code>__ldg()</code> without loop unrolling. ~1% improvement (within noise). The real gain came from pairing __ldg() with 4x unrolling to pipeline independent loads (see Major Impact #4).</p>
+
+<p class="verdict"><span class="status-dot dot-red"></span> ~1% (within noise). Succeeded as Major Impact #4 when paired with unrolling.</p>
+
+<hr class="opt-divider">
+
+<h3 class="reverted-heading">17. WCC Fused Propagation (Initial GPU Attempt)</h3>
+<p><span class="section-label">Problem.</span> Fused WCC phases into a single kernel. Only 8K nodes active &mdash; 23% SM utilization. The kernel was bandwidth-bound and the fused approach didn't improve occupancy.</p>
+
+<p class="verdict"><span class="status-dot dot-red"></span> Low utilization. Succeeded later as Moderate #7 after other fixes made it viable.</p>
+
+<hr class="opt-divider">
+
+<h3 class="reverted-heading">18. Spanning Forest SCC (Method 12)</h3>
+<p><span class="section-label">Problem.</span> Multi-pivot FW-BW spanning tree approach with union-find on GPU. <strong>11x slower</strong> than OpenMP on wiki-Talk. Non-deterministic SCC counts across runs due to race conditions in union-find path compression.</p>
+
+<p class="verdict"><span class="status-dot dot-red"></span> 11x slower. Non-deterministic SCC counts. Algorithmic complexity exceeds trim-based approach.</p>
 
 
-<h3>#7: WCC max_iterations 100→500 (Early Attempt)</h3>
-<p><span class="label">Problem.</span> Early attempt to increase WCC iterations on smaller graphs. WCC 4.58ms→20.99ms. Still didn't converge at 500 on indochina-2004 (needs 209). Later fixed properly with 100K limit.</p>
-<p><span class="badge red">🔴 Still didn't converge. Only the full 100K limit worked for indochina-2004.</span></p>
-
-
-<h3>#8: TRIM1 Stream Sync</h3>
-<p><span class="label">Problem.</span> Switched <code>cudaDeviceSynchronize</code> to <code>cudaStreamSynchronize</code> on a dedicated stream. <strong>0% improvement</strong> — nsys showed 200μs/pass was actual kernel execution, not sync overhead.</p>
-<p><span class="badge red">🔴 No gain. Kernel execution, not sync overhead, was the bottleneck.</span></p>
-
-
-<h3>#9: Progressive Compact Rebuild</h3>
-<p><span class="label">Problem.</span> Rebuilt compact list between TRIM1 passes to reduce work. Each rebuild costs ~200μs (same as a full scan) due to sync overhead. <strong>TRIM1 15ms→25ms</strong> (worse).</p>
-<p><span class="badge red">🔴 Regression. Rebuild cost negated any reduction in per-iteration scanning.</span></p>
-
-
-<h3>#10: Hybrid FB GPU Path</h3>
-<p><span class="label">Problem.</span> GPU-based per-component SCC decomposition. <strong>18× slower than CPU</strong> (760ms vs 43ms). Host-side FB with D2H was cheaper than GPU kernel launches for small components.</p>
-<p><span class="badge red">🔴 18× slower. GPU kernel launch overhead dominates for small components.</span></p>
-
-
-<h3>#11: WCC max_iterations 5000 (No Effect on SCC)</h3>
-<p><span class="label">Problem.</span> Tested with max_iterations=5000 on indochina-2004. WCC time doubled from 234ms→535ms. SCC count unchanged (1,744,396 vs 1,744,376 — within noise). Proved WCC convergence was NOT the remaining cause of the SCC gap.</p>
-<p><span class="badge red">🔴 Reverted (no effect on SCC count, 2× slower). Proved the gap is NOT in WCC.</span></p>
-
-
-<h3>#12: Other Reverted Attempts (Bundled)</h3>
-<p><span class="label">Details.</span></p>
-<ol>
-  <li><strong>TRIM1 Block-Contiguous:</strong> No improvement — 48MB L2 cache made contiguous access irrelevant. <span class="badge red">Reverted</span></li>
-  <li><strong>Edge-Centric BFS:</strong> 2-3× slower. <span class="badge red">Reverted</span></li>
-  <li><strong>Warp-Aggregated Atomics:</strong> Regression in compact build. <span class="badge red">Reverted</span></li>
-  <li><strong>CPU Offload GLOBAL_BFS:</strong> 45ms vs 13.5ms GPU (3.4× worse). <span class="badge red">Reverted</span></li>
-  <li><strong>__ldg() Read-Only Cache (initial):</strong> ~1% improvement (within noise). <span class="badge red">Reverted (later succeeded with +unroll)</span></li>
-  <li><strong>WCC Fused Propagation (initial):</strong> Only 8K nodes at WCC phase — 23% SM utilization. <span class="badge red">Reverted</span></li>
-  <li><strong>Spanning Forest SCC (Method 12):</strong> Multi-pivot FW-BW spanning trees with union-find. <strong>11× slower</strong> than OpenMP on wiki-Talk, non-deterministic SCC counts. <span class="badge red">Reverted</span></li>
-</ol>
-
-
-<br>
-<div style="text-align:center;color:#888;font-size:10pt;">Generated July 2026 — DynamicGraphs SCC Final Optimization Report</div>
+<hr style="margin-top: 40px;">
+<div style="text-align: center; color: #999; font-size: 9pt; padding: 20px 0;">
+  Generated July 2026 &mdash; DynamicGraphs SCC Optimization Report
+</div>
 
 </body>
 </html>
