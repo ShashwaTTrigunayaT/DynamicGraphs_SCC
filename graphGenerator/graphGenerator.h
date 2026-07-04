@@ -596,27 +596,7 @@ inline bool stream_lcc_to_file(
     std::ofstream out(filename);
     if (!out.is_open()) return false;
 
-    int num_singletons = 0;
-    int num_small_sccs = 0;
-    if (explicit_singletons >= 0) {
-        for (int sz : sat_scc_sizes) {
-            if (sz == 1) num_singletons++;
-            else num_small_sccs++;
-        }
-    }
-
-    out << "% graph_type: lcc\n% nodes: " << num_nodes
-        << "\n% edges: " << num_edges
-        << "\n% lcc_size: " << lcc_size
-        << "\n% satellite_nodes: " << satellite_count
-        << "\n% satellite_sccs: " << num_sat_sccs;
-    if (explicit_singletons >= 0) {
-        out << "\n% singletons: " << num_singletons
-            << "\n% small_sccs: " << num_small_sccs
-            << "\n% small_scc_nodes: " << (satellite_count - num_singletons);
-    }
-    out << "\n% sat_to_giant_edges: " << sat_to_giant
-        << "\n% intra_giant_edges: " << intra_giant << "\n";
+    // Metadata headers removed - just pure edge list for compatibility with algorithm file readers
 
     
     for (int i = 0; i < lcc_size; i++) {
