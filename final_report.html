@@ -130,6 +130,63 @@
     pre { break-inside: avoid; font-size: 7.5pt; }
     h2, h3 { break-after: avoid; }
   }
+
+  /* Pipeline diagram */
+  .pipeline {
+    display: flex; flex-wrap: wrap;
+    align-items: center; justify-content: center;
+    gap: 0;
+    margin: 16px 0 24px 0;
+    padding: 20px 12px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-primary);
+    border-radius: 10px;
+  }
+  .pipe-box {
+    display: flex; flex-direction: column;
+    align-items: center;
+    padding: 8px 12px;
+    border-radius: 6px;
+    min-width: 80px;
+    text-align: center;
+    font-size: 8pt;
+    line-height: 1.3;
+    position: relative;
+  }
+  .pipe-box .name { font-weight: 600; font-size: 8.5pt; white-space: nowrap; }
+  .pipe-box .time { font-size: 7pt; color: var(--text-muted); margin-top: 1px; }
+  .pipe-arrow {
+    color: var(--text-muted);
+    font-size: 11pt;
+    padding: 0 2px;
+    flex-shrink: 0;
+  }
+  .pipe-start { background: rgba(88,166,255,0.15); border: 1px solid rgba(88,166,255,0.3); }
+  .pipe-step  { background: var(--bg-tertiary); border: 1px solid var(--border-primary); }
+  .pipe-end   { background: rgba(63,185,80,0.15); border: 1px solid rgba(63,185,80,0.3); }
+
+  .pipe-anno {
+    position: absolute;
+    top: -8px;
+    right: -4px;
+    font-size: 6.5pt;
+    background: var(--bg-primary);
+    border: 1px solid var(--accent-green);
+    color: var(--accent-green);
+    padding: 0 4px;
+    border-radius: 3px;
+    white-space: nowrap;
+    line-height: 1.5;
+    pointer-events: none;
+  }
+  .pipe-anno.blue  { border-color: var(--accent-blue); color: var(--accent-blue); }
+  .pipe-anno.red   { border-color: var(--accent-red); color: var(--accent-red); }
+  .pipe-anno.yellow { border-color: var(--accent-yellow); color: var(--accent-yellow); }
+
+  @media (max-width: 720px) {
+    .pipeline { flex-direction: column; gap: 6px; }
+    .pipe-arrow { transform: rotate(90deg); padding: 4px 0; }
+  }
 </style>
 </head>
 <body>
@@ -144,6 +201,71 @@
   <strong>Optimizations catalogued:</strong> 5 Major Impact, 11 Moderate, 18 Reverted
 </div>
 
+
+<!-- ================================================================== -->
+<h2>Pipeline</h2>
+<!-- ================================================================== -->
+
+<div class="pipeline">
+  <div class="pipe-box pipe-start">
+    <span class="name">Input<br>Graph</span>
+  </div>
+  <span class="pipe-arrow">&rarr;</span>
+
+  <div class="pipe-box pipe-step" style="position:relative;">
+    <span class="name">TRIM1</span>
+    <span class="time">4.33ms (Pokec)</span>
+    <span class="pipe-anno">#4 __ldg()+unroll</span>
+  </div>
+  <span class="pipe-arrow">&rarr;</span>
+
+  <div class="pipe-box pipe-step" style="position:relative;">
+    <span class="name">COMPACT</span>
+    <span class="time">0.10ms</span>
+    <span class="pipe-anno blue">#11 Warp-ballot</span>
+  </div>
+  <span class="pipe-arrow">&rarr;</span>
+
+  <div class="pipe-box pipe-step" style="position:relative;">
+    <span class="name">GLOBAL<br>BFS</span>
+    <span class="time">3.0ms (wiki-Talk)</span>
+    <span class="pipe-anno">#3 Parallel BFS</span>
+  </div>
+  <span class="pipe-arrow">&rarr;</span>
+
+  <div class="pipe-box pipe-step" style="position:relative;">
+    <span class="name">TRIM1/2</span>
+    <span class="time">2.55ms</span>
+    <span class="pipe-anno yellow">Threshold</span>
+  </div>
+  <span class="pipe-arrow">&rarr;</span>
+
+  <div class="pipe-box pipe-step" style="position:relative;">
+    <span class="name">WCC</span>
+    <span class="time">4.24ms</span>
+    <span class="pipe-anno blue">#2 Iter limit</span>
+  </div>
+  <span class="pipe-arrow">&rarr;</span>
+
+  <div class="pipe-box pipe-step" style="position:relative;">
+    <span class="name">GPU Batch<br>FB</span>
+    <span class="time">2.46ms</span>
+    <span class="pipe-anno">#1 GPU-only FB</span>
+  </div>
+  <span class="pipe-arrow">&rarr;</span>
+
+  <div class="pipe-box pipe-end">
+    <span class="name" style="color:var(--accent-green);">&#10003; SCCs</span>
+    <span class="time">1,749,051</span>
+  </div>
+</div>
+
+<p style="margin-bottom: 16px; color: var(--text-secondary); font-size: 8.5pt; text-align: center;">
+  Pipeline flow with per-stage timings (ljournal-2008) and key optimizations annotated.
+  <span style="color:var(--accent-green);">&#9679;</span> Major Impact
+  <span style="color:var(--accent-blue);">&#9679;</span> Moderate
+  <span style="color:var(--accent-yellow);">&#9679;</span> Threshold
+</p>
 
 <!-- ================================================================== -->
 <h2>Benchmark Results</h2>
