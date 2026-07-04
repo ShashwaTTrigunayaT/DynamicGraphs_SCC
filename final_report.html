@@ -1237,6 +1237,223 @@ wcc_propagate_fused_kernel&lt;&lt;&lt;grid, 256&gt;&gt;&gt;(...);
 <p class="verdict"><span class="status-dot dot-red"></span> 11x slower. Non-deterministic SCC counts. Algorithmic complexity exceeds trim-based approach.</p>
 
 
+
+<!-- ================================================================== -->
+<h2>Commit History</h2>
+<!-- ================================================================== -->
+
+<p style="margin-bottom: 12px; color: var(--text-secondary); font-size: 9pt;">
+  All commits sorted by impact, most important first.
+</p>
+
+<div style="overflow-x: auto; margin: 12px 0 20px 0; border-radius: 8px; border: 1px solid var(--border-primary);">
+<table style="width: 100%; border-collapse: collapse; font-size: 8.5pt; background: var(--bg-secondary);">
+  <thead>
+    <tr style="background: var(--bg-tertiary); border-bottom: 2px solid var(--border-primary);">
+      <th style="padding: 8px 10px; text-align: left; font-weight: 600; color: var(--text-primary);">Commit</th>
+      <th style="padding: 8px 10px; text-align: left; font-weight: 600; color: var(--text-primary);">Description</th>
+      <th style="padding: 8px 10px; text-align: center; font-weight: 600; color: var(--text-muted);">Verdict</th>
+    </tr>
+  </thead>
+  <tbody>
+
+    <tr style="border-bottom: 1px solid var(--border-secondary); background: rgba(63,185,80,0.06);">
+      <td style="padding: 6px 10px; font-family: monospace; font-size: 7.5pt; white-space: nowrap;"><code>d8a5f9a</code></td>
+      <td style="padding: 6px 10px;"><strong>__ldg() + 4&times; loop unrolling</strong> &mdash; read-only cache + ILP for random d_Color reads. <span style="color:var(--accent-green)">TRIM1 11.25&rarr;4.33ms (-61%)</span></td>
+      <td style="padding: 6px 10px; text-align: center;"><span style="background:rgba(63,185,80,0.15); color:var(--accent-green); padding:2px 8px; border-radius:4px; font-weight:600; font-size:7.5pt;">KEPT</span></td>
+    </tr>
+
+    <tr style="border-bottom: 1px solid var(--border-secondary); background: rgba(63,185,80,0.04);">
+      <td style="padding: 6px 10px; font-family: monospace; font-size: 7.5pt;"><code>5d80e1f</code></td>
+      <td style="padding: 6px 10px;"><strong>CUDA M6: skip pipeline for DAG</strong> &mdash; mark_all_as_scc in &lt;1ms. <span style="color:var(--accent-green)">2397ms &rarr; ~0ms</span></td>
+      <td style="padding: 6px 10px; text-align: center;"><span style="background:rgba(63,185,80,0.15); color:var(--accent-green); padding:2px 8px; border-radius:4px; font-weight:600; font-size:7.5pt;">KEPT</span></td>
+    </tr>
+
+    <tr style="border-bottom: 1px solid var(--border-secondary);">
+      <td style="padding: 6px 10px; font-family: monospace; font-size: 7.5pt;"><code>ed206c2</code></td>
+      <td style="padding: 6px 10px;"><strong>Fix 2d: warp-cooperative alive-count kernel</strong> &mdash; 32 threads per node scan edges in parallel. 32&times; faster per-node counting</td>
+      <td style="padding: 6px 10px; text-align: center;"><span style="background:rgba(63,185,80,0.15); color:var(--accent-green); padding:2px 8px; border-radius:4px; font-weight:600; font-size:7.5pt;">KEPT</span></td>
+    </tr>
+
+    <tr style="border-bottom: 1px solid var(--border-secondary); background: var(--bg-primary);">
+      <td style="padding: 6px 10px; font-family: monospace; font-size: 7.5pt;"><code>719db4f</code></td>
+      <td style="padding: 6px 10px;"><strong>Fix 2: O(1) alive-count checks</strong> &mdash; cache alive counts &amp; decrement. Avoid scanning all edges every iteration</td>
+      <td style="padding: 6px 10px; text-align: center;"><span style="background:rgba(63,185,80,0.15); color:var(--accent-green); padding:2px 8px; border-radius:4px; font-weight:600; font-size:7.5pt;">KEPT</span></td>
+    </tr>
+
+    <tr style="border-bottom: 1px solid var(--border-secondary);">
+      <td style="padding: 6px 10px; font-family: monospace; font-size: 7.5pt;"><code>f2410e9</code></td>
+      <td style="padding: 6px 10px;"><strong>Block-cooperative compute kernel</strong> &mdash; all 256 threads scan one node, not 32 per warp</td>
+      <td style="padding: 6px 10px; text-align: center;"><span style="background:rgba(63,185,80,0.15); color:var(--accent-green); padding:2px 8px; border-radius:4px; font-weight:600; font-size:7.5pt;">KEPT</span></td>
+    </tr>
+
+    <tr style="border-bottom: 1px solid var(--border-secondary); background: var(--bg-primary);">
+      <td style="padding: 6px 10px; font-family: monospace; font-size: 7.5pt;"><code>bcd76f1..616181f</code></td>
+      <td style="padding: 6px 10px;"><strong>Fix: hash-check-before-CAS</strong> &mdash; prevent cross-component color leakage. <span style="color:var(--accent-green)">+~6,200 SCCs recovered</span></td>
+      <td style="padding: 6px 10px; text-align: center;"><span style="background:rgba(63,185,80,0.15); color:var(--accent-green); padding:2px 8px; border-radius:4px; font-weight:600; font-size:7.5pt;">KEPT</span></td>
+    </tr>
+
+    <tr style="border-bottom: 1px solid var(--border-secondary);">
+      <td style="padding: 6px 10px; font-family: monospace; font-size: 7.5pt;"><code>13e7e69</code></td>
+      <td style="padding: 6px 10px;"><strong>Short-circuit threshold for &gt;100K nodes</strong> &mdash; use fast short-circuit on large sets, compute kernel on small. Prevents 78ms regression</td>
+      <td style="padding: 6px 10px; text-align: center;"><span style="background:rgba(63,185,80,0.15); color:var(--accent-green); padding:2px 8px; border-radius:4px; font-weight:600; font-size:7.5pt;">KEPT</span></td>
+    </tr>
+
+    <tr style="border-bottom: 1px solid var(--border-secondary); background: var(--bg-primary);">
+      <td style="padding: 6px 10px; font-family: monospace; font-size: 7.5pt;"><code>fffe98c</code></td>
+      <td style="padding: 6px 10px;"><strong>MAX_OUT grid to 142 blocks</strong> &mdash; use all SMs for compute kernel</td>
+      <td style="padding: 6px 10px; text-align: center;"><span style="background:rgba(63,185,80,0.15); color:var(--accent-green); padding:2px 8px; border-radius:4px; font-weight:600; font-size:7.5pt;">KEPT</span></td>
+    </tr>
+
+    <tr style="border-bottom: 1px solid var(--border-secondary);">
+      <td style="padding: 6px 10px; font-family: monospace; font-size: 7.5pt;"><code>c8636cd</code></td>
+      <td style="padding: 6px 10px;"><strong>Fix 3: rebuild compact set between fix2 iterations</strong> &mdash; reduces compute cost</td>
+      <td style="padding: 6px 10px; text-align: center;"><span style="background:rgba(63,185,80,0.15); color:var(--accent-green); padding:2px 8px; border-radius:4px; font-weight:600; font-size:7.5pt;">KEPT</span></td>
+    </tr>
+
+    <tr style="border-bottom: 1px solid var(--border-secondary); background: var(--bg-primary);">
+      <td style="padding: 6px 10px; font-family: monospace; font-size: 7.5pt;"><code>5458fd8</code></td>
+      <td style="padding: 6px 10px;"><strong>Fix GPU pointer crash + filter stride loop</strong> &mdash; h_node_idx.assign tried to read GPU memory from host. cudaMemcpyDeviceToHost fix</td>
+      <td style="padding: 6px 10px; text-align: center;"><span style="background:rgba(63,185,80,0.15); color:var(--accent-green); padding:2px 8px; border-radius:4px; font-weight:600; font-size:7.5pt;">KEPT</span></td>
+    </tr>
+
+    <tr style="border-bottom: 1px solid var(--border-secondary);">
+      <td style="padding: 6px 10px; font-family: monospace; font-size: 7.5pt;"><code>a92fd9d</code></td>
+      <td style="padding: 6px 10px;"><strong>OpenMP: free orig_edges</strong> &mdash; swap trick frees ~2.8GB edge vector after graph build. Prevents OOM on large graphs</td>
+      <td style="padding: 6px 10px; text-align: center;"><span style="background:rgba(63,185,80,0.15); color:var(--accent-green); padding:2px 8px; border-radius:4px; font-weight:600; font-size:7.5pt;">KEPT</span></td>
+    </tr>
+
+    <tr style="border-bottom: 1px solid var(--border-secondary); background: var(--bg-primary);">
+      <td style="padding: 6px 10px; font-family: monospace; font-size: 7.5pt;"><code>8b8b1e1</code></td>
+      <td style="padding: 6px 10px;"><strong>OpenMP: tab-separated read_file</strong> &mdash; handles tab separators in refined_edges.txt. Large datasets now load correctly</td>
+      <td style="padding: 6px 10px; text-align: center;"><span style="background:rgba(63,185,80,0.15); color:var(--accent-green); padding:2px 8px; border-radius:4px; font-weight:600; font-size:7.5pt;">KEPT</span></td>
+    </tr>
+
+    <tr style="border-bottom: 1px solid var(--border-secondary);">
+      <td style="padding: 6px 10px; font-family: monospace; font-size: 7.5pt;"><code>5922cad</code></td>
+      <td style="padding: 6px 10px;"><strong>OpenMP: load graph for all methods</strong> &mdash; methods 0/1/3/4 now load graphs (was method-2 only, produced 0 SCCs)</td>
+      <td style="padding: 6px 10px; text-align: center;"><span style="background:rgba(63,185,80,0.15); color:var(--accent-green); padding:2px 8px; border-radius:4px; font-weight:600; font-size:7.5pt;">KEPT</span></td>
+    </tr>
+
+    <tr style="border-bottom: 1px solid var(--border-secondary); background: var(--bg-primary);">
+      <td style="padding: 6px 10px; font-family: monospace; font-size: 7.5pt;"><code>6a2712b</code></td>
+      <td style="padding: 6px 10px;"><strong>Set TRIM_STOP=100</strong> &mdash; match OpenMP default</td>
+      <td style="padding: 6px 10px; text-align: center;"><span style="background:rgba(63,185,80,0.15); color:var(--accent-green); padding:2px 8px; border-radius:4px; font-weight:600; font-size:7.5pt;">KEPT</span></td>
+    </tr>
+
+    <tr style="border-bottom: 1px solid var(--border-secondary);">
+      <td style="padding: 6px 10px; font-family: monospace; font-size: 7.5pt;"><code>8dda9f4..bcd76f1</code></td>
+      <td style="padding: 6px 10px;"><strong>Add scatter actual-count validation</strong> &mdash; per-color scatter output count check. <span style="color:var(--accent-red)">Found 1052/2786 mismatches at Lvl 1</span> &rarr; bug confirmed</td>
+      <td style="padding: 6px 10px; text-align: center;"><span style="background:rgba(88,166,255,0.15); color:var(--accent-blue); padding:2px 8px; border-radius:4px; font-weight:600; font-size:7.5pt;">DIAG</span></td>
+    </tr>
+
+    <tr style="border-bottom: 1px solid var(--border-secondary); background: var(--bg-primary);">
+      <td style="padding: 6px 10px; font-family: monospace; font-size: 7.5pt;"><code>2214d16..f538bbd</code></td>
+      <td style="padding: 6px 10px;"><strong>Add color_base diagnostic logging</strong> &mdash; print max_color per level. Proven safe (peaked at ~39M)</td>
+      <td style="padding: 6px 10px; text-align: center;"><span style="background:rgba(88,166,255,0.15); color:var(--accent-blue); padding:2px 8px; border-radius:4px; font-weight:600; font-size:7.5pt;">DIAG</span></td>
+    </tr>
+
+    <tr style="border-bottom: 1px solid var(--border-secondary);">
+      <td style="padding: 6px 10px; font-family: monospace; font-size: 7.5pt;"><code>f538bbd..8dda9f4</code></td>
+      <td style="padding: 6px 10px;"><strong>Add node count consistency check</strong> &mdash; verify total_src == sum_out each level. Proven perfect (no nodes lost)</td>
+      <td style="padding: 6px 10px; text-align: center;"><span style="background:rgba(88,166,255,0.15); color:var(--accent-blue); padding:2px 8px; border-radius:4px; font-weight:600; font-size:7.5pt;">DIAG</span></td>
+    </tr>
+
+    <tr style="border-bottom: 1px solid var(--border-secondary); background: var(--bg-primary);">
+      <td style="padding: 6px 10px; font-family: monospace; font-size: 7.5pt;"><code>d7c1750</code></td>
+      <td style="padding: 6px 10px;"><strong>__ldg() on short-circuit kernels</strong> &mdash; read-only cache for d_Color reads. No measurable change (~12.24ms vs ~12.36ms)</td>
+      <td style="padding: 6px 10px; text-align: center;"><span style="background:rgba(210,153,34,0.15); color:var(--accent-yellow); padding:2px 8px; border-radius:4px; font-weight:600; font-size:7.5pt;">NO GAIN</span></td>
+    </tr>
+
+    <tr style="border-bottom: 1px solid var(--border-secondary);">
+      <td style="padding: 6px 10px; font-family: monospace; font-size: 7.5pt;"><code>d135f4b</code></td>
+      <td style="padding: 6px 10px;"><strong>Fix 2c: remove atomic decrement storm</strong> &mdash; recompute alive counts each iteration instead of decrementing</td>
+      <td style="padding: 6px 10px; text-align: center;"><span style="background:rgba(63,185,80,0.15); color:var(--accent-green); padding:2px 8px; border-radius:4px; font-weight:600; font-size:7.5pt;">KEPT</span></td>
+    </tr>
+
+    <tr style="border-bottom: 1px solid var(--border-secondary); background: var(--bg-primary);">
+      <td style="padding: 6px 10px; font-family: monospace; font-size: 7.5pt;"><code>f082c0b</code></td>
+      <td style="padding: 6px 10px;"><strong>Fix 2b: compute_alive_counts only for compact set</strong> &mdash; 44&times; less work</td>
+      <td style="padding: 6px 10px; text-align: center;"><span style="background:rgba(63,185,80,0.15); color:var(--accent-green); padding:2px 8px; border-radius:4px; font-weight:600; font-size:7.5pt;">KEPT</span></td>
+    </tr>
+
+    <tr style="border-bottom: 1px solid var(--border-secondary);">
+      <td style="padding: 6px 10px; font-family: monospace; font-size: 7.5pt;"><code>bcf3a12</code></td>
+      <td style="padding: 6px 10px;"><strong>Fix 1: warp-cooperative edge scan (full-scan kernel)</strong></td>
+      <td style="padding: 6px 10px; text-align: center;"><span style="background:rgba(63,185,80,0.15); color:var(--accent-green); padding:2px 8px; border-radius:4px; font-weight:600; font-size:7.5pt;">KEPT</span></td>
+    </tr>
+
+    <tr style="border-bottom: 1px solid var(--border-secondary); background: var(--bg-primary);">
+      <td style="padding: 6px 10px; font-family: monospace; font-size: 7.5pt;"><code>0a8ce22</code></td>
+      <td style="padding: 6px 10px;"><strong>Fix 1: warp-cooperative edge scan (compact kernel)</strong></td>
+      <td style="padding: 6px 10px; text-align: center;"><span style="background:rgba(63,185,80,0.15); color:var(--accent-green); padding:2px 8px; border-radius:4px; font-weight:600; font-size:7.5pt;">KEPT</span></td>
+    </tr>
+
+    <tr style="border-bottom: 1px solid var(--border-secondary);">
+      <td style="padding: 6px 10px; font-family: monospace; font-size: 7.5pt;"><code>3a0fd09</code></td>
+      <td style="padding: 6px 10px;"><strong>Fix hardcoded scc_list.txt path</strong> &mdash; was /home/tk.temp/par-scc/scc_list.txt. Changed to relative path</td>
+      <td style="padding: 6px 10px; text-align: center;"><span style="background:rgba(63,185,80,0.15); color:var(--accent-green); padding:2px 8px; border-radius:4px; font-weight:600; font-size:7.5pt;">KEPT</span></td>
+    </tr>
+
+    <tr style="border-bottom: 1px solid var(--border-secondary); background: var(--bg-primary);">
+      <td style="padding: 6px 10px; font-family: monospace; font-size: 7.5pt;"><code>4adc660</code></td>
+      <td style="padding: 6px 10px;"><strong>scc_list.txt path &rarr; local scc_lists/</strong> &mdash; dataset dir unwritable, look in project-local directory</td>
+      <td style="padding: 6px 10px; text-align: center;"><span style="background:rgba(63,185,80,0.15); color:var(--accent-green); padding:2px 8px; border-radius:4px; font-weight:600; font-size:7.5pt;">KEPT</span></td>
+    </tr>
+
+    <tr style="border-bottom: 1px solid var(--border-secondary);">
+      <td style="padding: 6px 10px; font-family: monospace; font-size: 7.5pt;"><code>a3721d1</code></td>
+      <td style="padding: 6px 10px;"><strong>Fix: strip trailing slash from dataset_dir</strong> &mdash; OpenMP method 6 path had empty dataset name with double-slash paths</td>
+      <td style="padding: 6px 10px; text-align: center;"><span style="background:rgba(63,185,80,0.15); color:var(--accent-green); padding:2px 8px; border-radius:4px; font-weight:600; font-size:7.5pt;">KEPT</span></td>
+    </tr>
+
+    <tr style="border-bottom: 1px solid var(--border-secondary); background: var(--bg-primary);">
+      <td style="padding: 6px 10px; font-family: monospace; font-size: 7.5pt;"><code>0c6bc2e</code></td>
+      <td style="padding: 6px 10px;"><strong>Fix: missing paren in kernel decl</strong> &mdash; str_replace ate <code>(</code> after trim_once_node_local_set_kernel</td>
+      <td style="padding: 6px 10px; text-align: center;"><span style="background:rgba(210,153,34,0.15); color:var(--accent-yellow); padding:2px 8px; border-radius:4px; font-weight:600; font-size:7.5pt;">FIX</span></td>
+    </tr>
+
+    <tr style="border-bottom: 1px solid var(--border-secondary);">
+      <td style="padding: 6px 10px; font-family: monospace; font-size: 7.5pt;"><code>616181f..c022b2b</code></td>
+      <td style="padding: 6px 10px;"><strong>Fix double-comment cosmetic issue</strong></td>
+      <td style="padding: 6px 10px; text-align: center;"><span style="background:rgba(210,153,34,0.15); color:var(--accent-yellow); padding:2px 8px; border-radius:4px; font-weight:600; font-size:7.5pt;">FIX</span></td>
+    </tr>
+
+    <tr style="border-top: 2px solid var(--accent-red); background: rgba(248,81,73,0.06); font-weight: 500;">
+      <td style="padding: 6px 10px; font-family: monospace; font-size: 7.5pt;"><code>521e784</code></td>
+      <td style="padding: 6px 10px;"><strong>Raise short-circuit threshold 100K&rarr;300K</strong> &mdash; no improvement on method 2 sweep. GLOBAL_BFS didn't decrease</td>
+      <td style="padding: 6px 10px; text-align: center;"><span style="background:rgba(248,81,73,0.15); color:var(--accent-red); padding:2px 8px; border-radius:4px; font-weight:600; font-size:7.5pt;">REVERTED</span></td>
+    </tr>
+
+    <tr style="background: rgba(248,81,73,0.04);">
+      <td style="padding: 6px 10px; font-family: monospace; font-size: 7.5pt;"><code>d219353</code></td>
+      <td style="padding: 6px 10px;"><strong>Fused TRIM12 kernel</strong> &mdash; TRIM1+TRIM2 in one pass. <span style="color:var(--accent-red)">+182 wrong SCCs</span> on ljournal-2008 (race condition)</td>
+      <td style="padding: 6px 10px; text-align: center;"><span style="background:rgba(248,81,73,0.15); color:var(--accent-red); padding:2px 8px; border-radius:4px; font-weight:600; font-size:7.5pt;">BUGGY</span></td>
+    </tr>
+
+    <tr style="background: rgba(248,81,73,0.06);">
+      <td style="padding: 6px 10px; font-family: monospace; font-size: 7.5pt;"><code>5568294</code></td>
+      <td style="padding: 6px 10px;"><strong>Block-local SMEM queue BFS</strong> &mdash; 1024-entry shared memory frontier. Monotonic queue bug: tail fills up after ~30 levels</td>
+      <td style="padding: 6px 10px; text-align: center;"><span style="background:rgba(248,81,73,0.15); color:var(--accent-red); padding:2px 8px; border-radius:4px; font-weight:600; font-size:7.5pt;">REVERTED</span></td>
+    </tr>
+
+    <tr style="background: rgba(248,81,73,0.04);">
+      <td style="padding: 6px 10px; font-family: monospace; font-size: 7.5pt;"><code>949f7f8</code></td>
+      <td style="padding: 6px 10px;"><strong>Ping-pong double-buffered SMEM queues</strong> &mdash; 2&times;512 queues swap each level. <span style="color:var(--accent-red)">+20% overhead</span> (29ms&rarr;35ms)</td>
+      <td style="padding: 6px 10px; text-align: center;"><span style="background:rgba(248,81,73,0.15); color:var(--accent-red); padding:2px 8px; border-radius:4px; font-weight:600; font-size:7.5pt;">REVERTED</span></td>
+    </tr>
+
+    <tr style="background: rgba(248,81,73,0.04);">
+      <td style="padding: 6px 10px; font-family: monospace; font-size: 7.5pt;"><code>f538bbd..HEAD</code></td>
+      <td style="padding: 6px 10px;"><strong>Revert WCC max_iterations 5000&rarr;100</strong> &mdash; no effect on SCC count, 2&times; slower. Proved gap is not in WCC</td>
+      <td style="padding: 6px 10px; text-align: center;"><span style="background:rgba(248,81,73,0.15); color:var(--accent-red); padding:2px 8px; border-radius:4px; font-weight:600; font-size:7.5pt;">REVERTED</span></td>
+    </tr>
+
+  </tbody>
+</table>
+</div>
+
+
 <hr style="margin-top: 40px;">
 <div style="text-align: center; color: #999; font-size: 9pt; padding: 20px 0;">
   Generated July 2026 &mdash; DynamicGraphs SCC Optimization Report
