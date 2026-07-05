@@ -1095,4 +1095,125 @@ inline bool generate_scc_aware_insert_batches(
         edges, scc, num_sccs, output_prefix, target_pcts, initial_ratio, seed);
 }
 
+// ================================================================
+// SCC-Ratio Graph Generator
+//
+// Generates graphs where a target %% of nodes belong to small SCCs
+// (cycles of size 2-10), and the rest are singletons.
+// Total edges = target_edges (typically 10x nodes for sparse graphs).
+//
+// Structure:
+//   - SCC nodes distributed into cycles (strongly connected)
+//   - Singletons have self-loops (individual SCCs)
+//   - Cross edges: random connections between SCCs + singletons → SCCs
+//   - Remaining edge budget filled with random edges
+//
+// Naming: sccratio_<pct>pct_<nodes>_<edges>.txt
+// ================================================================
+
+inline bool stream_scc_ratio_to_file(
+    int num_nodes, float scc_ratio, long long num_edges,
+    int seed, const std::string& filename)
+{
+    if (num_nodes < 2) return false;
+    if (scc_ratio <= 0.0f) scc_ratio = 0.01f;
+    if (scc_ratio > 1.0f)  scc_ratio = 1.0f;
+
+    int scc_node_count = (int)(num_nodes * scc_ratio + 0.5f);
+    if (scc_node_count < 2)    scc_node_count = 2;
+    if (scc_node_count > num_nodes) scc_node_count = num_nodes;
+    int singleton_count = num_nodes - scc_node_count;
+
+    long long base_edges = (long long)num_nodes;  // one per node (cycle edges + self-loops)
+    long long extra = num_edges - base_edges;
+    if (extra < 0) extra = 0;
+
+    int total_sccs;
+
+    // -------------------------------------------------------
+    // 1. Distribute SCC nodes into SCCs of size 2-10
+    // -------------------------------------------------------
+    std::srand((unsigned int)seed);
+
+    std::vector<int> scc_sizes;
+    int remaining = scc_node_count;
+    while (remaining > 0) {
+        int max_sz = std::min(remaining, 10);
+        int min_sz = 2;
+        int sz = (remaining <= max_sz) ? remaining : (std::rand() % (max_sz - min_sz + 1)) + min_sz;
+        scc_sizes.push_back(sz);
+        remaining -= sz;
+    }
+
+    int num_scc_groups = (int)scc_sizes.size();
+    total_sccs = num_scc_groups + singleton_count;
+
+    // Build starts array (node offset for each SCC group)
+    std::vector<int> starts(num_scc_groups);
+    int current = 0;
+    for (int i = 0; i < num_scc_groups; i++) {
+        starts[i] = current;
+        current += scc_sizes[i];
+    }
+
+    // -------------------------------------------------------
+    // 2. Stream edges to file
+    // -------------------------------------------------------
+    std::ofstream out(filename);
+    if (!out.is_open()) return false;
+
+    // 2a. Intra-SCC edges: cycles for SCC groups, self-loops for singletons
+    for (int s = 0; s < num_scc_groups; s++) {
+        int sz = scc_sizes[s];
+        int base = starts[s];
+        for (int i = 0; i < sz; i++) {
+            int nxt = (i + 1) % sz;
+            out << (base + i + 1) << " " << (base + nxt + 1) << "\n";
+        }
+    }
+    for (int i = 0; i < singleton_count; i++) {
+        int node = scc_node_count + i;
+        out << (node + 1) << " " << (node + 1) << "\n";
+    }
+
+    // 2b. Add extra edges randomly
+    for (long long e = 0; e < extra; e++) {
+        int u, v;
+        if (singleton_count > 0 && (std::rand() % 10) < 3) {
+            // ~30%: singleton → random SCC node
+            u = scc_node_count + (std::rand() % singleton_count);
+            v = std::rand() % scc_node_count;
+        } else {
+            // Random edge between any two nodes
+            u = std::rand() % num_nodes;
+            v = std::rand() % num_nodes;
+        }
+        out << (u + 1) << " " << (v + 1) << "\n";
+    }
+
+    out.close();
+
+    std::cout << "Written " << filename
+              << " (" << num_edges << " edges, "
+              << num_nodes << " nodes, "
+              << (int)(scc_ratio * 100 + 0.5f) << "% SCC, "
+              << num_scc_groups << " groups, "
+              << singleton_count << " singletons, "
+              << total_sccs << " total SCCs)\n";
+    return true;
+}
+
+
+inline bool generate_scc_ratio_graph_to_file(
+    int num_nodes, float scc_ratio, long long num_edges, int seed = -1)
+{
+    if (seed == -1) seed = (int)std::time(nullptr);
+    int pct = (int)(scc_ratio * 100 + 0.5f);
+    std::string name = "sccratio_" + std::to_string(pct) + "pct_"
+                       + std::to_string(num_nodes) + "_"
+                       + std::to_string(num_edges) + ".txt";
+    return stream_scc_ratio_to_file(num_nodes, scc_ratio, num_edges, seed, name);
+}
+
+
 #endif 
