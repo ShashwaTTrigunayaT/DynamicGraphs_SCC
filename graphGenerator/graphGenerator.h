@@ -1176,19 +1176,37 @@ inline bool stream_scc_ratio_to_file(
         out << (node + 1) << " " << (node + 1) << "\n";
     }
 
-    // 2b. Add extra edges randomly
-    for (long long e = 0; e < extra; e++) {
-        int u, v;
-        if (singleton_count > 0 && (std::rand() % 10) < 3) {
-            // ~30%: singleton → random SCC node
-            u = scc_node_count + (std::rand() % singleton_count);
-            v = std::rand() % scc_node_count;
-        } else {
-            // Random edge between any two nodes
-            u = std::rand() % num_nodes;
-            v = std::rand() % num_nodes;
+    // 2b. Add extra edges — NEVER cross-SCC (would merge SCCs)
+    // Only: singleton→SCC (one direction) or intra-SCC shortcuts
+    if (singleton_count > 0 && scc_node_count > 0) {
+        long long max_singleton_edges = (long long)singleton_count * scc_node_count;
+        long long singleton_extra = (extra < max_singleton_edges) ? extra : max_singleton_edges;
+        for (long long e = 0; e < singleton_extra; e++) {
+            int u = scc_node_count + (std::rand() % singleton_count);
+            int v = std::rand() % scc_node_count;
+            out << (u + 1) << " " << (v + 1) << "\n";
         }
-        out << (u + 1) << " " << (v + 1) << "\n";
+        // If still need more edges, add intra-SCC shortcuts
+        for (long long e = singleton_extra; e < extra; e++) {
+            int sg = std::rand() % num_scc_groups;
+            int base = starts[sg];
+            int sz = scc_sizes[sg];
+            int u = base + (std::rand() % sz);
+            int v = base + (std::rand() % sz);
+            if (u == v) v = (v + 1) % sz;
+            out << (u + 1) << " " << (v + 1) << "\n";
+        }
+    } else {
+        // No singletons — all extra edges are intra-SCC shortcuts
+        for (long long e = 0; e < extra; e++) {
+            int sg = std::rand() % num_scc_groups;
+            int base = starts[sg];
+            int sz = scc_sizes[sg];
+            int u = base + (std::rand() % sz);
+            int v = base + (std::rand() % sz);
+            if (u == v) v = (v + 1) % sz;
+            out << (u + 1) << " " << (v + 1) << "\n";
+        }
     }
 
     out.close();
