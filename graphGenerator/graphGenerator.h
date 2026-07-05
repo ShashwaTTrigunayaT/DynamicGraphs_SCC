@@ -1341,102 +1341,100 @@ inline bool stream_scc_ratio_to_file(
         
         // Build node ranges per layer
         std::vector<int> layer_start(sat_layers);
+        std::vector<int> layer_total_sz(sat_layers);
         int cur = 0;
         for (int i = 0; i < sat_layers; i++) {
             layer_start[i] = cur;
-            cur += layer_cycle_nodes[i] + layer_singletons[i];
+            layer_total_sz[i] = layer_cycle_nodes[i] + layer_singletons[i];
+            cur += layer_total_sz[i];
         }
         
-        // Compute forward edge budget
-        long long forward_edges = num_nodes;  // 1 forward edge per node (to next layer)
-        // But we need at least 1 extra edge per node for forward connections
-        // The base edges (intra-SCC) are already num_nodes
-        // So extra - num_nodes is what's available for forward + intra shortcuts
-        long long extra_for_forward = extra - (long long)num_nodes;
-        if (extra_for_forward < 0) extra_for_forward = 0;
-        long long forward_per_node = extra_for_forward / num_nodes;
-        if (forward_per_node < 1) forward_per_node = 1;  // At least 1 forward edge per node
-        long long remaining_extra = extra - forward_per_node * num_nodes;
-        if (remaining_extra < 0) remaining_extra = 0;
+        // Track edges written to hit exact num_edges
+        long long edges_written = 0;
         
-        // Write edges
+        // Build per-layer cycle list for intra-cycle shortcuts later
+        // Each entry: [layer, start_pos_in_layer, size]
+        struct LayerCycle { int layer; int start_in_layer; int sz; };
+        std::vector<LayerCycle> layer_cycles;
+        
+        // Write edges layer by layer
         for (int l = 0; l < sat_layers; l++) {
             int base = layer_start[l];
             int cyc_start = base;
             int cyc_sz = layer_cycle_nodes[l];
             int sing_start = base + cyc_sz;
             int sing_sz = layer_singletons[l];
+            bool has_next = (l + 1 < sat_layers);
+            int next_base = has_next ? layer_start[l + 1] : 0;
+            int next_sz = has_next ? layer_total_sz[l + 1] : 0;
             
-            // Distribute cycle nodes into small cycles within this layer
-            if (cyc_sz > 0) {
-                // We need to split cyc_sz nodes into C_l cycles (size 2-10)
-                // Preserving total cycle count proportionally
+            // Distribute cycle nodes into small cycles (size 2-10)
+            if (cyc_sz >= 2) {
                 int C_l = (int)((long long)num_scc_groups * cyc_sz / scc_node_count + 0.5f);
-                if (C_l < 1 && cyc_sz >= 2) C_l = 1;
+                if (C_l < 1) C_l = 1;
+                if (cyc_sz < C_l * 2) C_l = cyc_sz / 2;
+                if (C_l < 1) C_l = 1;
                 
-                if (C_l > 0 && cyc_sz >= C_l * 2) {
-                    std::vector<int> layer_scc_sizes(C_l, 2);
-                    int rem = cyc_sz - C_l * 2;
-                    for (int i = 0; i < rem; i++)
-                        layer_scc_sizes[std::rand() % C_l]++;
-                    
-                    int pos = 0;
-                    for (int csz : layer_scc_sizes) {
+                std::vector<int> layer_scc_sizes(C_l, 2);
+                int rem = cyc_sz - C_l * 2;
+                for (int i = 0; i < rem; i++)
+                    layer_scc_sizes[std::rand() % C_l]++;
+                
+                int pos = 0;
+                for (int csz : layer_scc_sizes) {
+                    // Intra-cycle edges
+                    for (int i = 0; i < csz; i++) {
+                        int nxt = (i + 1) % csz;
+                        out << (cyc_start + pos + i + 1) << " " << (cyc_start + pos + nxt + 1) << "\n";
+                        edges_written++;
+                    }
+                    // 1 forward edge per node to next layer
+                    if (has_next) {
                         for (int i = 0; i < csz; i++) {
-                            int nxt = (i + 1) % csz;
-                            out << (cyc_start + pos + i + 1) << " " << (cyc_start + pos + nxt + 1) << "\n";
-                        }
-                        // Forward edges to next layer
-                        if (l + 1 < sat_layers) {
-                            int next_base = layer_start[l + 1];
-                            int next_sz = layer_cycle_nodes[l + 1] + layer_singletons[l + 1];
-                            for (int i = 0; i < csz; i++) {
-                                for (long long f = 0; f < forward_per_node; f++) {
-                                    int target = next_base + (std::rand() % next_sz);
-                                    out << (cyc_start + pos + i + 1) << " " << (target + 1) << "\n";
-                                }
-                            }
-                        }
-                        pos += csz;
-                    }
-                } else {
-                    // Not enough nodes for cycles, treat as singletons
-                    for (int i = 0; i < cyc_sz; i++) {
-                        out << (cyc_start + i + 1) << " " << (cyc_start + i + 1) << "\n";
-                        if (l + 1 < sat_layers) {
-                            int next_base = layer_start[l + 1];
-                            int next_sz = layer_cycle_nodes[l + 1] + layer_singletons[l + 1];
-                            for (long long f = 0; f < forward_per_node; f++) {
-                                int target = next_base + (std::rand() % next_sz);
-                                out << (cyc_start + i + 1) << " " << (target + 1) << "\n";
-                            }
+                            int target = next_base + (std::rand() % next_sz);
+                            out << (cyc_start + pos + i + 1) << " " << (target + 1) << "\n";
+                            edges_written++;
                         }
                     }
+                    // Record for later intra-cycle shortcuts
+                    layer_cycles.push_back({l, pos, csz});
+                    pos += csz;
+                }
+            } else if (cyc_sz == 1) {
+                // Single cycle node -> self-loop
+                out << (cyc_start + 1) << " " << (cyc_start + 1) << "\n";
+                edges_written++;
+                if (has_next) {
+                    int target = next_base + (std::rand() % next_sz);
+                    out << (cyc_start + 1) << " " << (target + 1) << "\n";
+                    edges_written++;
                 }
             }
             
-            // Write singleton self-loops + forward edges
+            // Singleton self-loops + 1 forward edge each
             for (int i = 0; i < sing_sz; i++) {
                 out << (sing_start + i + 1) << " " << (sing_start + i + 1) << "\n";
-                if (l + 1 < sat_layers) {
-                    int next_base = layer_start[l + 1];
-                    int next_sz = layer_cycle_nodes[l + 1] + layer_singletons[l + 1];
-                    for (long long f = 0; f < forward_per_node; f++) {
-                        int target = next_base + (std::rand() % next_sz);
-                        out << (sing_start + i + 1) << " " << (target + 1) << "\n";
-                    }
+                edges_written++;
+                if (has_next) {
+                    int target = next_base + (std::rand() % next_sz);
+                    out << (sing_start + i + 1) << " " << (target + 1) << "\n";
+                    edges_written++;
                 }
             }
         }
         
-        // Remaining extra edges as intra-cycle shortcuts
-        for (long long e = 0; e < remaining_extra; e++) {
-            int sg = std::rand() % num_scc_groups;
-            int base = starts[sg];
-            int sz = scc_sizes[sg];
-            int u = base + (std::rand() % sz);
-            int v = base + (std::rand() % sz);
-            if (u == v) v = (v + 1) % sz;
+        // Fill remaining edge budget as intra-cycle shortcuts (correct per-layer cycles)
+        long long remaining = num_edges - edges_written;
+        int num_layer_cycles = (int)layer_cycles.size();
+        for (long long e = 0; e < remaining && num_layer_cycles > 0; e++) {
+            int idx = std::rand() % num_layer_cycles;
+            int l = layer_cycles[idx].layer;
+            int pos = layer_cycles[idx].start_in_layer;
+            int csz = layer_cycles[idx].sz;
+            int base = layer_start[l];
+            int u = base + pos + (std::rand() % csz);
+            int v = base + pos + (std::rand() % csz);
+            if (u == v) v = base + pos + ((v - base - pos + 1) % csz);
             out << (u + 1) << " " << (v + 1) << "\n";
         }
         
