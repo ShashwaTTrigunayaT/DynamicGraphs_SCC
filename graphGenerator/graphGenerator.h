@@ -1215,7 +1215,8 @@ inline bool generate_scc_aware_insert_batches(
 
 inline bool stream_scc_ratio_to_file(
     int num_nodes, float scc_ratio, long long num_edges,
-    int seed, const std::string& filename)
+    int seed, const std::string& filename,
+    int num_levels = 0)
 {
     if (num_nodes < 2) return false;
     if (scc_ratio <= 0.0f) scc_ratio = 0.01f;
@@ -1322,6 +1323,135 @@ inline bool stream_scc_ratio_to_file(
     std::ofstream out(filename);
     if (!out.is_open()) return false;
 
+    // ============================================================
+    // LAYERED SCC-RATIO: chain SCCs into layers for deeper BFS levels
+    // Same exact SCC count, just structured sequentially
+    // ============================================================
+    if (num_levels > 1 && num_nodes >= num_levels) {
+        int sat_layers = num_levels - 1;
+        if (sat_layers < 1) sat_layers = 1;
+        
+        // Distribute cycle nodes and singletons across layers proportionally
+        std::vector<int> layer_cycle_nodes(sat_layers, scc_node_count / sat_layers);
+        std::vector<int> layer_singletons(sat_layers, singleton_count / sat_layers);
+        int rem_cycle = scc_node_count % sat_layers;
+        int rem_single = singleton_count % sat_layers;
+        for (int i = 0; i < rem_cycle; i++) layer_cycle_nodes[i]++;
+        for (int i = 0; i < rem_single; i++) layer_singletons[i]++;
+        
+        // Build node ranges per layer
+        std::vector<int> layer_start(sat_layers);
+        int cur = 0;
+        for (int i = 0; i < sat_layers; i++) {
+            layer_start[i] = cur;
+            cur += layer_cycle_nodes[i] + layer_singletons[i];
+        }
+        
+        // Compute forward edge budget
+        long long forward_edges = num_nodes;  // 1 forward edge per node (to next layer)
+        // But we need at least 1 extra edge per node for forward connections
+        // The base edges (intra-SCC) are already num_nodes
+        // So extra - num_nodes is what's available for forward + intra shortcuts
+        long long extra_for_forward = extra - (long long)num_nodes;
+        if (extra_for_forward < 0) extra_for_forward = 0;
+        long long forward_per_node = extra_for_forward / num_nodes;
+        if (forward_per_node < 1) forward_per_node = 1;  // At least 1 forward edge per node
+        long long remaining_extra = extra - forward_per_node * num_nodes;
+        if (remaining_extra < 0) remaining_extra = 0;
+        
+        // Write edges
+        for (int l = 0; l < sat_layers; l++) {
+            int base = layer_start[l];
+            int cyc_start = base;
+            int cyc_sz = layer_cycle_nodes[l];
+            int sing_start = base + cyc_sz;
+            int sing_sz = layer_singletons[l];
+            
+            // Distribute cycle nodes into small cycles within this layer
+            if (cyc_sz > 0) {
+                // We need to split cyc_sz nodes into C_l cycles (size 2-10)
+                // Preserving total cycle count proportionally
+                int C_l = (int)((long long)num_scc_groups * cyc_sz / scc_node_count + 0.5f);
+                if (C_l < 1 && cyc_sz >= 2) C_l = 1;
+                
+                if (C_l > 0 && cyc_sz >= C_l * 2) {
+                    std::vector<int> layer_scc_sizes(C_l, 2);
+                    int rem = cyc_sz - C_l * 2;
+                    for (int i = 0; i < rem; i++)
+                        layer_scc_sizes[std::rand() % C_l]++;
+                    
+                    int pos = 0;
+                    for (int csz : layer_scc_sizes) {
+                        for (int i = 0; i < csz; i++) {
+                            int nxt = (i + 1) % csz;
+                            out << (cyc_start + pos + i + 1) << " " << (cyc_start + pos + nxt + 1) << "\n";
+                        }
+                        // Forward edges to next layer
+                        if (l + 1 < sat_layers) {
+                            int next_base = layer_start[l + 1];
+                            int next_sz = layer_cycle_nodes[l + 1] + layer_singletons[l + 1];
+                            for (int i = 0; i < csz; i++) {
+                                for (long long f = 0; f < forward_per_node; f++) {
+                                    int target = next_base + (std::rand() % next_sz);
+                                    out << (cyc_start + pos + i + 1) << " " << (target + 1) << "\n";
+                                }
+                            }
+                        }
+                        pos += csz;
+                    }
+                } else {
+                    // Not enough nodes for cycles, treat as singletons
+                    for (int i = 0; i < cyc_sz; i++) {
+                        out << (cyc_start + i + 1) << " " << (cyc_start + i + 1) << "\n";
+                        if (l + 1 < sat_layers) {
+                            int next_base = layer_start[l + 1];
+                            int next_sz = layer_cycle_nodes[l + 1] + layer_singletons[l + 1];
+                            for (long long f = 0; f < forward_per_node; f++) {
+                                int target = next_base + (std::rand() % next_sz);
+                                out << (cyc_start + i + 1) << " " << (target + 1) << "\n";
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // Write singleton self-loops + forward edges
+            for (int i = 0; i < sing_sz; i++) {
+                out << (sing_start + i + 1) << " " << (sing_start + i + 1) << "\n";
+                if (l + 1 < sat_layers) {
+                    int next_base = layer_start[l + 1];
+                    int next_sz = layer_cycle_nodes[l + 1] + layer_singletons[l + 1];
+                    for (long long f = 0; f < forward_per_node; f++) {
+                        int target = next_base + (std::rand() % next_sz);
+                        out << (sing_start + i + 1) << " " << (target + 1) << "\n";
+                    }
+                }
+            }
+        }
+        
+        // Remaining extra edges as intra-cycle shortcuts
+        for (long long e = 0; e < remaining_extra; e++) {
+            int sg = std::rand() % num_scc_groups;
+            int base = starts[sg];
+            int sz = scc_sizes[sg];
+            int u = base + (std::rand() % sz);
+            int v = base + (std::rand() % sz);
+            if (u == v) v = (v + 1) % sz;
+            out << (u + 1) << " " << (v + 1) << "\n";
+        }
+        
+        out.close();
+        std::cout << "Written " << filename
+                  << " (" << num_edges << " edges, "
+                  << num_nodes << " nodes, "
+                  << total_sccs << " total SCCs (target " << (int)(scc_ratio * 100 + 0.5f) << "%), "
+                  << num_scc_groups << " cycles, "
+                  << singleton_count << " singletons, "
+                  << num_levels << " levels)\n";
+        return true;
+    }
+
+    // ===== Original flat structure (num_levels = 0) =====
     // 3a. Intra-SCC edges: cycles for SCC groups, self-loops for singletons
     for (int s = 0; s < num_scc_groups; s++) {
         int sz = scc_sizes[s];
@@ -1379,14 +1509,16 @@ inline bool stream_scc_ratio_to_file(
 
 
 inline bool generate_scc_ratio_graph_to_file(
-    int num_nodes, float scc_ratio, long long num_edges, int seed = -1)
+    int num_nodes, float scc_ratio, long long num_edges, int seed = -1,
+    int num_levels = 0)
 {
     if (seed == -1) seed = (int)std::time(nullptr);
     int pct = (int)(scc_ratio * 100 + 0.5f);
+    std::string levels_suffix = (num_levels > 1) ? "_" + std::to_string(num_levels) + "lvl" : "";
     std::string name = "sccratio_" + std::to_string(pct) + "pct_"
                        + std::to_string(num_nodes) + "_"
-                       + std::to_string(num_edges) + ".txt";
-    return stream_scc_ratio_to_file(num_nodes, scc_ratio, num_edges, seed, name);
+                       + std::to_string(num_edges) + levels_suffix + ".txt";
+    return stream_scc_ratio_to_file(num_nodes, scc_ratio, num_edges, seed, name, num_levels);
 }
 
 
