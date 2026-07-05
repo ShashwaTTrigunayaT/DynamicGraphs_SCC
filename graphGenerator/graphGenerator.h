@@ -1098,15 +1098,15 @@ inline bool generate_scc_aware_insert_batches(
 // ================================================================
 // SCC-Ratio Graph Generator
 //
-// Generates graphs where a target %% of nodes belong to small SCCs
-// (cycles of size 2-10), and the rest are singletons.
-// Total edges = target_edges (typically 10x nodes for sparse graphs).
+// Generates graphs where total_SCC_count / total_nodes = scc_ratio.
+// Example: 1M nodes, ratio=0.30 → 300K total SCCs.
 //
 // Structure:
-//   - SCC nodes distributed into cycles (strongly connected)
-//   - Singletons have self-loops (individual SCCs)
-//   - Cross edges: random connections between SCCs + singletons → SCCs
-//   - Remaining edge budget filled with random edges
+//   - Total SCCs = target = num_nodes * scc_ratio
+//   - Singletons (size-1 SCCs) + cycles (size 2-10 SCCs)
+//   - Allocates cycles so that total SCC count hits the target
+//   - Extra edges: only singleton→SCC (one direction) or intra-SCC shortcuts
+//   - No cross-SCC edges (would merge SCCs)
 //
 // Naming: sccratio_<pct>pct_<nodes>_<edges>.txt
 // ================================================================
@@ -1119,36 +1119,94 @@ inline bool stream_scc_ratio_to_file(
     if (scc_ratio <= 0.0f) scc_ratio = 0.01f;
     if (scc_ratio > 1.0f)  scc_ratio = 1.0f;
 
-    int scc_node_count = (int)(num_nodes * scc_ratio + 0.5f);
-    if (scc_node_count < 2)    scc_node_count = 2;
-    if (scc_node_count > num_nodes) scc_node_count = num_nodes;
-    int singleton_count = num_nodes - scc_node_count;
+    long long target_sccs = (long long)(num_nodes * scc_ratio + 0.5f);
+    if (target_sccs < 2) target_sccs = 2;
+    if (target_sccs > num_nodes) target_sccs = num_nodes;
 
-    long long base_edges = (long long)num_nodes;  // one per node (cycle edges + self-loops)
+    long long base_edges = (long long)num_nodes;
     long long extra = num_edges - base_edges;
     if (extra < 0) extra = 0;
 
-    int total_sccs;
-
-    // -------------------------------------------------------
-    // 1. Distribute SCC nodes into SCCs of size 2-10
-    // -------------------------------------------------------
     std::srand((unsigned int)seed);
 
-    std::vector<int> scc_sizes;
-    int remaining = scc_node_count;
-    while (remaining > 0) {
-        int max_sz = std::min(remaining, 10);
-        int min_sz = 2;
-        int sz = (remaining <= max_sz) ? remaining : (std::rand() % (max_sz - min_sz + 1)) + min_sz;
-        scc_sizes.push_back(sz);
-        remaining -= sz;
+    // -------------------------------------------------------
+    // 1. Compute: need C cycles + S singletons such that:
+    //    C + S = target_sccs  (total SCC count)
+    //    nodes_in_cycles + S = num_nodes
+    //    nodes_in_cycles ≈ C * avg_cycle_size
+    //
+    //    S = (target_sccs * avg_sz - num_nodes) / (avg_sz - 1)
+    //    C = target_sccs - S
+    //    where avg_sz is iteratively adjusted to hit exact target
+    // -------------------------------------------------------
+    int avg_sz = 6;  // target average cycle size
+    int S = 0, C = 0, scc_node_count = 0, singleton_count = 0;
+
+    // Try avg_sz from 5 to 7 to find best fit
+    for (int trial_avg = 5; trial_avg <= 7; trial_avg++) {
+        // S = (target * avg - N) / (avg - 1)
+        long long num = target_sccs * trial_avg - num_nodes;
+        long long den = trial_avg - 1;
+        if (num < 0 || den <= 0) continue;
+        S = (int)(num / den + 0.5f);
+        if (S < 0) S = 0;
+        if (S > target_sccs) S = (int)target_sccs;
+        C = (int)(target_sccs - S);
+        if (C < 1) { C = 1; S = (int)(target_sccs - 1); }
+        
+        // Nodes in cycles = num_nodes - S
+        scc_node_count = num_nodes - S;
+        singleton_count = S;
+        
+        // Check if cycle nodes can be reasonably split into C cycles
+        // Min cycle size = 2, so need scc_node_count >= C * 2
+        // Max cycle size = 10, so need scc_node_count <= C * 10
+        if (scc_node_count >= C * 2 && scc_node_count <= C * 10)
+            break;  // Found good fit
     }
 
-    int num_scc_groups = (int)scc_sizes.size();
-    total_sccs = num_scc_groups + singleton_count;
+    // Safety clamp
+    if (scc_node_count < C * 2) {
+        // Need more cycle nodes or fewer cycles
+        // Reduce cycles, increase singletons
+        C = scc_node_count / 2;
+        if (C < 1) C = 1;
+        S = (int)(target_sccs - C);
+        if (S < 0) S = 0;
+        singleton_count = S;
+    }
+    if (singleton_count < 0) singleton_count = 0;
+    if (scc_node_count + singleton_count != num_nodes) {
+        // Adjust singleton count to match
+        singleton_count = num_nodes - scc_node_count;
+        if (singleton_count < 0) {
+            singleton_count = 0;
+            scc_node_count = num_nodes;
+        }
+    }
 
-    // Build starts array (node offset for each SCC group)
+    // -------------------------------------------------------
+    // 2. Distribute scc_node_count into C cycles (size 2-10)
+    // -------------------------------------------------------
+    std::vector<int> scc_sizes;
+    // First, give each cycle 2 nodes
+    for (int i = 0; i < C; i++) scc_sizes.push_back(2);
+    int remaining_nodes = scc_node_count - C * 2;
+    // Distribute remaining nodes randomly to cycles (max size 10)
+    while (remaining_nodes > 0) {
+        int idx = std::rand() % C;
+        if (scc_sizes[idx] < 10) {
+            scc_sizes[idx]++;
+            remaining_nodes--;
+        }
+    }
+    // Shuffle to avoid bias
+    std::random_shuffle(scc_sizes.begin(), scc_sizes.end());
+
+    int num_scc_groups = C;
+    int total_sccs = num_scc_groups + singleton_count;
+
+    // Build starts array
     std::vector<int> starts(num_scc_groups);
     int current = 0;
     for (int i = 0; i < num_scc_groups; i++) {
@@ -1157,12 +1215,12 @@ inline bool stream_scc_ratio_to_file(
     }
 
     // -------------------------------------------------------
-    // 2. Stream edges to file
+    // 3. Stream edges to file
     // -------------------------------------------------------
     std::ofstream out(filename);
     if (!out.is_open()) return false;
 
-    // 2a. Intra-SCC edges: cycles for SCC groups, self-loops for singletons
+    // 3a. Intra-SCC edges: cycles for SCC groups, self-loops for singletons
     for (int s = 0; s < num_scc_groups; s++) {
         int sz = scc_sizes[s];
         int base = starts[s];
@@ -1176,8 +1234,7 @@ inline bool stream_scc_ratio_to_file(
         out << (node + 1) << " " << (node + 1) << "\n";
     }
 
-    // 2b. Add extra edges — NEVER cross-SCC (would merge SCCs)
-    // Only: singleton→SCC (one direction) or intra-SCC shortcuts
+    // 3b. Add extra edges — NEVER cross-SCC (would merge SCCs)
     if (singleton_count > 0 && scc_node_count > 0) {
         long long max_singleton_edges = (long long)singleton_count * scc_node_count;
         long long singleton_extra = (extra < max_singleton_edges) ? extra : max_singleton_edges;
@@ -1186,7 +1243,6 @@ inline bool stream_scc_ratio_to_file(
             int v = std::rand() % scc_node_count;
             out << (u + 1) << " " << (v + 1) << "\n";
         }
-        // If still need more edges, add intra-SCC shortcuts
         for (long long e = singleton_extra; e < extra; e++) {
             int sg = std::rand() % num_scc_groups;
             int base = starts[sg];
@@ -1197,7 +1253,6 @@ inline bool stream_scc_ratio_to_file(
             out << (u + 1) << " " << (v + 1) << "\n";
         }
     } else {
-        // No singletons — all extra edges are intra-SCC shortcuts
         for (long long e = 0; e < extra; e++) {
             int sg = std::rand() % num_scc_groups;
             int base = starts[sg];
@@ -1214,10 +1269,9 @@ inline bool stream_scc_ratio_to_file(
     std::cout << "Written " << filename
               << " (" << num_edges << " edges, "
               << num_nodes << " nodes, "
-              << (int)(scc_ratio * 100 + 0.5f) << "% SCC, "
-              << num_scc_groups << " groups, "
-              << singleton_count << " singletons, "
-              << total_sccs << " total SCCs)\n";
+              << total_sccs << " total SCCs (target " << (int)(scc_ratio * 100 + 0.5f) << "%), "
+              << num_scc_groups << " cycles, "
+              << singleton_count << " singletons)\n";
     return true;
 }
 
