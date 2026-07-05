@@ -1148,7 +1148,7 @@ inline bool stream_scc_ratio_to_file(
         long long num = target_sccs * trial_avg - num_nodes;
         long long den = trial_avg - 1;
         if (num < 0 || den <= 0) continue;
-        S = (int)(num / den + 0.5f);
+        S = (int)((float)num / den + 0.5f);
         if (S < 0) S = 0;
         if (S > target_sccs) S = (int)target_sccs;
         C = (int)(target_sccs - S);
