@@ -32,7 +32,7 @@ void initialize_WCC() {
     G_WCC = new node_t[G_num_nodes];
     wcc_sets = new NODE_SET*[G_num_nodes];
     assert(wcc_sets != NULL);
-    init_node_set_pool(500000);
+    init_node_set_pool(1000000);
 
     #pragma omp parallel for
     for (node_t t4 = 0; t4 < G_num_nodes; t4 ++) 
