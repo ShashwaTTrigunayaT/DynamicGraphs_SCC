@@ -558,6 +558,10 @@ inline bool stream_lcc_to_file(
 
     std::srand((unsigned int)seed);
 
+    // Open output file early — both layered and flat paths need it
+    std::ofstream out(filename);
+    if (!out.is_open()) return false;
+
     
     // ================================================================
     // LAYERED STRUCTURE: chain satellites in layers for deeper BFS levels
@@ -692,9 +696,6 @@ inline bool stream_lcc_to_file(
     }
     int num_sat_sccs = (int)sat_scc_sizes.size();
     
-    std::ofstream out(filename);
-    if (!out.is_open()) return false;
-
     // Metadata headers removed - pure edge list for compatibility with algorithm file readers
     int num_singletons = 0;
     int num_small_sccs = 0;
