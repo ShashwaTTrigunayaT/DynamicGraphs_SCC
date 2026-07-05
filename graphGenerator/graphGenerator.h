@@ -536,7 +536,8 @@ inline auto generate_diameter_graph(
 inline bool stream_lcc_to_file(
     int num_nodes, int lcc_size, long long num_edges,
     int seed, const std::string& filename,
-    int explicit_singletons = -1)
+    int explicit_singletons = -1,
+    int num_levels = 0)
 {
     if (lcc_size < 1) lcc_size = 1;
     if (lcc_size > num_nodes) lcc_size = num_nodes;
@@ -558,6 +559,104 @@ inline bool stream_lcc_to_file(
     std::srand((unsigned int)seed);
 
     
+    // ================================================================
+    // LAYERED STRUCTURE: chain satellites in layers for deeper BFS levels
+    // ================================================================
+    if (num_levels > 1 && satellite_count >= num_levels) {
+        
+        // LCC ring (nodes 0..lcc_size-1)
+        for (int i = 0; i < lcc_size; i++) {
+            int nxt = (i + 1) % lcc_size;
+            out << (i + 1) << " " << (nxt + 1) << "\n";
+        }
+
+        
+        int sat_layers = num_levels - 1;
+        if (sat_layers < 1) sat_layers = 1;
+
+        
+        std::vector<int> layer_sizes(sat_layers, satellite_count / sat_layers);
+        int rem = satellite_count % sat_layers;
+        for (int i = 0; i < rem; i++) layer_sizes[i]++;
+
+        
+        std::vector<int> layer_start(sat_layers);
+        int cur = lcc_size;
+        for (int i = 0; i < sat_layers; i++) {
+            layer_start[i] = cur;
+            cur += layer_sizes[i];
+        }
+
+        
+        long long forward_edges = satellite_count;   // 1 forward edge per satellite node
+        long long intra_giant = extra - forward_edges;
+        if (intra_giant < 0) intra_giant = 0;
+
+        
+        for (int l = 0; l < sat_layers; l++) {
+            int base = layer_start[l];
+            int sz = layer_sizes[l];
+
+            
+            std::vector<int> scc_sizes;
+            int remain = sz;
+            while (remain > 0) {
+                int max_sz = std::min(remain, 5);
+                int min_sz = 2;
+                int csz = (remain <= max_sz) ? remain :
+                           (std::rand() % (max_sz - min_sz + 1)) + min_sz;
+                scc_sizes.push_back(csz);
+                remain -= csz;
+            }
+
+            int pos = 0;
+            for (int csz : scc_sizes) {
+                
+                if (csz > 1) {
+                    for (int i = 0; i < csz; i++) {
+                        int nxt = (i + 1) % csz;
+                        out << (base + pos + i + 1) << " " << (base + pos + nxt + 1) << "\n";
+                    }
+                } else {
+                    out << (base + pos + 1) << " " << (base + pos + 1) << "\n";
+                }
+
+                
+                for (int i = 0; i < csz; i++) {
+                    int target;
+                    if (l + 1 < sat_layers) {
+                        int next_base = layer_start[l + 1];
+                        int next_sz = layer_sizes[l + 1];
+                        target = next_base + (std::rand() % next_sz);
+                    } else {
+                        target = std::rand() % lcc_size;
+                    }
+                    out << (base + pos + i + 1) << " " << (target + 1) << "\n";
+                }
+                pos += csz;
+            }
+        }
+
+        
+        for (long long e = 0; e < intra_giant; e++) {
+            int u = std::rand() % lcc_size;
+            int v = std::rand() % lcc_size;
+            if (u == v) v = (v + 1) % lcc_size;
+            out << (u + 1) << " " << (v + 1) << "\n";
+        }
+
+        out.close();
+        int total_sccs = 1 + satellite_count;  // 1 LCC + each sat is own SCC
+        std::cout << "Written " << filename
+                  << " (" << num_edges << " edges, "
+                  << num_nodes << " nodes, LCC=" << lcc_size
+                  << ", " << sat_layers << " satellite layers, "
+                  << num_levels << " target BFS levels)\n";
+        return true;
+    }
+
+    
+    // ===== Original flat structure (num_levels = 0) =====
     std::vector<long long> node_budget(satellite_count, per_sat);
     for (int i = 0; i < rem_sat; i++) node_budget[i]++;
     
@@ -665,7 +764,8 @@ inline bool stream_lcc_to_file(
 
 inline bool generate_lcc_graph_to_file(
     int num_nodes, int lcc_percent, long long num_edges, int seed = -1,
-    int singleton_percent = 0)
+    int singleton_percent = 0,
+    int num_levels = 0)
 {
     if (num_nodes < 2) num_nodes = 2;
     if (lcc_percent < 1) lcc_percent = 1;
@@ -682,17 +782,18 @@ inline bool generate_lcc_graph_to_file(
     if (seed == -1) seed = (int)std::time(nullptr);
 
     
+    std::string levels_suffix = (num_levels > 1) ? "_" + std::to_string(num_levels) + "lvl" : "";
     std::string name = "lcc_" + std::to_string(lcc_percent) + "pct_"
                        + std::to_string(num_nodes) + "_"
-                       + std::to_string(num_edges) + ".txt";
+                       + std::to_string(num_edges) + levels_suffix + ".txt";
     if (singleton_percent > 0) {
         name = "lcc_" + std::to_string(lcc_percent) + "pct_"
                + std::to_string(singleton_percent) + "single_"
                + std::to_string(num_nodes) + "_"
-               + std::to_string(num_edges) + ".txt";
+               + std::to_string(num_edges) + levels_suffix + ".txt";
     }
     int es = (singleton_percent > 0) ? singleton_count : -1;
-    bool ok = stream_lcc_to_file(num_nodes, lcc_size, num_edges, seed, name, es);
+    bool ok = stream_lcc_to_file(num_nodes, lcc_size, num_edges, seed, name, es, num_levels);
     return ok;
 }
 
